@@ -2,6 +2,11 @@
 
 This is a local, single-account Douyin search-index verification tool. Read README.md before changing it.
 
+The optional cloud PoC is documented in CLOUD_POC.md. The user authorized an
+external-device login followed by a direct encrypted session transfer to their
+own EC2. This explicit exception does not authorize credential uploads to chat,
+MCP arguments, GitHub, logs, arbitrary destinations, or files.
+
 ## Layout and validation
 
 - `client.py`: fixed HTTPS request, response decoding, strict daily-series parsing.
@@ -10,6 +15,9 @@ This is a local, single-account Douyin search-index verification tool. Read READ
 - `ui-batch.html`: local control panel. The official webview has no Python API bridge.
 - `launcher.py`, `start.command`, `build.command`: macOS launcher and packaging.
 - `test_*.py`: synthetic offline fixtures; never require credentials or live network.
+- `cloud_probe.py`: browser-free, stdin-only, one-word/seven-day/one-request EC2 probe.
+- `login_transfer.py`: human login on another computer; verified SSH stdin transfer.
+- `bootstrap_cloud.sh`: project-local Python/core dependency setup, no sudo/services.
 
 Use Python 3.12. In an environment without a desktop:
 
@@ -26,7 +34,7 @@ Install `requirements.txt` for the desktop app. Real GUI/login behavior has been
 - Search index is `search_hot_list[].index`; composite index is a separate metric. Never label either as actual search counts.
 - Current scope: 1–5 unique keywords, exactly 7 inclusive days, nationwide, aweme. Latest available day must come from the official page.
 - Keep TLS validation, the fixed endpoint, no redirects, no automatic retries, and the per-launch single online attempt. Change these only as part of an explicit scope change with an explained design.
-- Keep credentials in memory. Do not write, print, commit, upload, or pass real cookies to tests. Clear and close the HTTP session after use.
+- Keep credentials in memory. Do not write, print, commit, upload, or pass real cookies to tests, except for the direct encrypted transfer to the user's verified EC2 endpoint described above. Clear and close the HTTP session after use. The cloud PoC does not persist sessions, refresh login, run a daemon, or validate offline-device operation; those require a separate implementation and validation.
 - Missing data must remain missing, never become zero. Reject duplicate/unexpected keys and dates. Only complete results may be cached.
 - A verification pass requires independent official-page observations for every keyword/date. Never copy API values into page observations to claim a match.
 - Live login/CAPTCHA steps require the user where appropriate. Do not request extra live data just to run routine tests.

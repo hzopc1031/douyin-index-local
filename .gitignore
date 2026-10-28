@@ -1,4 +1,6 @@
 .venv/
+.venv-login/
+.runtime/
 __pycache__/
 results/
 *.log
@@ -18,6 +20,8 @@ dist-stage/
 cookies*.json
 session*.json
 storage-state*.json
+playwright-report/
+test-results/
 /outputs/
 # Historical single-word UI; preserved locally in versions/v1/.
 /ui.html
