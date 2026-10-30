@@ -98,9 +98,9 @@ function renderQr(data){
  clearTimeout(qrTimer);qrTimer=null;
  const active=['starting','qr_ready'].includes(data.state),fallback=['verification_required','failed'].includes(data.state);
  $('#qrState').innerHTML=esc(data.state==='succeeded'&&data.session?.has_session?'已登录 · 会话已在内存中，'+Math.floor((data.session.age_seconds||0)/60)+' 分钟前获得。请在“采集任务”恢复采集。':fallback?'需要安全验证，请改用远程桌面登录':data.message||'尚未开始扫码登录');
- $('#qrCountdown').innerHTML=esc(active?'剩余 '+data.expires_in+' 秒':'');$('#qrDesktop').hidden=!fallback;$('#qrStart').hidden=!['idle','succeeded'].includes(data.state);$('#qrRefresh').hidden=active||['idle','succeeded'].includes(data.state);$('#qrCancel').hidden=!active;
+ $('#qrCountdown').innerHTML=esc(active?'剩余 '+data.expires_in+' 秒':'');$('#qrDesktop').hidden=!fallback;$('#qrStart').hidden=!['idle','succeeded'].includes(data.state);$('#qrStart').textContent=data.state==='succeeded'?'重新扫码':'开始扫码';$('#qrRefresh').hidden=active||['idle','succeeded'].includes(data.state);$('#qrCancel').hidden=!active;
  const image=$('#qrImage');image.onerror=()=>{image.hidden=true;$('#qrPlaceholder').hidden=false};
- if(data.state==='qr_ready'&&data.qr_version){const src='/api/v1/login/qr/image?v='+encodeURIComponent(data.qr_version);if(image.getAttribute('src')!==src){image.hidden=false;$('#qrPlaceholder').hidden=true;image.src=src}}else{image.hidden=true;image.removeAttribute('src');$('#qrPlaceholder').hidden=false}
+ if(data.state==='qr_ready'&&data.qr_version){const src='/api/v1/login/qr/image?v='+encodeURIComponent(data.qr_version);if(image.getAttribute('src')!==src){image.hidden=false;$('#qrPlaceholder').hidden=true;image.src=src}}else{image.hidden=true;image.removeAttribute('src');$('#qrPlaceholder').hidden=!active}
  if(active)qrTimer=setTimeout(loadQr,1500);
 }
 async function loadQr(){if(qrLoading||!qrEnabled)return;qrLoading=true;try{renderQr(await api('login/qr'))}catch(e){$('#qrState').innerHTML=esc(e.message);clearTimeout(qrTimer)}finally{qrLoading=false}}
