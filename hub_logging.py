@@ -13,6 +13,8 @@ KEY_NAMES = ('cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstok
 def redact(text) -> str:
     """Redact credential assignments and long opaque strings in diagnostics."""
     text = str(text)
+    # Authorization values are short enough to escape the long-string rule.
+    text = re.sub(r"(?i)\b(Basic|Bearer|Digest|Token)\s+[^\s,;\"']+", r'\1 ***', text)
     # Cookie headers contain several assignments; redact the whole header first.
     text = re.sub(
         r"(?i)(?<![\w.-])([\w.-]*cookie[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\r\n\"'}]*",
@@ -72,7 +74,12 @@ def configure_logging(component: str, root: Path):
         path, maxBytes=_env_int('INDEX_HUB_LOG_MAX_BYTES', 5 * 1024 * 1024),
         backupCount=_env_int('INDEX_HUB_LOG_BACKUPS', 5), encoding='utf-8')
     formatter = RedactingFormatter('%(asctime)s %(levelname)s %(name)s %(message)s')
-    for handler in (file_handler, logging.StreamHandler()):
+    handlers = [file_handler]
+    # Start scripts append stderr to *.stdout.log; copying every record there
+    # would duplicate the rotated file without a size limit. Opt in only.
+    if os.environ.get('INDEX_HUB_LOG_STDERR') == '1':
+        handlers.append(logging.StreamHandler())
+    for handler in handlers:
         handler._index_hub_component = component
         handler.addFilter(RedactingFilter())
         handler.setFormatter(formatter)

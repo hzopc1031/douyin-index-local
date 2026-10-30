@@ -56,7 +56,8 @@ class LoggingTests(unittest.TestCase):
                 self.assertEqual(logger.handlers, handlers)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o640)
                 added = [h for h in handlers if h not in original_handlers]
-                self.assertEqual(len(added), 2)
+                # File logging only: no unrotated stderr copy unless explicitly enabled.
+                self.assertEqual(len(added), 1)
                 file_handler = next(h for h in added if isinstance(h, RotatingFileHandler))
                 self.assertEqual((file_handler.maxBytes, file_handler.backupCount), (256, 2))
                 # Exercise only the added handlers, leaving the test runner's logging alone.
@@ -74,3 +75,30 @@ class LoggingTests(unittest.TestCase):
                         logger.removeHandler(handler)
                         handler.close()
                 logger.setLevel(original_level)
+
+
+class StderrAndAuthorizationTests(unittest.TestCase):
+    def test_stderr_copy_is_opt_in(self):
+        logger = logging.getLogger()
+        original = logger.handlers[:]
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+                'INDEX_HUB_LOG_DIR': str(Path(temp) / 'logs'), 'INDEX_HUB_LOG_STDERR': '1'}):
+            try:
+                configure_logging('stderr-fixture', Path(temp))
+                added = [h for h in logger.handlers if h not in original]
+                self.assertEqual(len(added), 2)
+                self.assertEqual(sum(not isinstance(h, RotatingFileHandler) for h in added), 1)
+            finally:
+                for handler in logger.handlers[:]:
+                    if handler not in original:
+                        logger.removeHandler(handler)
+                        handler.close()
+
+    def test_authorization_values(self):
+        from hub_logging import redact
+        for sample, secret in (('Authorization: Basic YWRtaW46cGFzcw==', 'YWRtaW46cGFzcw'),
+                               ('Bearer dk_abcdefgh12345', 'dk_abcdefgh12345'),
+                               ("{'authorization': 'Bearer idx_short'}", 'idx_short')):
+            with self.subTest(sample=sample):
+                self.assertNotIn(secret, redact(sample))
+
