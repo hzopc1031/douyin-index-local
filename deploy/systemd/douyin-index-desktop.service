@@ -1,0 +1,24 @@
+[Unit]
+Description=Douyin index cloud desktop
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=work-tencent-manager
+Group=work-tencent-manager
+WorkingDirectory=/srv/work-ecs-projects/douyin-index-local
+ExecStart=/usr/bin/dbus-run-session -- /bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-desktop.sh
+Restart=on-failure
+SuccessExitStatus=143
+RestartSec=10
+Environment=INDEX_HUB_LOG_DIR=/srv/work-ecs-projects/douyin-index-local/logs
+UMask=0077
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/work-ecs-projects/douyin-index-local
+LimitCORE=0
+TasksMax=1024
+KillMode=control-group
+[Install]
+WantedBy=multi-user.target
