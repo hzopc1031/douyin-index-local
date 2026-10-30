@@ -99,7 +99,7 @@ HTTP 接口可用不等于登录有效；`browser_ready` 只代表页面预检�
 - 平台要求重新登录、验证、拒绝访问或限频时暂停；人工处理后在网页恢复。
 - 不自动重试上游失败。服务重启将未完成任务标为中断，不自动重放。
 - 无无人值守扫码、验证码绕过或自动刷新登录承诺。浏览器重启需要重新扫码。
-- Cookie 仅在腾讯浏览器及该进程的单次请求客户端内存里；API 返回经过筛选的业务数据。
+- 交接后的 Cookie 仅在 `app.py` 进程及其单次请求客户端内存里；扫码临时 profile 的边界见下文。API 返回经过筛选的业务数据。
 
 ## 持久化与部署
 
@@ -158,4 +158,6 @@ worker 保护状态码：
 | GET `/api/v1/login/qr/image` | PNG，`Cache-Control: no-store`；尚无二维码时 `404 qr_not_ready` |
 | POST `/api/v1/login/qr/cancel` | 取消本轮扫码 |
 
-全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug`、`qr_no_display` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。Cookie 只存于进程内存；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
+全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug`、`qr_no_display` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。交接后的会话只在 `app.py` 进程内存中；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
+
+交接后的会话只在 `app.py` 进程内存中，不写状态文件和日志。扫码期间 Chromium 使用 Playwright 在 `/tmp`（单元的 `PrivateTmp`）下创建的临时 profile，Cookie 会短暂写入其中（无系统钥匙串时近似明文）；浏览器正常关闭时目录被删除，若进程被强杀则残留在 PrivateTmp 中直到单元停止。Chromium 沙箱由 Playwright 默认关闭（`--no-sandbox`），代码显式设置 `chromium_sandbox=False`；开启需另做 AppArmor/userns 配置。
