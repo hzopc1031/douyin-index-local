@@ -32,6 +32,21 @@ def login_mode():
     return 'desktop'
 
 
+_browser_mode_warned = False
+
+
+def qr_browser_mode():
+    global _browser_mode_warned
+    value = os.environ.get('INDEX_HUB_QR_BROWSER', 'headed')
+    if value in ('headed', 'headless'):
+        return value
+    with _mode_lock:
+        if not _browser_mode_warned:
+            logging.getLogger('index_hub.qr_login').warning('Invalid INDEX_HUB_QR_BROWSER; using headed')
+            _browser_mode_warned = True
+    return 'headed'
+
+
 def _timeout(value):
     try:
         result = float(value)
@@ -62,6 +77,10 @@ class QrBusy(ValueError):
 
 class QrUnsafeDebug(ValueError):
     code = 'qr_unsafe_debug'
+
+
+class QrNoDisplay(ValueError):
+    code = 'qr_no_display'
 
 
 def narrow_cookies(browser_cookies, host, now=None, *, allow_insecure=False):
@@ -145,7 +164,8 @@ class SessionHolder:
         with self._lock:
             return dict(has_session=bool(self._cookies),
                         age_seconds=max(0, int(self._clock() - self.obtained_at))
-                        if self._cookies else None)
+                        if self._cookies else None,
+                        headless_ua=bool(self._cookies) and 'HeadlessChrome' in self._user_agent)
 
     def take_session(self):
         with self._lock:
@@ -220,7 +240,7 @@ def _playwright():
 class QrLoginManager:
     def __init__(self, browser_factory=None, *, allowed_origin='https://creator.douyin.com',
                  login_url=LOGIN_URL, cookie_url=client.TREND_URL,
-                 clock=time.monotonic, timeout=None, allow_insecure=False):
+                 clock=time.monotonic, timeout=None, allow_insecure=False, browser_mode=None):
         self._origin = urlsplit(allowed_origin)
         if (self._origin.hostname is None or self._origin.username or self._origin.password
                 or self._origin.path not in ('', '/') or self._origin.query or self._origin.fragment
@@ -235,6 +255,9 @@ class QrLoginManager:
         self._clock = clock
         self._timeout = _timeout(timeout if timeout is not None else os.environ.get('INDEX_HUB_QR_TIMEOUT', QR_TIMEOUT_SECONDS))
         self._allow_insecure = allow_insecure
+        self._browser_mode = qr_browser_mode() if browser_mode is None else browser_mode
+        if self._browser_mode not in ('headed', 'headless'):
+            raise ValueError('浏览器模式无效')
         self._lock = threading.Lock()
         self._session = None
         self._browser = None
@@ -250,6 +273,8 @@ class QrLoginManager:
         with self._lock:
             if 'DEBUG' in os.environ or 'PWDEBUG' in os.environ:
                 raise QrUnsafeDebug('请先关闭浏览器调试环境变量')
+            if self._browser_mode == 'headed' and not os.environ.get('DISPLAY'):
+                raise QrNoDisplay('有头扫码需要桌面显示环境（DISPLAY）')
             if self._session and (self._session.snapshot()['state'] in ('starting', 'qr_ready')
                                   or self._session.thread.is_alive()):
                 raise QrBusy('扫码登录正在进行')
@@ -269,8 +294,9 @@ class QrLoginManager:
 
     def status(self):
         with self._lock:
-            return self._session.snapshot() if self._session else dict(
+            snapshot = self._session.snapshot() if self._session else dict(
                 state='idle', qr_version=0, expires_in=0, message=_MESSAGES['idle'])
+            return {**snapshot, 'browser_mode': self._browser_mode}
 
     def qr_png(self):
         with self._lock:
@@ -289,7 +315,7 @@ class QrLoginManager:
             with self._factory() as playwright:
                 try:
                     args = ['--no-sandbox'] if hasattr(os, 'geteuid') and os.geteuid() == 0 else []
-                    browser = playwright.chromium.launch(headless=True, args=args)
+                    browser = playwright.chromium.launch(headless=(self._browser_mode == 'headless'), args=args)
                     self._browser = self._last_browser = browser
                     context = browser.new_context(accept_downloads=False, locale='zh-CN')
                     page = context.new_page()
@@ -319,6 +345,11 @@ class QrLoginManager:
                             try:
                                 if any(item['name'] in SELECTORS['session_cookies'] for item in narrowed):
                                     user_agent = page.evaluate('navigator.userAgent')
+                                    if 'HeadlessChrome' in user_agent:
+                                        if self._browser_mode == 'headed':
+                                            logger.warning('浏览器标识含 HeadlessChrome，已拒绝会话')
+                                            break
+                                        logger.warning('无头浏览器标识，风控风险较高')
                                     with self._lock:
                                         if session.cancelled.is_set():
                                             final = 'cancelled'

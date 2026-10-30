@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import requests
 
-from qr_login import QrBusy, QrLoginManager, QrUnsafeDebug, SessionHolder, narrow_cookies
+from qr_login import QrBusy, QrLoginManager, QrUnsafeDebug, QrNoDisplay, SessionHolder, narrow_cookies
 
 SECRET = 'SYNTHETIC_SESSION'
 HOST = 'creator.douyin.com'
@@ -25,6 +25,70 @@ def cookie(**changes):
 
 
 class UnitTests(unittest.TestCase):
+    def test_browser_mode_config(self):
+        import qr_login
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(qr_login.qr_browser_mode(), 'headed')
+            self.assertEqual(QrLoginManager().status()['browser_mode'], 'headed')
+            with self.assertRaises(ValueError):
+                QrLoginManager(browser_mode='bogus')
+            for mode in ('headed', 'headless'):
+                os.environ['INDEX_HUB_QR_BROWSER'] = mode
+                self.assertEqual(qr_login.qr_browser_mode(), mode)
+                self.assertEqual(QrLoginManager().status()['browser_mode'], mode)
+            os.environ['INDEX_HUB_QR_BROWSER'] = 'invalid'
+            with patch.object(qr_login, '_browser_mode_warned', False), self.assertLogs('index_hub.qr_login') as logs:
+                self.assertEqual(qr_login.qr_browser_mode(), 'headed')
+                self.assertEqual(qr_login.qr_browser_mode(), 'headed')
+            self.assertEqual(len(logs.output), 1)
+
+    def test_no_display(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(QrNoDisplay) as caught:
+                QrLoginManager(browser_mode='headed').start()
+            self.assertEqual(caught.exception.code, 'qr_no_display')
+            self.assertEqual(str(caught.exception), '有头扫码需要桌面显示环境（DISPLAY）')
+
+    def test_launch_and_real_ua(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        for mode in ('headed', 'headless'):
+            for ua in ('Synthetic Chrome', 'Synthetic HeadlessChrome'):
+                with self.subTest(mode=mode, ua=ua):
+                    browser, context, page = Mock(), Mock(), Mock()
+                    browser.new_context.return_value = context
+                    context.new_page.return_value = page
+                    page.url = 'https://' + HOST + '/home'
+                    page.locator.return_value.inner_text.return_value = 'Home'
+                    page.locator.return_value.count.return_value = 0
+                    page.evaluate.return_value = ua
+                    context.cookies.return_value = [cookie()]
+                    launch = Mock(return_value=browser)
+                    factory = Mock()
+                    factory.return_value.__enter__ = Mock(return_value=SimpleNamespace(chromium=SimpleNamespace(launch=launch)))
+                    factory.return_value.__exit__ = Mock(return_value=False)
+                    manager = QrLoginManager(browser_factory=factory, browser_mode=mode)
+                    with patch.dict(os.environ, {'DISPLAY': ':107'}, clear=True), patch('qr_login.logger.warning') as warning:
+                        session = manager.start()
+                        session.thread.join(2)
+                    self.assertFalse(session.thread.is_alive())
+                    self.assertEqual(launch.call_args.kwargs['headless'], mode == 'headless')
+                    self.assertNotIn('user_agent', browser.new_context.call_args.kwargs)
+                    page.evaluate.assert_called_once_with('navigator.userAgent')
+                    rejected = mode == 'headed' and 'HeadlessChrome' in ua
+                    self.assertEqual(manager.status()['state'], 'failed' if rejected else 'succeeded')
+                    self.assertEqual(manager.holder.has_session(), not rejected)
+                    self.assertEqual(manager.holder.info()['headless_ua'], mode == 'headless' and 'HeadlessChrome' in ua)
+                    if 'HeadlessChrome' in ua:
+                        warning.assert_called_once_with('浏览器标识含 HeadlessChrome，已拒绝会话' if rejected else '无头浏览器标识，风控风险较高')
+                    if not rejected:
+                        http, actual_ua = manager.holder.take_session()
+                        self.assertEqual(actual_ua, ua)
+                        http.cookies.clear()
+                        http.close()
+                    manager.holder.clear()
+                    self.assertFalse(manager.holder.info()['headless_ua'])
+
     def test_cookie_validation(self):
         for changes in (dict(domain='evil.example'), dict(partitionKey='x'),
                         dict(value='x' * 4097), dict(name='bad;name'),
@@ -44,7 +108,7 @@ class UnitTests(unittest.TestCase):
         holder = SessionHolder(lambda: clock[0])
         holder.put(narrow_cookies([cookie()], HOST), 'Synthetic UA')
         clock[0] = 14.9
-        self.assertEqual(holder.info(), dict(has_session=True, age_seconds=4))
+        self.assertEqual(holder.info(), dict(has_session=True, age_seconds=4, headless_ua=False))
         self.assertNotIn(SECRET, repr(holder) + str(holder) + str(holder.info()))
         session, ua = holder.take_session()
         try:
@@ -58,7 +122,7 @@ class UnitTests(unittest.TestCase):
             session.close()
         holder.clear()
         self.assertFalse(holder.has_session())
-        self.assertEqual(holder.info(), dict(has_session=False, age_seconds=None))
+        self.assertEqual(holder.info(), dict(has_session=False, age_seconds=None, headless_ua=False))
 
     def test_debug_rejected(self):
         for name in ('DEBUG', 'PWDEBUG'):
@@ -71,7 +135,7 @@ class UnitTests(unittest.TestCase):
             entered.set()
             release.wait(2)
             session._set('cancelled')
-        manager = QrLoginManager()
+        manager = QrLoginManager(browser_mode='headless')
         manager.holder.put([cookie()], 'Synthetic UA')
         with patch.object(manager, '_run', run), patch.dict(os.environ, {}, clear=True):
             session = manager.start()
@@ -89,7 +153,7 @@ class UnitTests(unittest.TestCase):
     def test_failure_preserves_holder_and_sanitizes_logs(self):
         def fail():
             raise RuntimeError(SECRET)
-        manager = QrLoginManager(browser_factory=fail)
+        manager = QrLoginManager(browser_factory=fail, browser_mode='headless')
         manager.holder.put([cookie()], 'Synthetic UA')
         with patch.dict(os.environ, {}, clear=True), self.assertLogs('index_hub.qr_login', level='WARNING') as logs:
             session = manager.start()
@@ -123,7 +187,7 @@ class UnitTests(unittest.TestCase):
                 return SimpleNamespace(chromium=SimpleNamespace(launch=lambda **kw: browser))
             def __exit__(self, *args):
                 pass
-        manager = QrLoginManager(browser_factory=Factory, clock=lambda: clock[0], timeout=20)
+        manager = QrLoginManager(browser_factory=Factory, browser_mode='headless', clock=lambda: clock[0], timeout=20)
         manager.holder.put([cookie()], 'Synthetic UA')
         with patch.dict(os.environ, {}, clear=True):
             session = manager.start()
@@ -227,7 +291,7 @@ class BrowserTests(unittest.TestCase):
         self.manager = QrLoginManager(allowed_origin=self.origin,
                                       login_url=self.origin + '/creator-micro/login',
                                       cookie_url=self.origin + '/creator-micro/home',
-                                      allow_insecure=True, timeout=20)
+                                      allow_insecure=True, timeout=20, browser_mode='headless')
         self.output = io.StringIO()
         self.handler = logging.StreamHandler(self.output)
         self.log = logging.getLogger('index_hub.qr_login')
@@ -292,6 +356,31 @@ class BrowserTests(unittest.TestCase):
             session.cookies.clear()
             session.close()
         self.assertNotIn(SECRET, str(self.manager.status()) + str(self.manager.holder_info()))
+
+    def test_headed_real_ua(self):
+        if not os.environ.get('DISPLAY'):
+            self.skipTest('DISPLAY unavailable')
+        self.manager.cancel()
+        self.session.thread.join(4)
+        self.manager = QrLoginManager(allowed_origin=self.origin,
+                                     login_url=self.origin + '/creator-micro/login',
+                                     cookie_url=self.origin + '/creator-micro/home',
+                                     allow_insecure=True, timeout=20, browser_mode='headed')
+        with patch.dict(os.environ):
+            os.environ.pop('DEBUG', None)
+            os.environ.pop('PWDEBUG', None)
+            self.session = self.manager.start()
+        self.state_is('qr_ready')
+        self.set_state('success')
+        self.state_is('succeeded')
+        self.session.thread.join(2)
+        http, ua = self.manager.holder.take_session()
+        try:
+            self.assertNotIn('HeadlessChrome', ua)
+            self.assertFalse(self.manager.holder.info()['headless_ua'])
+        finally:
+            http.cookies.clear()
+            http.close()
 
     def test_expired(self):
         self.state_is('qr_ready')
