@@ -328,7 +328,9 @@ def mount(app, hub):
         if not result.get('ok'):
             code = result.get('code', 'browser_unavailable')
             status = 404 if code == 'qr_not_ready' else 409 if code in ('qr_busy', 'qr_disabled', 'qr_unsafe_debug') else 503
-            return reply(result, status)
+            messages = {'qr_busy': '扫码登录正在进行，请先取消或等待结束。', 'qr_disabled': '未启用扫码登录。',
+                        'qr_unsafe_debug': '浏览器调试环境变量已开启，已拒绝启动。', 'qr_not_ready': '二维码尚未就绪。'}
+            return reply({'error': {'code': code, 'message': messages.get(code, '浏览器未就绪，请检查远程桌面。')}}, status)
         if action == 'image':
             return web.Response(body=base64.b64decode(result['png_base64'], validate=True),
                                 content_type='image/png', headers={'Cache-Control': 'no-store'})

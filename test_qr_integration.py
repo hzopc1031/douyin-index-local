@@ -1,4 +1,5 @@
 """Synthetic QR wiring tests: no browser, network or credential persistence."""
+import json
 import base64
 import os
 import sys
@@ -179,7 +180,11 @@ class DirectRouteTests(unittest.IsolatedAsyncioTestCase):
             await call('POST', '/api/v1/login/qr/cancel')
             for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('browser_unavailable',503)]:
                 bridge.return_value = {'ok': False, 'code': code}
-                self.assertEqual((await call('GET', '/api/v1/login/qr/image')).status, status)
+                response = await call('GET', '/api/v1/login/qr/image')
+                self.assertEqual(response.status, status)
+                error = json.loads(response.text)['error']
+                self.assertEqual(error['code'], code)
+                self.assertTrue(error['message'])
             bridge.side_effect = OSError()
             with self.assertRaises(HubError) as caught:
                 await call('GET', '/api/v1/login/qr')
