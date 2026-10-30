@@ -2,6 +2,7 @@
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from http.cookiejar import DefaultCookiePolicy
@@ -10,7 +11,6 @@ from urllib.parse import urlsplit
 import requests
 
 import client
-from hub_store import exc_summary
 
 LOGIN_URL = client.PAGE_URL
 POLL_INTERVAL = 1
@@ -83,44 +83,65 @@ class QrNoDisplay(ValueError):
     code = 'qr_no_display'
 
 
-def narrow_cookies(browser_cookies, host, now=None, *, allow_insecure=False):
+class CookieRejected(ValueError):
+    pass
+
+
+def narrow_cookies(browser_cookies, host, now=None, *, allow_insecure=False, stats=None):
     """Adapted from commit 022d6ee login_transfer.make_payload / cloud_probe.validate_payload.
 
     Only creator.douyin.com may inherit douyin.com cookies. The insecure
     loopback exception exists solely for synthetic browser tests.
     """
+    counts = dict(partitioned_skipped=0, expired_skipped=0, duplicates_resolved=0, accepted=0)
+    if isinstance(stats, dict):
+        stats.update(counts)
+        counts = stats
     if not isinstance(browser_cookies, list) or len(browser_cookies) > 200:
-        raise ValueError('Cookie 数量无效')
+        raise CookieRejected('Cookie 数量无效')
     now = time.time() if now is None else now
     accepted = {host}
     if host == 'creator.douyin.com':
         accepted.add('douyin.com')
-    result, seen = [], set()
+    result, seen = [], {}
     for item in browser_cookies:
-        if not isinstance(item, dict) or 'partitionKey' in item:
-            raise ValueError('不支持分区 Cookie')
+        if not isinstance(item, dict):
+            raise CookieRejected('Cookie 格式无效')
+        if 'partitionKey' in item:
+            counts['partitioned_skipped'] += 1
+            continue
         domain = item.get('domain', '')
         if not isinstance(domain, str) or domain.lstrip('.').lower() not in accepted:
-            raise ValueError('Cookie 域无效')
+            raise CookieRejected('Cookie 域无效')
         name, value, path = item.get('name'), item.get('value'), item.get('path')
         if (not isinstance(name, str) or not name or any(c in name for c in '=;\r\n\x00')
                 or not isinstance(value, str) or len(value) > 4096
                 or any(c in value for c in '\r\n\x00')
                 or not isinstance(path, str) or not path.startswith('/')
                 or any(c in path for c in '\r\n\x00')):
-            raise ValueError('Cookie 格式无效')
+            raise CookieRejected('Cookie 格式无效')
         expires = item.get('expires', -1)
         if isinstance(expires, bool) or not isinstance(expires, (int, float)) or not math.isfinite(expires):
-            raise ValueError('Cookie 有效期无效')
+            raise CookieRejected('Cookie 有效期无效')
         if expires != -1 and expires <= now:
+            counts['expired_skipped'] += 1
             continue
         key = (name, path)
+        normalized_domain = domain.lower()
+        rank = 2 if normalized_domain == host else 1 if normalized_domain == '.' + host else 0
         if key in seen:
-            raise ValueError('重复 Cookie')
-        seen.add(key)
-        result.append(dict(name=name, value=value, domain=host, path=path,
+            counts['duplicates_resolved'] += 1
+            position, previous_rank = seen[key]
+            if rank <= previous_rank:
+                continue
+        else:
+            position = len(result)
+            result.append(None)
+        seen[key] = (position, rank)
+        result[position] = dict(name=name, value=value, domain=host, path=path,
                            secure=not (allow_insecure and host == '127.0.0.1'
-                                       and item.get('secure') is False), expires=expires))
+                                       and item.get('secure') is False), expires=expires)
+        counts['accepted'] = len(result)
     return result
 
 
@@ -311,17 +332,23 @@ class QrLoginManager:
         context = browser = None
         cookies = []
         final = 'failed'
+        stage = 'launch'
+        stats = dict(partitioned_skipped=0, expired_skipped=0, duplicates_resolved=0, accepted=0)
         try:
             with self._factory() as playwright:
                 try:
-                    args = ['--no-sandbox'] if hasattr(os, 'geteuid') and os.geteuid() == 0 else []
-                    browser = playwright.chromium.launch(headless=(self._browser_mode == 'headless'), args=args)
+                    # Playwright 默认即不开 Chromium 沙箱（会加 --no-sandbox），这里显式写出以免误解；
+                    # 开启需另做 AppArmor/userns 配置。
+                    browser = playwright.chromium.launch(
+                        headless=(self._browser_mode == 'headless'), chromium_sandbox=False)
                     self._browser = self._last_browser = browser
                     context = browser.new_context(accept_downloads=False, locale='zh-CN')
                     page = context.new_page()
                     page.set_default_timeout(1000)
+                    stage = 'goto'
                     page.goto(self._login_url, timeout=min(30000, self._timeout * 1000))
                     while True:
+                        stage = 'poll'
                         if session.cancelled.is_set():
                             final = 'cancelled'
                             break
@@ -339,11 +366,13 @@ class QrLoginManager:
                         if (self._allowed(page.url) and 'login' not in urlsplit(page.url).path.lower()
                                 and not (page.locator(SELECTORS['logged_in']).count()
                                          and SELECTORS['login_text'] in text)):
+                            stage = 'cookies'
                             cookies = context.cookies([self._cookie_url])
                             narrowed = narrow_cookies(cookies, self._origin.hostname,
-                                                      allow_insecure=self._allow_insecure)
+                                                      allow_insecure=self._allow_insecure, stats=stats)
                             try:
                                 if any(item['name'] in SELECTORS['session_cookies'] for item in narrowed):
+                                    stage = 'ua'
                                     user_agent = page.evaluate('navigator.userAgent')
                                     if 'HeadlessChrome' in user_agent:
                                         if self._browser_mode == 'headed':
@@ -361,6 +390,7 @@ class QrLoginManager:
                                 for item in narrowed:
                                     item['value'] = ''
                                 narrowed.clear()
+                        stage = 'poll'
                         images = page.locator(SELECTORS['qr_image'])
                         for i in range(images.count()):
                             element = images.nth(i)
@@ -370,6 +400,9 @@ class QrLoginManager:
                                 break
                         session.cancelled.wait(POLL_INTERVAL)
                 finally:
+                    # Preserve the failing operation's stage during cleanup.
+                    if sys.exc_info()[0] is None:
+                        stage = 'close'
                     try:
                         if context is not None:
                             context.close()
@@ -377,16 +410,20 @@ class QrLoginManager:
                         if browser is not None:
                             browser.close()
         except Exception as exc:
-            # Playwright exceptions may embed URLs, page text and credentials.
-            # Summarize only a sanitized surrogate, never the original message.
-            logger.warning('QR login %s %s', type(exc).__name__,
-                           exc_summary(RuntimeError('浏览器操作失败')))
+            # Never log raw browser exceptions: they may contain credentials.
+            reason = str(exc) if isinstance(exc, (CookieRejected, QrNoDisplay)) else '-'
+            logger.warning('QR login failed stage=%s error=%s reason=%s',
+                           stage, type(exc).__name__, reason)
             final = 'failed'
         finally:
             self._browser = None
             for item in cookies:
-                item['value'] = ''
+                if isinstance(item, dict):
+                    item['value'] = ''
             cookies.clear()
             if session.cancelled.is_set():
                 final = 'cancelled'
             session._set(final)
+            logger.info('QR login finished state=%s stage=%s cookies=%d partitioned_skipped=%d duplicates_resolved=%d',
+                        final, stage, stats['accepted'], stats['partitioned_skipped'],
+                        stats['duplicates_resolved'])

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import requests
 
-from qr_login import QrBusy, QrLoginManager, QrUnsafeDebug, QrNoDisplay, SessionHolder, narrow_cookies
+from qr_login import CookieRejected, QrLoginSession, QrBusy, QrLoginManager, QrUnsafeDebug, QrNoDisplay, SessionHolder, narrow_cookies
 
 SECRET = 'SYNTHETIC_SESSION'
 HOST = 'creator.douyin.com'
@@ -72,7 +72,7 @@ class UnitTests(unittest.TestCase):
                         session = manager.start()
                         session.thread.join(2)
                     self.assertFalse(session.thread.is_alive())
-                    self.assertEqual(launch.call_args.kwargs['headless'], mode == 'headless')
+                    self.assertEqual(launch.call_args.kwargs, dict(headless=mode == 'headless', chromium_sandbox=False))
                     self.assertNotIn('user_agent', browser.new_context.call_args.kwargs)
                     page.evaluate.assert_called_once_with('navigator.userAgent')
                     rejected = mode == 'headed' and 'HeadlessChrome' in ua
@@ -90,18 +90,73 @@ class UnitTests(unittest.TestCase):
                     self.assertFalse(manager.holder.info()['headless_ua'])
 
     def test_cookie_validation(self):
-        for changes in (dict(domain='evil.example'), dict(partitionKey='x'),
+        for changes in (dict(domain='evil.example'),
                         dict(value='x' * 4097), dict(name='bad;name'),
                         dict(value='bad\nvalue'), dict(path='bad'),
                         dict(expires=True), dict(expires=float('nan'))):
-            with self.subTest(changes=tuple(changes)), self.assertRaises(ValueError):
+            with self.subTest(changes=tuple(changes)), self.assertRaises(CookieRejected) as caught:
                 narrow_cookies([cookie(**changes)], HOST)
-        with self.assertRaises(ValueError):
-            narrow_cookies([cookie(), cookie()], HOST)
+            self.assertNotIn(SECRET, str(caught.exception))
+        self.assertEqual(len(narrow_cookies([cookie(), cookie()], HOST)), 1)
+        with self.assertRaisesRegex(CookieRejected, '^Cookie 格式无效$'):
+            narrow_cookies([None], HOST)
         self.assertEqual(narrow_cookies([cookie(expires=1)], HOST, now=2), [])
         narrowed = narrow_cookies([cookie(domain='.douyin.com', secure=False)], HOST)
         self.assertEqual(narrowed[0]['domain'], HOST)
         self.assertTrue(narrowed[0]['secure'])
+
+    def test_cookie_specificity_stats_and_order(self):
+        for domains in ((HOST, '.douyin.com'), ('.douyin.com', HOST),
+                        ('.' + HOST, HOST), ('.douyin.com', '.' + HOST)):
+            with self.subTest(domains=domains):
+                stats = {}
+                best = HOST if HOST in domains else '.' + HOST
+                items = [cookie(domain=d, value='winner' if d == best else 'discarded')
+                         for d in domains]
+                result = narrow_cookies([items[0], cookie(name='other'), items[1],
+                                         cookie(partitionKey='synthetic'), cookie(expires=1)],
+                                        HOST, now=2, stats=stats)
+                self.assertEqual([c['name'] for c in result], ['sessionid', 'other'])
+                self.assertEqual(result[0]['value'], 'winner')
+                self.assertNotIn('discarded', str(result))
+                self.assertEqual(stats, dict(partitioned_skipped=1, expired_skipped=1,
+                                            duplicates_resolved=1, accepted=2))
+        self.assertEqual(narrow_cookies([cookie(value='first'), cookie(value='second')], HOST)[0]['value'], 'first')
+
+    def test_run_diagnostic_logs(self):
+        from unittest.mock import MagicMock
+        for fail_goto in (True, False):
+            with self.subTest(fail_goto=fail_goto):
+                factory = MagicMock()
+                browser = factory.return_value.__enter__.return_value.chromium.launch.return_value
+                context = browser.new_context.return_value
+                page = context.new_page.return_value
+                page.url = 'https://' + HOST + '/home'
+                page.locator.return_value.inner_text.return_value = 'Home'
+                page.locator.return_value.count.return_value = 0
+                page.evaluate.return_value = 'Synthetic Chrome'
+                context.cookies.return_value = [cookie(partitionKey='x'), cookie()]
+                if fail_goto:
+                    page.goto.side_effect = RuntimeError(SECRET)
+                manager = QrLoginManager(browser_factory=factory, browser_mode='headless')
+                session = QrLoginSession()
+                with self.assertLogs('index_hub.qr_login', level='INFO') as logs:
+                    manager._run(session)
+                output = '\n'.join(logs.output)
+                self.assertNotIn(SECRET, output)
+                if fail_goto:
+                    self.assertIn('QR login failed stage=goto error=RuntimeError reason=-', output)
+                else:
+                    self.assertEqual(session.snapshot()['state'], 'succeeded')
+                finished = [line.split('QR login finished ')[1] for line in logs.output
+                            if 'QR login finished ' in line]
+                self.assertEqual(finished, [
+                    'state=failed stage=goto cookies=0 partitioned_skipped=0 duplicates_resolved=0'
+                    if fail_goto else
+                    'state=succeeded stage=close cookies=1 partitioned_skipped=1 duplicates_resolved=0'])
+                context.close.assert_called_once()
+                browser.close.assert_called_once()
+                manager.holder.clear()
 
     def test_holder_scope_and_metadata(self):
         clock = [10]
@@ -284,7 +339,7 @@ class BrowserTests(unittest.TestCase):
         from playwright.sync_api import sync_playwright
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.launch(headless=True, args=['--no-sandbox'] if os.geteuid() == 0 else [])
+                browser = pw.chromium.launch(headless=True, chromium_sandbox=False)
                 browser.close()
         except Exception as exc:
             self.skipTest('Chromium cannot launch: ' + type(exc).__name__)
