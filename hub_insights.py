@@ -1,9 +1,19 @@
 """Bounded projections for official index insight endpoints; no credential output."""
+import datetime as dt
+import os
 import logging
 import math
-from hub_store import HubError, exc_summary, validate_query
+from hub_store import HubError, TZ, exc_summary, validate_query
 
 KINDS = {'related', 'audience'}
+
+def related_end_lag_days():
+    value = os.environ.get('INDEX_HUB_RELATED_END_LAG_DAYS', '3')
+    try:
+        return int(value) if value.isascii() and value.isdecimal() else 3
+    except ValueError:
+        return 3
+
 
 def validate_insight(body):
     if type(body) is not dict:
@@ -12,7 +22,28 @@ def validate_insight(body):
     kind = body.pop('kind', None)
     if kind not in KINDS:
         raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
+    requested_end = body.pop('requested_end_date', None)
     query = validate_query(body)
+    if kind == 'related':
+        end = dt.date.fromisoformat(query['end_date'])
+        start = dt.date.fromisoformat(query['start_date'])
+        try:
+            max_end = dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())
+        except OverflowError:
+            raise HubError('invalid_dates', '关联词截止日上限超出支持的日期范围。') from None
+        if end > max_end:
+            requested_end = requested_end or query['end_date']
+            if start > max_end:
+                start = max_end - (end - start)
+            query = validate_query({**query, 'start_date': start.isoformat(), 'end_date': max_end.isoformat()})
+        if requested_end is not None:
+            try:
+                requested = dt.date.fromisoformat(requested_end)
+                if requested.isoformat() != requested_end or requested <= dt.date.fromisoformat(query['end_date']):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HubError('invalid_dates', '原截止日须为晚于实际截止日的 YYYY-MM-DD 日期。') from None
+            query['requested_end_date'] = requested_end
     if len(query['keywords']) != 1:
         raise HubError('invalid_keywords', '关联分析和人群画像每次仅支持一个关键词。')
     return {**query, 'kind': kind}
@@ -85,9 +116,16 @@ def collect(api, body):
                 elif 'data' in raw_data and (raw_data['data'] is None or raw_data['data'] == []):
                     return {'ok':False,'code':'no_data'}
             data=project(result['data'],query['kind'])
-            return {'ok':True,'data':data,'metadata':{**query,'source':'creator.douyin.com',
+            clamp = {}
+            note = '扩展接口试验接入；未完成与官方页面的逐项人工核对。'
+            if 'requested_end_date' in query:
+                reason = f'关联词数据通常比趋势晚出，截止日限制为今天前 {related_end_lag_days()} 天'
+                clamp['end_date_clamped'] = {'requested': query['requested_end_date'],
+                                             'used': query['end_date'], 'reason': reason}
+                note += f"{reason}，已从 {query['requested_end_date']} 调整为 {query['end_date']}。"
+            return {'ok':True,'data':data,'metadata':{**query,**clamp,'source':'creator.douyin.com',
                 'fetched_at':result['metadata']['fetched_at'],'verification':'pending',
-                'note':'扩展接口试验接入；未完成与官方页面的逐项人工核对。'}}
+                'note':note}}
         finally:
             client.session.cookies.clear();client.session.close()
     except Exception as exc:
