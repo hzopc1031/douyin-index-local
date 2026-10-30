@@ -17,6 +17,19 @@ ROOT = Path(__file__).resolve().parent
 
 
 class PathsTests(unittest.TestCase):
+    def test_desktop_exit_is_failure(self):
+        lines = (ROOT / 'tencent-desktop.sh').read_text().strip().splitlines()
+        commands = [line for line in lines if not line.startswith('#')]
+        self.assertEqual(commands[-2:], ['wait -n "${children[@]}"', 'exit 1'])
+
+    def test_qr_session_documentation(self):
+        for name in ('HUB_API.md', 'deploy/README.md'):
+            with self.subTest(document=name):
+                text = (ROOT / name).read_text()
+                for detail in ('`app.py` 进程内存', '不写状态文件和日志',
+                               '近似明文', '直到单元停止', 'chromium_sandbox=False'):
+                    self.assertIn(detail, text)
+
     def test_default(self):
         with patch.dict(os.environ):
             os.environ.pop('INDEX_HUB_STATE_DIR', None)
