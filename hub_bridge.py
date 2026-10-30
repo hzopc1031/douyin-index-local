@@ -78,7 +78,7 @@ def start_bridge(api):
                 else:
                     answer = {'ok': False, 'code': 'invalid_command', 'message': '不支持的内部操作。'}
             except HubError as exc:
-                logging.getLogger('index_hub.bridge').warning('command=%s invalid_query code=%s', command, exc.code)
+                logging.getLogger('index_hub.bridge').warning('command=%s rejected code=%s', command, exc.code)
                 answer = {'ok': False, 'code': exc.code, 'message': str(exc)}
             except Exception as exc:
                 logging.getLogger('index_hub.bridge').warning('command=%s %s', command, exc_summary(exc))
