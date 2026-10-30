@@ -41,15 +41,17 @@ class SanitizedClientError(RuntimeError):
     """Only stable, non-sensitive diagnostics are exposed to callers."""
 
     def __init__(self, code: str, message: str, *, http_status: int | None = None,
-                 business_code: int | str | None = None):
+                 business_code: int | str | None = None, keyword_details=None):
         super().__init__(message)
         self.code = code
         self.http_status = http_status
         self.business_code = business_code
+        self.keyword_details = keyword_details
 
     def as_dict(self) -> dict[str, Any]:
         return {"code": self.code, "message": str(self),
-                "http_status": self.http_status, "business_code": self.business_code}
+                "http_status": self.http_status, "business_code": self.business_code,
+                **({"keyword_details":self.keyword_details} if self.keyword_details else {})}
 
 
 def _error(code: str, message: str) -> SanitizedClientError:
@@ -202,6 +204,12 @@ def _series(value: Any, expected: set[str]) -> dict[str, int | float | None]:
     return output
 
 
+def normalize_keyword(value: str) -> str:
+    """Ignore boundary whitespace and whitespace between Han characters only."""
+    han = r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U000323af]"
+    return re.sub(r"(?<=" + han + r")\s+(?=" + han + r")", "", value.strip())
+
+
 def parse_trend(payload: dict[str, Any], keyword: str, start: dt.date,
                 end: dt.date) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Validate a known business payload without making any network request."""
@@ -214,7 +222,7 @@ def parse_trend(payload: dict[str, Any], keyword: str, start: dt.date,
         search: dict[str, int | float | None] = {}
         composite: dict[str, int | float | None] = {}
     else:
-        if len(groups) != 1 or not isinstance(groups[0], dict) or groups[0].get("keyword") != keyword:
+        if len(groups) != 1 or not isinstance(groups[0], dict) or not isinstance(groups[0].get("keyword"), str) or normalize_keyword(groups[0]["keyword"]) != normalize_keyword(keyword):
             raise _error("unexpected_keyword", "接口返回的关键词与请求不完全一致。")
         group = groups[0]
         if "search_hot_list" not in group:
@@ -237,17 +245,26 @@ def parse_trends(payload: dict[str, Any], keywords: list[str], start: dt.date,
     groups = payload.get("hot_list")
     if not isinstance(groups, list):
         raise _error("response_schema", "趋势响应缺少关键词列表。")
-    requested = set(keywords)
+    requested = {normalize_keyword(word): word for word in keywords}
+    if len(requested) != len(keywords):
+        raise _error("duplicate_keyword", "请求词在空白规范化后重复，请只保留一个。")
+    returned_keywords = {}
     by_keyword: dict[str, dict[str, Any]] = {}
     for group in groups:
         if not isinstance(group, dict):
             raise _error("response_schema", "接口关键词记录不是对象。")
         keyword = group.get("keyword")
-        if not isinstance(keyword, str) or keyword not in requested:
-            raise _error("unexpected_keyword", "接口返回了请求之外或无法识别的关键词。")
+        if not isinstance(keyword, str) or normalize_keyword(keyword) not in requested:
+            details={"requested":list(keywords),"returned":[
+                "".join(c for c in g.get('keyword','') if ord(c)>=32)[:100] if isinstance(g,dict) and isinstance(g.get('keyword'),str) else "[关键词字段缺失或类型异常]"
+                for g in groups[:10]]}
+            raise SanitizedClientError("unexpected_keyword", "接口返回了请求之外或无法识别的关键词。", keyword_details=details)
+        original_keyword = keyword
+        keyword = requested[normalize_keyword(keyword)]
         if keyword in by_keyword:
             raise _error("duplicate_keyword", "接口重复返回同一关键词，不能进行逐日核对。")
         by_keyword[keyword] = group
+        returned_keywords[keyword] = original_keyword
     rows: list[dict[str, Any]] = []
     quality_by_keyword: dict[str, dict[str, Any]] = {}
     for keyword in keywords:
@@ -257,7 +274,9 @@ def parse_trends(payload: dict[str, Any], keywords: list[str], start: dt.date,
         rows.extend(word_rows)
         quality_by_keyword[keyword] = quality
     requested_days = (end - start).days + 1
-    return rows, {"keywords": list(keywords), "keyword_count": len(keywords),
+    return rows, {"keywords": list(keywords), "returned_keywords": returned_keywords,
+                  "keyword_match_rule": "trim_and_ignore_whitespace_between_han",
+                  "keyword_count": len(keywords),
                   "requested_days": requested_days, "expected_rows": requested_days * len(keywords),
                   "returned_rows": len(rows),
                   "complete": all(item["complete"] for item in quality_by_keyword.values()),
@@ -285,7 +304,7 @@ class DouyinIndexClient:
             self.headers["User-Agent"] = user_agent
 
     def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
-        if endpoint not in (TREND_URL, VALID_DATE_URL):
+        if endpoint not in (TREND_URL, VALID_DATE_URL, ORIGIN+'/api/v2/index/get_relation_word', ORIGIN+'/api/v2/index/get_portrait'):
             raise ValueError("Unsupported endpoint")
         response = None
         try:
@@ -314,7 +333,12 @@ class DouyinIndexClient:
             _check_business_status(envelope, status)
             encryption = response.headers.get("x-encrypted") or None
             decoded = _decode(envelope, encryption)
-            data = _payload_object(decoded if decoded is not None else envelope, status)
+            payload = decoded if decoded is not None else envelope
+            if endpoint.endswith('/get_portrait') and isinstance(payload.get('data'), list):
+                _check_business_status(payload, status)
+                data = {'data': payload['data']}
+            else:
+                data = _payload_object(payload, status)
             return {"raw": {"response": envelope, "decoded": decoded}, "data": data,
                     "metadata": {"endpoint": endpoint, "http_status": status,
                                  "encryption": encryption, "timezone": "Asia/Shanghai",
@@ -333,7 +357,7 @@ class DouyinIndexClient:
         return result
 
     def query_many(self, keywords: list[str], start_date: str, end_date: str) -> dict[str, Any]:
-        """Read one seven-day batch with exactly one request and no retries."""
+        """Read one bounded date-range batch with exactly one request and no retries."""
         if not isinstance(keywords, list) or not 1 <= len(keywords) <= 5:
             raise ValueError("请输入 1—5 个关键词。")
         if any(not isinstance(word, str) or not word.strip() or word != word.strip()
@@ -348,8 +372,8 @@ class DouyinIndexClient:
             raise ValueError("Dates must use YYYY-MM-DD") from None
         if start.isoformat() != start_date or end.isoformat() != end_date:
             raise ValueError("Dates must use YYYY-MM-DD")
-        if (end - start).days != 6:
-            raise ValueError("This verification client requires exactly seven inclusive days")
+        if not 0 <= (end - start).days < 731:
+            raise ValueError("Query requires 1 to 731 inclusive days")
         if end >= dt.datetime.now(SHANGHAI).date():
             raise ValueError("The last day must be earlier than today in Asia/Shanghai")
         result = self._post(TREND_URL, {"keyword_list": keywords,

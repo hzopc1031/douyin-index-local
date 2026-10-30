@@ -77,9 +77,9 @@ def _query(keywords: Any, start_date: Any, end_date: Any) -> tuple[list[str], li
     if not isinstance(start_date, str) or not isinstance(end_date, str):
         raise ValueError("日期必须使用 YYYY-MM-DD。")
     start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
-    if start.isoformat() != start_date or end.isoformat() != end_date or (end - start).days != 6:
-        raise ValueError("结果区间必须包含首尾共 7 天。")
-    return words, [(start + timedelta(days=i)).isoformat() for i in range(7)]
+    if start.isoformat() != start_date or end.isoformat() != end_date or not 0 <= (end - start).days < 731:
+        raise ValueError("结果区间须包含首尾共 1—731 天。")
+    return words, [(start + timedelta(days=i)).isoformat() for i in range((end-start).days+1)]
 
 
 def _numeric(value: Any) -> bool:
@@ -213,7 +213,7 @@ class ResultStore:
             if not _complete_rows(result, words, days):
                 raise ValueError("数据尚不完整，不能登记核对通过。")
             checks = snapshot.get("rows")
-            if not isinstance(checks, list) or len(checks) != len(words) * 7:
+            if not isinstance(checks, list) or len(checks) != len(words) * len(days):
                 raise ValueError("核对报告条数不符，不能登记通过。")
             for check, row in zip(checks, result["rows"]):
                 if not isinstance(check, dict) or check.get("status") != "match" or check.get("keyword") != row["keyword"] or check.get("date") != row["date"] or check.get("api_search_index") != row["search_index"]:

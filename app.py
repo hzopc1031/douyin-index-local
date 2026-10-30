@@ -67,8 +67,10 @@ def compare_result(result, entries, *, compared_at=None):
     metadata = result["metadata"]
     words = metadata["keywords"]
     start = datetime.strptime(metadata["start_date"], "%Y-%m-%d").date()
-    expected_keys = {(word, (start + timedelta(days=i)).isoformat()) for word in words for i in range(7)}
-    expected_rows = len(words) * 7
+    day_count = (datetime.strptime(metadata["end_date"], "%Y-%m-%d").date()-start).days+1
+    if not 1 <= day_count <= 731: raise ValueError("日期范围无效。")
+    expected_keys = {(word, (start + timedelta(days=i)).isoformat()) for word in words for i in range(day_count)}
+    expected_rows = len(words) * day_count
     matched_rows = sum(item["status"] == "match" for item in checks)
     verified = (metadata.get("complete") is True and len(checks) == expected_rows
                 and keys == expected_keys and matched_rows == expected_rows)
@@ -86,6 +88,7 @@ class Api:
         self._result = None
         self._folder = None
         self._attempted = False
+        self._cloud_last_attempt = 0.0
         self._store = ResultStore(OUTPUT)
 
     def show_official_page(self):
@@ -144,7 +147,7 @@ class Api:
         return {"ok": True, "rows": result["rows"], "metadata": result["metadata"],
                 "folder": str(folder), "cache_hit": cache_hit, "comparison": comparison}
 
-    def fetch_batch(self, keywords_text, end_date):
+    def fetch_batch(self, keywords_text, end_date, cloud=False, start_date=None):
         if not self._lock.acquire(blocking=False):
             return {"ok": False, "message": "取数或核对正在进行，请等待。"}
         try:
@@ -165,16 +168,25 @@ class Api:
                 raise ValueError("截止日请使用 YYYY-MM-DD。")
             if end >= datetime.now(TZ).date():
                 raise ValueError("截止日必须是过去日期，请以官方页面的可用日期为准。")
-            start = end - timedelta(days=6)
+            start = datetime.strptime(start_date, "%Y-%m-%d").date() if cloud and start_date is not None else end - timedelta(days=6)
+            if not 0 <= (end-start).days < 731 or (cloud and start_date is not None and start.isoformat()!=start_date):
+                raise ValueError("开始日期至结束日期须为连续 1—731 天。")
             cached = self._store.lookup(words, start.isoformat(), end_date)
             if cached is not None:
                 result, folder = cached["result"], cached["folder"]
                 comparison = self._cached_comparison(result, folder)
                 return self._response(result, folder, cache_hit=True, comparison=comparison)
-            if self._attempted:
+            if self._attempted and not cloud:
                 return {"ok": False, "code": "session_request_used", "message": "本次会话已发出过一次线上请求。可以查看已有缓存；新的线上批次请重新启动工具。"}
+            if cloud:
+                import time
+                if time.time() - self._cloud_last_attempt < 15:
+                    return {"ok": False, "code": "cooldown", "message": "云端请求间隔至少 15 秒，请稍后提交。"}
             client = self._client()
             self._attempted = True
+            if cloud:
+                import time
+                self._cloud_last_attempt = time.time()
             try:
                 result = client.query_many(words, start.isoformat(), end_date)
             finally:
@@ -232,6 +244,10 @@ def main():
     webview.settings["ALLOW_FILE_URLS"] = False
     webview.settings["IGNORE_SSL_ERRORS"] = False
     webview.settings["REMOTE_DEBUGGING_PORT"] = None
+    # Explicit cloud deployment opts in; ordinary desktop launches are unchanged.
+    if os.environ.get("INDEX_HUB_ENABLED") == "1":
+        from hub_bridge import start_bridge
+        start_bridge(api)
     webview.start(private_mode=True, debug=False, http_server=False)
 
 

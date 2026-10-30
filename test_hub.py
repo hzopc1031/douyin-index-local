@@ -1,0 +1,277 @@
+"""Synthetic offline API/security/task tests. No official network or real secrets."""
+import asyncio
+import base64
+import contextlib
+import datetime as dt
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from aiohttp.test_utils import TestClient, TestServer
+from desktop_gateway import HUB_KEY, create_app
+from hub_store import HubError, Store, TZ, public_result, validate_query
+
+END = '2025-01-07'
+QUERY = {'platform': 'douyin', 'keywords': ['酵素'], 'start_date': '2025-01-01', 'end_date': END}
+SECRET = 'SYNTHETIC_COOKIE_MUST_NOT_ESCAPE'
+
+
+def fixture(*, complete=True):
+    return {'raw': {'cookie': SECRET}, 'rows': [
+        {'keyword': '酵素', 'date': f'2025-01-{day:02}', 'search_index': day * 100 if complete or day != 3 else None,
+         'composite_index': day * 7, 'extra': SECRET} for day in range(1, 8)],
+        'metadata': {'keywords': ['酵素'], 'start_date': '2025-01-01', 'end_date': END,
+                     'fetched_at': dt.datetime.now(TZ).isoformat(), 'metric': 'search_index',
+                     'platform': 'aweme', 'region': '全国', 'complete': complete, 'extra': SECRET}}
+
+
+class StoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'hub.sqlite3'
+        self.s = Store(self.path)
+
+    def tearDown(self):
+        self.s.close()
+        self.temp.cleanup()
+
+    def test_same_collection_import_is_one_dataset(self):
+        raw = fixture()
+        first = public_result(raw)
+        original = self.s.ingest(first)
+        verified = public_result(raw, verification='user_reported_match')
+        self.assertEqual(self.s.ingest(verified, 'legacy_test'), original)
+        self.assertEqual(len(self.s.history()), 1)
+        self.assertEqual(self.s.history()[0]['metadata']['verification'], 'user_reported_match')
+        newer = public_result(fixture())
+        self.s.ingest(newer)
+        self.assertEqual(len(self.s.history()), 2)
+
+    def test_existing_duplicates_migrate_without_losing_points(self):
+        from hub_store import encode
+        result = public_result(fixture())
+        keep = self.s.ingest(result)
+        self.s.db.execute("INSERT INTO datasets SELECT 'duplicate',qhash,query,fetched,result,created+1 FROM datasets WHERE id=?", (keep,))
+        self.s.db.execute("UPDATE points SET dataset='duplicate'")
+        self.s.db.commit()
+        self.s.deduplicate()
+        self.assertEqual(len(self.s.history()), 1)
+        self.assertEqual(len(self.s.series('douyin','酵素')['points']),7)
+        self.assertEqual(self.s.db.execute('SELECT DISTINCT dataset FROM points').fetchone()[0],keep)
+
+    def test_query_scope_canonical_dates_and_platform(self):
+        self.assertEqual(validate_query({'keywords': ['酵素'], 'end_date': END}), QUERY)
+        for body in ({'keywords': ['x', 'x'], 'end_date': END},
+                     {'keywords': ['x'], 'end_date': END, 'start_date': '2025-01-08'},
+                     {'platform': 'baidu', 'keywords': ['x'], 'end_date': END},
+                     {'keywords': ['x\n'], 'end_date': END},
+                     {'keywords': ['x'], 'end_date': END, 'cookies': SECRET},
+                     {'keywords': ['x'], 'end_date': '9999-01-01'}):
+            with self.subTest(body=body), self.assertRaises(HubError):
+                validate_query(body)
+
+    def test_projection_missing_null_and_no_credential_fields(self):
+        result = public_result(fixture(complete=False))
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertIsNone(result['rows'][2]['search_index'])
+        self.assertFalse(result['metadata']['complete'])
+        self.assertEqual(result['metadata']['missing_search_dates']['酵素'], ['2025-01-03'])
+        bad = fixture()
+        bad['rows'].append(bad['rows'][0])
+        with self.assertRaises(HubError):
+            public_result(bad)
+
+    def test_key_hash_only_expiry_revocation(self):
+        key = self.s.issue_key('WorkBuddy', ['read', 'query'])
+        self.assertNotIn(key['token'], str(self.s.list_keys()))
+        self.assertNotIn(key['token'], str([tuple(r) for r in self.s.db.execute('SELECT * FROM keys')]))
+        self.assertIsNotNone(self.s.key_principal(key['token']))
+        self.s.revoke_key(key['id'])
+        self.assertIsNone(self.s.key_principal(key['token']))
+        expired = self.s.issue_key('Expired', ['read'])
+        self.s.db.execute('UPDATE keys SET expires=0 WHERE id=?', (expired['id'],))
+        self.assertIsNone(self.s.key_principal(expired['token']))
+
+    def test_idempotency_and_cache_prevent_new_online_work(self):
+        self.s.ingest(public_result(fixture()))
+        first, created = self.s.submit(QUERY, 'fixture', 'same-request')
+        second, repeated = self.s.submit(QUERY, 'fixture', 'same-request')
+        self.assertTrue(created)
+        self.assertFalse(repeated)
+        self.assertEqual(first['id'], second['id'])
+        self.assertTrue(first['cache_hit'])
+        self.assertEqual(first['status'], 'succeeded')
+        with self.assertRaises(HubError):
+            self.s.submit(QUERY | {'keywords': ['other']}, 'fixture', 'same-request')
+
+    def test_partial_not_cached_and_missing_range_not_zero(self):
+        self.s.ingest(public_result(fixture(complete=False)))
+        self.assertIsNone(self.s.cached(QUERY))
+        series = self.s.series('douyin', '酵素', '2025-01-01', '2025-01-08')
+        self.assertIsNone(series['points'][2]['value'])
+        self.assertIsNone(series['points'][-1]['value'])
+        self.assertFalse(series['live_request'])
+
+    def test_queue_pause_and_interrupted_jobs_not_replayed(self):
+        job, _ = self.s.submit(QUERY, 'fixture', 'one')
+        self.s.interrupt_pending()
+        self.assertEqual(self.s.job(job['id'])['error']['code'], 'service_restarted')
+        self.s.set('paused', {'code': 'rate_limited'})
+        with self.assertRaises(HubError):
+            self.s.submit(QUERY, 'fixture', 'two')
+
+    def test_newer_observation_wins_and_safe_import(self):
+        result = public_result(fixture())
+        self.s.ingest(result, 'newer')
+        result['metadata']['fetched_at'] = '2024-01-01T00:00:00+08:00'
+        result['rows'][0]['search_index'] = 999
+        self.s.ingest(result, 'older')
+        self.assertEqual(self.s.series('douyin', '酵素')['points'][0]['value'], 100)
+        data = Path(self.temp.name) / 'results' / 'fixture'
+        data.mkdir(parents=True)
+        (data / 'result.json').write_text(json.dumps(fixture()))
+        (data / 'user-confirmation.json').write_text(json.dumps({'evidence_level': 'user_attestation', 'user_reported_all_daily_values_match': True}))
+        self.assertEqual(self.s.import_results(data.parent), 1)
+        self.assertEqual(self.s.import_results(data.parent), 0)
+        self.assertEqual(self.s.cached(QUERY)['metadata']['verification'], 'user_reported_match')
+
+
+class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / '.cloud-state').mkdir()
+        (self.root / '.cloud-state/access.json').write_text(json.dumps({'username': 'fixture', 'password': 'admin-fixture-only'}))
+        (self.root / 'hub.html').write_text('<h1>Fixture hub</h1>')
+        self.calls = []
+        self.response = {'ok': True, **fixture()}
+
+        def bridge(command, payload, timeout):
+            if command == 'status':
+                return {'ok': True, 'state': 'browser_ready'}
+            self.calls.append(payload)
+            return self.response
+
+        app = create_app(self.root, bridge=bridge, desktop_dir=self.root)
+        self.hub = app[HUB_KEY]
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.hub.worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.hub.worker_task
+        self.admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(), 'X-Hub-Request': '1'}
+        key = self.hub.store.issue_key('Client', ['read', 'query'])
+        self.bearer = {'Authorization': 'Bearer ' + key['token']}
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.temp.cleanup()
+
+    async def test_request_source_admin_only_and_idempotent(self):
+        headers = {**self.bearer, 'Idempotency-Key': 'source-test', 'User-Agent': 'WorkBuddy-Test/1', 'X-Forwarded-For': '203.0.113.99'}
+        response = await self.client.post('/api/v1/queries', headers=headers, json=QUERY)
+        job = (await response.json())['job']
+        self.assertNotIn('request_source', job)
+        first = (await (await self.client.get('/api/v1/jobs/'+job['id'], headers=self.admin)).json())['job']['request_source']
+        self.assertEqual(first['key_name'], 'Client')
+        self.assertEqual(first['user_agent'], 'WorkBuddy-Test/1')
+        self.assertNotEqual(first['peer_ip'], '203.0.113.99')
+        self.assertNotIn(self.bearer['Authorization'], json.dumps(first))
+        await self.client.post('/api/v1/queries', headers={**headers,'User-Agent':'Changed'}, json=QUERY)
+        again = (await (await self.client.get('/api/v1/jobs/'+job['id'], headers=self.admin)).json())['job']['request_source']
+        self.assertEqual(first, again)
+        listed = (await (await self.client.get('/api/v1/jobs', headers=self.bearer)).json())['jobs']
+        self.assertTrue(all('request_source' not in j for j in listed))
+
+    async def test_auth_required_and_keys_not_admin(self):
+        self.assertEqual((await self.client.get('/api/v1/series?keyword=酵素')).status, 401)
+        self.assertEqual((await self.client.get('/', headers=self.bearer)).status, 401)
+        self.assertEqual((await self.client.get('/api/v1/keys', headers=self.bearer)).status, 403)
+        self.assertEqual((await self.client.post('/api/v1/collection/resume', headers=self.bearer)).status, 403)
+        self.assertEqual((await self.client.get('/api/v1/platforms', headers=self.bearer)).status, 200)
+
+    async def test_admin_csrf_and_key_lifecycle(self):
+        no_csrf = {'Authorization': self.admin['Authorization']}
+        self.assertEqual((await self.client.post('/api/v1/keys', headers=no_csrf, json={'name': 'x'})).status, 403)
+        bad_origin = self.admin | {'Origin': 'https://evil.example'}
+        self.assertEqual((await self.client.post('/api/v1/keys', headers=bad_origin, json={'name': 'x'})).status, 403)
+        response = await self.client.post('/api/v1/keys', headers=self.admin, json={'name': 'Reader', 'scopes': ['read'], 'days': 1})
+        self.assertEqual(response.status, 201)
+        key = await response.json()
+        header = {'Authorization': 'Bearer ' + key['token'], 'Idempotency-Key': 'read-only'}
+        self.assertEqual((await self.client.post('/api/v1/queries', headers=header, json=QUERY)).status, 403)
+        listing = await (await self.client.get('/api/v1/keys', headers=self.admin)).text()
+        self.assertNotIn(key['token'], listing)
+        await self.client.delete('/api/v1/keys/' + key['id'], headers=self.admin)
+        self.assertEqual((await self.client.get('/api/v1/status', headers=header)).status, 401)
+
+    async def test_cached_submit_and_csv_no_live_requests(self):
+        self.hub.store.ingest(public_result(fixture()))
+        headers = self.bearer | {'Idempotency-Key': 'cache-one'}
+        response = await self.client.post('/api/v1/queries', headers=headers, json=QUERY)
+        self.assertEqual(response.status, 200)
+        job = (await response.json())['job']
+        self.assertTrue(job['cache_hit'])
+        text = await (await self.client.get('/api/v1/jobs/' + job['id'], headers=self.bearer)).text()
+        self.assertNotIn(SECRET, text)
+        csv_response = await self.client.get('/api/v1/export.csv?keyword=酵素', headers=self.bearer)
+        self.assertEqual(csv_response.status, 200)
+        self.assertIn('search_index', await csv_response.text())
+        self.assertEqual(self.calls, [])
+
+    async def test_single_attempt_cooldown_and_platform_stop(self):
+        job, _ = self.hub.store.submit(QUERY, 'fixture', 'one')
+        self.response = {'ok': False, 'code': 'rate_limited', 'message': SECRET}
+        await self.hub.run_one()
+        self.assertEqual(len(self.calls), 1)
+        failed = self.hub.store.job(job['id'])
+        self.assertNotIn(SECRET, json.dumps(failed))
+        self.assertEqual(failed['error']['code'], 'rate_limited')
+        self.assertIsNotNone(self.hub.store.get('paused'))
+        self.assertFalse(await self.hub.run_one())
+        self.hub.store.set('paused', None)
+        self.hub.store.submit(QUERY, 'fixture', 'two')
+        self.assertFalse(await self.hub.run_one())
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_daily_limit_before_touching_upstream(self):
+        self.hub.store.set('daily', {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 50})
+        job, _ = self.hub.store.submit(QUERY, 'fixture', 'daily')
+        await self.hub.run_one()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.hub.store.job(job['id'])['error']['code'], 'daily_limit')
+
+    async def test_live_fixture_success_and_partial_never_cached(self):
+        job, _ = self.hub.store.submit(QUERY, 'fixture', 'success')
+        self.response = {'ok': True, **fixture(complete=False)}
+        await self.hub.run_one()
+        self.assertEqual(len(self.calls), 1)
+        saved = self.hub.store.job(job['id'])
+        self.assertEqual(saved['status'], 'partial')
+        self.assertIsNone(self.hub.store.cached(QUERY))
+        self.assertIsNone(saved['result']['rows'][2]['search_index'])
+
+    async def test_bad_json_unknown_fields_and_idempotency_conflict(self):
+        response = await self.client.post('/api/v1/queries', headers=self.bearer | {'Idempotency-Key': 'one'}, json=QUERY)
+        self.assertEqual(response.status, 202)
+        response = await self.client.post('/api/v1/queries', headers=self.bearer | {'Idempotency-Key': 'one'}, json=QUERY | {'keywords': ['other']})
+        self.assertEqual(response.status, 409)
+        response = await self.client.post('/api/v1/queries', headers=self.bearer, json=QUERY)
+        self.assertEqual(response.status, 400)
+        response = await self.client.get('/api/v1/series?keyword=x&platform=baidu', headers=self.bearer)
+        self.assertEqual(response.status, 422)
+
+    async def test_openapi_and_pause_resume_requires_admin(self):
+        schema = await (await self.client.get('/api/v1/openapi.json', headers=self.bearer)).json()
+        self.assertEqual(schema['openapi'], '3.1.0')
+        self.assertIn('/api/v1/queries', schema['paths'])
+        self.hub.store.set('paused', {'code': 'authentication_required'})
+        response = await self.client.post('/api/v1/collection/resume', headers=self.admin, json={})
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(self.hub.store.get('paused'))
+
+
+if __name__ == '__main__':
+    unittest.main()

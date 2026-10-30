@@ -212,7 +212,7 @@ class ClientTests(unittest.TestCase):
         session = FixtureSession(response(fixture()))
         client = DouyinIndexClient(session)
         for keyword, start, end in (("", "2025-01-01", "2025-01-07"),
-                                    ("银杏", "2025-01-01", "2025-01-08"),
+                                    ("银杏", "2025-01-01", "2027-04-01"),
                                     ("银杏", "20250101", "20250107")):
             with self.subTest(keyword=keyword, start=start, end=end):
                 with self.assertRaises(ValueError):
