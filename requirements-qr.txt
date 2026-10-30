@@ -1,0 +1,2 @@
+-r requirements-hub.txt
+playwright==1.64.1
