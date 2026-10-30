@@ -146,3 +146,16 @@ worker 保护状态码：
 - `busy_requeue_exhausted`：浏览器长时间被占用，已放回队列多次仍未执行，未自动重试。`busy` / `cooldown` 最多回队 `INDEX_HUB_BUSY_REQUEUE_LIMIT` 次（默认 20，非法值回退默认，0 直接失败）；耗尽后任务 `failed`，本次仍退还次数。任务的 `requeues` 记录回队处理次数（含耗尽的最后一次）。
 - `invalid_query` / `invalid_dates` / `invalid_keywords` / `invalid_kind`：参数错误，请检查请求。任务失败、不暂停，未发送上游请求，退还次数。
 - 扩展任务平台明确返回空数据时缓存 `no_data` 24 小时；命中任务保持 `no_data`、`cache_hit=true`，不请求浏览器、不扣次数。读取 `/api/v1/insights` 返回 `status=no_data`，结果含 `no_data=true`，不作为成功数据或零值。
+
+## 扫码登录（实验）
+
+默认仍为远程桌面登录。设置 `INDEX_HUB_LOGIN_MODE=qr` 后，管理员可使用：
+
+| 接口 | 用途 |
+| --- | --- |
+| POST `/api/v1/login/qr/start` | 启动；同一 Hub 每 10 秒最多一次，超限 `429 qr_rate_limited` |
+| GET `/api/v1/login/qr` | 返回 login_mode、state、qr_version、expires_in、message、session.has_session / age_seconds |
+| GET `/api/v1/login/qr/image` | PNG，`Cache-Control: no-store`；尚无二维码时 `404 qr_not_ready` |
+| POST `/api/v1/login/qr/cancel` | 取消本轮扫码 |
+
+全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。Cookie 只存于进程内存；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
