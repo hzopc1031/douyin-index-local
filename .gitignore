@@ -55,3 +55,6 @@ node_modules/
 .git-credentials
 
 /logs/
+
+vnc.passwd
+*.passwd
