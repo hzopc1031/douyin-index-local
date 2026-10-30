@@ -7,6 +7,7 @@ import io
 import json
 import math
 import logging
+import os
 import socket
 import time
 from pathlib import Path
@@ -44,7 +45,15 @@ PAUSING = {'authentication_required', 'verification_required', 'rate_limited', '
 
 
 class Hub:
-    def __init__(self, root, bridge=None):
+    def __init__(self, root, bridge=None, bridge_timeout_pause_after=None):
+        if bridge_timeout_pause_after is None:
+            bridge_timeout_pause_after = os.environ.get('INDEX_HUB_BRIDGE_TIMEOUT_PAUSE_AFTER', '2')
+        try:
+            value = str(bridge_timeout_pause_after)
+            threshold = int(value) if value.isascii() and value.isdecimal() else -1
+        except (ValueError, TypeError):
+            threshold = -1
+        self.bridge_timeout_pause_after = threshold if threshold >= 0 else 2
         self.root = Path(root)
         self.store = Store(self.root / '.cloud-state' / 'index-hub.sqlite3')
         if bridge is None:
@@ -110,6 +119,8 @@ class Hub:
         started = time.monotonic()
         try:
             response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, hub_bridge.BRIDGE_TIMEOUT)
+            # Only collection replies reset the streak; status preflights do not.
+            self.store.set('consecutive_bridge_timeouts', 0)
             if response.get('ok') is not True:
                 code = response.get('code', '')
                 if code in {'cooldown', 'busy'}:
@@ -151,6 +162,12 @@ class Hub:
         except Exception as exc:
             if isinstance(exc, (socket.timeout, TimeoutError)):
                 code = 'bridge_timeout'
+                # Do not refund: the browser may already have sent the upstream request.
+                count = self.store.get('consecutive_bridge_timeouts', 0) + 1
+                self.store.set('consecutive_bridge_timeouts', count)
+                if self.bridge_timeout_pause_after and count >= self.bridge_timeout_pause_after:
+                    self.store.set('paused', {'code': code, 'since': time.time(), 'count': count})
+                    logger.warning('collection paused code=bridge_timeout count=%d', count)
             elif isinstance(exc, (ConnectionRefusedError, FileNotFoundError)):
                 code = 'browser_unavailable'
             else:
@@ -289,6 +306,7 @@ def mount(app, hub):
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,
                       'daily_online_attempts': daily['count'],
+                      'consecutive_bridge_timeouts': s.get('consecutive_bridge_timeouts', 0),
                       'limits': {'keywords': 5, 'days': 731, 'online_interval_seconds': 15,
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
@@ -387,6 +405,7 @@ def mount(app, hub):
         if state != 'browser_ready':
             raise HubError('browser_not_ready', '请先通过远程桌面完成登录或验证。', 409)
         s.set('paused', None)
+        s.set('consecutive_bridge_timeouts', 0)
         s.set('worker_error', None)
         return reply({'ok': True, 'note': '已恢复。保留原有冷却间隔与每日上限；失败任务不会重试。'})
 
