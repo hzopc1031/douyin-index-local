@@ -6,3 +6,9 @@ INDEX_HUB_STATE_DIR 默认项目下 .cloud-state；两服务须配置同一目�
 INDEX_HUB_LOG_DIR 默认项目下 logs；Python 日志只写轮转文件（INDEX_HUB_LOG_STDERR=1 才复制到 stderr），进程输出追加到 *.stdout.log，由 deploy/logrotate/douyin-index 轮转。
 INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 启动桌面前，以服务账号运行 x11vnc -storepasswd，将口令保存到状态目录的 vnc.passwd 并 chmod 600；缺失或权限过宽会拒绝启动。
+
+### 实验扫码登录
+
+`INDEX_HUB_LOGIN_MODE=desktop`（默认）沿用远程桌面登录；设为 `qr` 启用接入页扫码卡片与管理员扫码接口。其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
+
+`INDEX_HUB_QR_TIMEOUT` 设置每轮扫码超时秒数，默认 180；无效、非正或非有限值使用默认值。会话仅保存在内存，进程重启后需重新登录。此原型尚需真实页面校准，不改变取数保护限制。
