@@ -14,3 +14,7 @@ INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 `INDEX_HUB_QR_TIMEOUT` 设置每轮扫码超时秒数，默认 180；无效、非正或非有限值使用默认值。会话仅保存在内存，进程重启后需重新登录。此原型尚需真实页面校准，不改变取数保护限制。
 
 `INDEX_HUB_QR_BROWSER=headed|headless` 设置扫码浏览器模式，默认 `headed`，复用桌面单元导出的 `DISPLAY`；缺少 DISPLAY 时拒绝启动，不回退无头模式。`ProtectSystem=strict` 下无需额外可写路径：Chromium 使用 `PrivateTmp` 下的 `/tmp` 临时 profile，浏览器目录通过 `PLAYWRIGHT_BROWSERS_PATH` 只读即可。
+
+真实浏览器的 UA 原样交给后续取数，不伪造；headed 模式若检测到 `HeadlessChrome` 会拒绝该会话。Playwright 默认带 `navigator.webdriver=true`（有头、无头相同），本项目不做隐藏。
+
+浏览器由 root 装到 `/opt/ms-playwright`（root 所有、`a+rX`），单元模板已设 `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`；Python 依赖装进项目 `.venv`：`.venv/bin/pip install -r requirements-qr.txt`。离线自检（不访问网络、不碰凭证）：`DISPLAY=:N PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright .venv/bin/python qr_browser_check.py headed`，退出码 0 且 `headless_ua=false` 为通过。
