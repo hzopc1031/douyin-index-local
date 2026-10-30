@@ -5,6 +5,13 @@ from unittest.mock import patch
 import qr_browser_check
 
 
+def _browser_skip(reason):
+    """INDEX_HUB_REQUIRE_BROWSER_TESTS=1 turns browser-test skips into failures (go-live check)."""
+    if os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1':
+        raise AssertionError('browser test required but skipped: ' + reason)
+    raise unittest.SkipTest(reason)
+
+
 class BrowserCheckTests(unittest.TestCase):
     def test_bad_mode(self):
         self.assertEqual(qr_browser_check.main(['x', 'bogus']), 1)
@@ -17,11 +24,11 @@ class BrowserCheckTests(unittest.TestCase):
         try:
             import playwright  # noqa: F401
         except ImportError:
-            self.skipTest('playwright not installed')
+            _browser_skip('playwright not installed')
         try:
             result = qr_browser_check.check('headless')
         except Exception as exc:
-            self.skipTest('Chromium cannot launch: ' + type(exc).__name__)
+            _browser_skip('Chromium cannot launch: ' + type(exc).__name__)
         self.assertTrue(result['headless_ua'])
         self.assertTrue(result['ok'])
         if os.environ.get('DISPLAY'):

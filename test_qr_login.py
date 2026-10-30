@@ -13,6 +13,13 @@ import requests
 
 from qr_login import CookieRejected, QrLoginSession, QrBusy, QrLoginManager, QrUnsafeDebug, QrNoDisplay, SessionHolder, narrow_cookies
 
+
+def _browser_skip(reason):
+    """INDEX_HUB_REQUIRE_BROWSER_TESTS=1 turns browser-test skips into failures (go-live check)."""
+    if os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1':
+        raise AssertionError('browser test required but skipped: ' + reason)
+    raise unittest.SkipTest(reason)
+
 SECRET = 'SYNTHETIC_SESSION'
 HOST = 'creator.douyin.com'
 
@@ -279,7 +286,7 @@ class BrowserTests(unittest.TestCase):
             from aiohttp import web
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            raise unittest.SkipTest('Optional browser test dependency unavailable: ' + type(exc).__name__)
+            _browser_skip('Optional browser test dependency unavailable: ' + type(exc).__name__)
         cls.asyncio, cls.web = asyncio, web
 
     def setUp(self):
@@ -330,7 +337,7 @@ class BrowserTests(unittest.TestCase):
         self.addCleanup(self.stop_server)
         self.assertTrue(self.ready.wait(3))
         if self.error:
-            self.skipTest('Loopback server unavailable: ' + type(self.error).__name__)
+            _browser_skip('Loopback server unavailable: ' + type(self.error).__name__)
         self.origin = 'http://127.0.0.1:' + str(self.port)
         self.http = requests.Session()
         self.http.trust_env = False
@@ -342,7 +349,7 @@ class BrowserTests(unittest.TestCase):
                 browser = pw.chromium.launch(headless=True, chromium_sandbox=False)
                 browser.close()
         except Exception as exc:
-            self.skipTest('Chromium cannot launch: ' + type(exc).__name__)
+            _browser_skip('Chromium cannot launch: ' + type(exc).__name__)
         self.manager = QrLoginManager(allowed_origin=self.origin,
                                       login_url=self.origin + '/creator-micro/login',
                                       cookie_url=self.origin + '/creator-micro/home',
@@ -414,7 +421,7 @@ class BrowserTests(unittest.TestCase):
 
     def test_headed_real_ua(self):
         if not os.environ.get('DISPLAY'):
-            self.skipTest('DISPLAY unavailable')
+            _browser_skip('DISPLAY unavailable')
         self.manager.cancel()
         self.session.thread.join(4)
         self.manager = QrLoginManager(allowed_origin=self.origin,
