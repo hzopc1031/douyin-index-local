@@ -160,6 +160,31 @@ class WorkerGuards(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ['status', 'insight'])
         self.assertEqual(self.s.get('daily')['count'], 5)
 
+    async def test_newer_no_data_does_not_hide_real_insight(self):
+        query = {**QUERY, 'keywords': [QUERY['keywords'][0]], 'kind': 'audience'}
+        from hub_insights import validate_insight
+        query = validate_insight(query)
+        old = dt.datetime.now(TZ) - dt.timedelta(hours=2)
+        real = {'data': {'dimensions': []}, 'metadata': {**query, 'fetched_at': old.isoformat()}}
+        self.s.save_insight(query, real)
+        self.s.save_insight(query, {'no_data': True, 'metadata': {
+            **query, 'fetched_at': dt.datetime.now(TZ).isoformat()}})
+        app = web.Application()
+        mount(app, self.hub)
+        from urllib.parse import urlencode
+        path = '/api/v1/insights?' + urlencode({
+            'keyword': query['keywords'][0], 'kind': 'audience',
+            'start_date': query['start_date'], 'end_date': query['end_date']})
+        request = make_mocked_request('GET', path, app=app)
+        request[PRINCIPAL_KEY] = {'scopes': ['read']}
+        response = await (await app.router.resolve(request)).handler(request)
+        body = json.loads(response.text)
+        self.assertEqual(body['status'], 'available')
+        self.assertEqual(body['result'], real)
+        self.assertIn('fetched_at', body['newer_no_data'])
+        # Worker cache still honours the newer no_data marker for 24 hours.
+        self.assertTrue(self.s.cached(query)['no_data'])
+
     async def test_start_logs_interrupt_counts(self):
         self.submit()
         running = self.submit()

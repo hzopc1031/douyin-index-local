@@ -271,6 +271,13 @@ class Store:
         if not row or (max_age is not None and time.time()-row['fetched']>max_age):return None
         return json.loads(row['result'])
 
+    def latest_real_insight(self, query):
+        for row in self.db.execute('SELECT result FROM insights WHERE qhash=? ORDER BY fetched DESC', (query_hash(query),)):
+            result = json.loads(row['result'])
+            if not result.get('no_data'):
+                return result
+        return None
+
     def cached(self, query):
         if query.get('kind'):
             return self.insight(query, 86400)

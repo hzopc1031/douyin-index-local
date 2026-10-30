@@ -396,7 +396,18 @@ def mount(app, hub):
         if request.query.get('start_date'):body['start_date']=request.query['start_date']
         query=validate_insight(body)
         result=s.insight(query)
-        return reply({'status':('no_data' if result.get('no_data') else 'available') if result else 'not_collected','query':query,'result':result,'live_request':False})
+        newer_no_data=None
+        if result and result.get('no_data'):
+            # A later empty answer must not hide data that was actually collected.
+            real=s.latest_real_insight(query)
+            if real:
+                newer_no_data={'fetched_at':result['metadata'].get('fetched_at')}
+                result=real
+        status=('no_data' if result.get('no_data') else 'available') if result else 'not_collected'
+        body={'status':status,'query':query,'result':result,'live_request':False}
+        if newer_no_data:
+            body['newer_no_data']=newer_no_data
+        return reply(body)
 
     async def history(request):
         require(request)
