@@ -134,6 +134,9 @@ def collect(api, body):
             client.session.cookies.clear();client.session.close()
     except Exception as exc:
         from client import SanitizedClientError
+        from qr_login import login_mode
+        if login_mode() == 'qr' and getattr(exc, 'code', None) == 'authentication_required':
+            api._on_auth_failed()
         if isinstance(exc,SanitizedClientError):return {'ok':False,**exc.as_dict()}
         if isinstance(exc,HubError):return {'ok':False,'code':exc.code,'message':str(exc)}
         if isinstance(exc,ValueError) and getattr(exc,'code',None)=='authentication_required':

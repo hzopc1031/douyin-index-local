@@ -16,6 +16,22 @@ LOGIN_URL = client.PAGE_URL
 POLL_INTERVAL = 1
 
 
+_mode_warned = False
+_mode_lock = threading.Lock()
+
+
+def login_mode():
+    global _mode_warned
+    value = os.environ.get('INDEX_HUB_LOGIN_MODE', 'desktop')
+    if value in ('desktop', 'qr'):
+        return value
+    with _mode_lock:
+        if not _mode_warned:
+            logging.getLogger('index_hub.qr_login').warning('Invalid INDEX_HUB_LOGIN_MODE; using desktop')
+            _mode_warned = True
+    return 'desktop'
+
+
 def _timeout(value):
     try:
         result = float(value)

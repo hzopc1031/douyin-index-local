@@ -100,8 +100,30 @@ class Api:
         self._page.restore()
         return {"ok": True}
 
+    def _qr_manager(self):
+        from qr_login import login_mode, QrLoginManager
+        if login_mode() != 'qr':
+            return None
+        if not hasattr(self, '_qr'):
+            self._qr = QrLoginManager()
+        return self._qr
+
+    def _on_auth_failed(self):
+        from qr_login import login_mode
+        if login_mode() == 'qr' and hasattr(self, '_qr'):
+            self._qr.holder.clear()
+
     def _client(self):
         from client import DouyinIndexClient
+        qr = self._qr_manager()
+        if qr is not None and qr.holder.has_session():
+            session, ua = qr.holder.take_session()
+            try:
+                return DouyinIndexClient(session=session, user_agent=ua)
+            except Exception:
+                session.cookies.clear()
+                session.close()
+                raise
         if self._page is None:
             raise LoginRequired("请先打开官方登录窗口。")
         current = urlsplit(self._page.get_current_url() or "")
@@ -204,6 +226,8 @@ class Api:
                 safe = {"ok": False, "message": str(exc)}
             else:
                 safe = {"ok": False, "message": "本地执行失败；未输出会话或原始错误。", "code": type(exc).__name__}
+            if safe.get('code') == 'authentication_required':
+                self._on_auth_failed()
             try:
                 OUTPUT.mkdir(exist_ok=True, mode=0o700)
                 write_json(OUTPUT / "last-error.json", safe)
