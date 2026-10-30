@@ -117,8 +117,20 @@ class StoreTests(unittest.TestCase):
 
     def test_queue_pause_and_interrupted_jobs_not_replayed(self):
         job, _ = self.s.submit(QUERY, 'fixture', 'one')
-        self.s.interrupt_pending()
-        self.assertEqual(self.s.job(job['id'])['error']['code'], 'service_restarted')
+        running, _ = self.s.submit(QUERY, 'fixture', 'running')
+        self.s.update_job(running['id'], 'running')
+        self.assertEqual(self.s.interrupt_pending(), {'requeued': 1, 'interrupted': 1})
+        self.assertEqual(self.s.job(job['id']), job)
+        self.assertIsNone(self.s.job(job['id'])['error'])
+        interrupted = self.s.job(running['id'])
+        self.assertEqual(interrupted['status'], 'failed')
+        self.assertEqual(interrupted['error'], {
+            'code': 'service_restarted',
+            'message': '服务重启时任务正在执行，可能已向平台发出请求；未自动重试，请确认后重新提交。',
+            'recoverable': True,
+        })
+        self.assertEqual(self.s.interrupt_pending(), {'requeued': 1, 'interrupted': 0})
+        self.assertEqual(self.s.job(running['id']), interrupted)
         self.s.set('paused', {'code': 'rate_limited'})
         with self.assertRaises(HubError):
             self.s.submit(QUERY, 'fixture', 'two')
@@ -221,6 +233,32 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(csv_response.status, 200)
         self.assertIn('search_index', await csv_response.text())
         self.assertEqual(self.calls, [])
+
+    async def test_worker_executes_queued_jobs_after_restart(self):
+        store = self.hub.store
+        running, _ = store.submit(QUERY, 'fixture', 'restart-running')
+        store.update_job(running['id'], 'running')
+        first, _ = store.submit(QUERY, 'fixture', 'restart-first')
+        second, _ = store.submit(QUERY, 'fixture', 'restart-second')
+        store.close()
+        self.hub.store = Store(self.root / '.cloud-state' / 'index-hub.sqlite3')
+        await self.hub.start(None)
+        self.hub.worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.hub.worker_task
+        store = self.hub.store
+        self.assertEqual(store.job(first['id']), first)
+        self.assertEqual(store.job(second['id']), second)
+        self.assertEqual(store.job(running['id'])['status'], 'failed')
+        self.assertTrue(await self.hub.run_one())
+        self.assertEqual(store.job(first['id'])['status'], 'succeeded')
+        self.assertEqual(store.job(second['id'])['status'], 'queued')
+        self.assertEqual(self.calls, [QUERY])
+        self.assertTrue(await self.hub.run_one())
+        self.assertEqual(store.job(second['id'])['status'], 'succeeded')
+        self.assertEqual(store.job(running['id'])['status'], 'failed')
+        self.assertFalse(await self.hub.run_one())
+        self.assertEqual(self.calls, [QUERY])
 
     async def test_single_attempt_cooldown_and_platform_stop(self):
         job, _ = self.hub.store.submit(QUERY, 'fixture', 'one')

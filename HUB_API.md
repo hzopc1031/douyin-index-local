@@ -77,7 +77,8 @@ OpenAPI 3.1 文档：`GET /api/v1/openapi.json`，需要有效 Key 或管理登�
 可选 `start_date`，不填默认截止日前六天；填写后允许含首尾共 最近两年内的自定义日期。不支持其他字段或传入 Cookie。
 排队返回 HTTP 202，缓存命中或重读完成任务返回 HTTP 200，响应顶层为 `{"job": ...}`。
 
-任务状态：`queued`、`running`、`succeeded`、`partial`、`failed`。
+任务状态：`queued`、`running`、`succeeded`、`partial`、`no_data`、`failed`。
+服务重启后，`queued` 任务保留队列顺序继续执行；`running` 任务标为 `failed/service_restarted`（`recoverable: true`），须确认后重新提交，不自动重试。
 结果在 `job.result`：
 
 - `rows[].keyword/date/search_index/composite_index`：两种指标分列，缺失为 null。

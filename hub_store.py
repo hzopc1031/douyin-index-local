@@ -313,8 +313,10 @@ class Store:
 
     def interrupt_pending(self):
         with self.db:
-            self.db.execute("UPDATE jobs SET status='failed',updated=?,error=? WHERE status IN ('queued','running')",
-                (time.time(), encode({'code': 'service_restarted', 'message': '服务重启，任务已停止；未自动重试。'})))
+            requeued = self.db.execute("SELECT count(*) FROM jobs WHERE status='queued'").fetchone()[0]
+            interrupted = self.db.execute("UPDATE jobs SET status='failed',updated=?,error=? WHERE status='running'",
+                (time.time(), encode({'code': 'service_restarted', 'message': '服务重启时任务正在执行，可能已向平台发出请求；未自动重试，请确认后重新提交。', 'recoverable': True}))).rowcount
+        return {'requeued': requeued, 'interrupted': interrupted}
 
     def history(self, limit=30):
         return [dict(row) | {'metadata': json.loads(row['result'])['metadata']}
