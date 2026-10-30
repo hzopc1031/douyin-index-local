@@ -93,7 +93,11 @@ def project(data, kind):
 
 
 def collect(api, body):
-    query=validate_insight(body)
+    try:
+        query=validate_insight(body)
+    except HubError as exc:
+        logging.getLogger('index_hub.insights').warning('collect invalid_query code=%s', exc.code)
+        return {'ok':False,'code':exc.code,'message':str(exc)}
     if not api._lock.acquire(blocking=False):return {'ok':False,'code':'busy'}
     try:
         client=api._client()
@@ -132,9 +136,8 @@ def collect(api, body):
         from client import SanitizedClientError
         if isinstance(exc,SanitizedClientError):return {'ok':False,**exc.as_dict()}
         if isinstance(exc,HubError):return {'ok':False,'code':exc.code,'message':str(exc)}
-        if isinstance(exc,ValueError):
-            code='authentication_required' if getattr(exc,'code',None)=='authentication_required' else 'browser_unavailable'
-            return {'ok':False,'code':code,'message':str(exc)}
+        if isinstance(exc,ValueError) and getattr(exc,'code',None)=='authentication_required':
+            return {'ok':False,'code':'authentication_required','message':str(exc)}
         logging.getLogger('index_hub.insights').error('collect kind=%s %s', query['kind'], exc_summary(exc))
         return {'ok':False,'code':'request_failed','message':'扩展数据读取失败，未输出原始错误。'}
     finally:api._lock.release()

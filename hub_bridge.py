@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 import client
-from hub_store import exc_summary
+from hub_store import HubError, exc_summary
 
 ROOT = Path(__file__).resolve().parent
 SOCKET = ROOT / '.cloud-state' / 'browser.sock'
@@ -68,6 +68,9 @@ def start_bridge(api):
                     answer.pop('comparison', None)
                 else:
                     answer = {'ok': False, 'code': 'invalid_command', 'message': '不支持的内部操作。'}
+            except HubError as exc:
+                logging.getLogger('index_hub.bridge').warning('command=%s invalid_query code=%s', command, exc.code)
+                answer = {'ok': False, 'code': exc.code, 'message': str(exc)}
             except Exception as exc:
                 logging.getLogger('index_hub.bridge').warning('command=%s %s', command, exc_summary(exc))
                 answer = {'ok': False, 'code': 'browser_unavailable', 'message': '浏览器未就绪，请检查远程桌面。'}

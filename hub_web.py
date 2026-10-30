@@ -41,7 +41,10 @@ SAFE_ERRORS = {
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
     'request_failed': '本次取数未完成，未自动重试。',
 }
-PAUSING = {'authentication_required', 'verification_required', 'rate_limited', 'access_denied'}
+PARAMETER_ERRORS = {'invalid_query', 'invalid_dates', 'invalid_keywords', 'invalid_kind'}
+SAFE_ERRORS.update({code: '参数错误，请检查请求' for code in PARAMETER_ERRORS})
+SAFE_ERRORS['busy_requeue_exhausted'] = '浏览器长时间被占用，已放回队列多次仍未执行，未自动重试'
+PAUSING = {'browser_unavailable', 'authentication_required', 'verification_required', 'rate_limited', 'access_denied'}
 
 
 class Hub:
@@ -54,6 +57,11 @@ class Hub:
         except (ValueError, TypeError):
             threshold = -1
         self.bridge_timeout_pause_after = threshold if threshold >= 0 else 2
+        value = os.environ.get('INDEX_HUB_BUSY_REQUEUE_LIMIT', '20')
+        try:
+            self.busy_requeue_limit = int(value) if value.isascii() and value.isdecimal() else 20
+        except ValueError:
+            self.busy_requeue_limit = 20
         self.root = Path(root)
         self.store = Store(self.root / '.cloud-state' / 'index-hub.sqlite3')
         if bridge is None:
@@ -71,13 +79,9 @@ class Hub:
             logger.warning('command=status %s', exc_summary(exc))
             return 'unavailable'
 
-    def _requeue_unattempted(self, job_id, attempt_day):
-        """Refund only the reserved attempt from the current Shanghai day."""
-        self.store.update_job(job_id, 'queued', error=None)
-        today = dt.datetime.now(TZ).date().isoformat()
-        counter = self.store.get('daily')
-        if today == attempt_day and counter and counter['date'] == attempt_day:
-            self.store.set('daily', {'date': attempt_day, 'count': max(0, counter['count'] - 1)})
+    def _requeue_unattempted(self, job_id, attempt_day, *, busy=False):
+        return self.store.requeue_job(job_id, attempt_day,
+                                      self.busy_requeue_limit if busy else None)
 
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
@@ -87,7 +91,8 @@ class Hub:
         query = json.loads(row['query'])
         cached = self.store.cached(query)
         if cached:
-            self.store.update_job(row['id'], 'succeeded', result=cached)
+            self.store.update_job(row['id'], 'no_data' if cached.get('no_data') else 'succeeded', result=cached,
+                                  error={'code': 'no_data', 'message': SAFE_ERRORS['no_data']} if cached.get('no_data') else None)
             with self.store.db:
                 self.store.db.execute('UPDATE jobs SET cache_hit=1 WHERE id=?', (row['id'],))
             return True
@@ -109,6 +114,10 @@ class Hub:
         state = await self.browser_status()
         if state != 'browser_ready':
             code = 'authentication_required' if state == 'login_required' else 'browser_unavailable'
+            if code == 'browser_unavailable':
+                self.store.set('paused', {'code': code, 'since': now})
+                logger.warning('collection paused code=browser_unavailable')
+                return True
             self.store.update_job(row['id'], 'failed', error={'code': code, 'message': SAFE_ERRORS[code]})
             if code in PAUSING:
                 self.store.set('paused', {'code': code, 'since': now})
@@ -124,9 +133,10 @@ class Hub:
             if response.get('ok') is not True:
                 code = response.get('code', '')
                 if code in {'cooldown', 'busy'}:
-                    self._requeue_unattempted(row['id'], today)
+                    self._requeue_unattempted(row['id'], today, busy=True)
                     return True
                 if code == 'no_data' and query.get('kind'):
+                    self.store.save_insight(query, {'no_data': True, 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat()}})
                     self.store.update_job(row['id'], 'no_data', error={'code':code,'message':SAFE_ERRORS[code]})
                     self.store.set('last_result', {'ok': True, 'at': time.time()})
                     return True
@@ -140,6 +150,9 @@ class Hub:
                 kd=response.get('keyword_details')
                 if code=='unexpected_keyword' and isinstance(kd,dict) and all(isinstance(kd.get(k),list) and len(kd[k])<=10 and all(isinstance(v,str) and len(v)<=100 for v in kd[k]) for k in ('requested','returned')):details['keyword_details']={k:kd[k] for k in ('requested','returned')}
                 if http==422:details['message']='平台拒绝请求参数（HTTP 422），请检查接口参数或支持的日期范围。'
+                if code in PARAMETER_ERRORS:
+                    with self.store.db:
+                        self.store.refund_attempt(today)
                 self.store.update_job(row['id'], 'failed', error=details)
                 self.store.set('last_result', {'ok': False, 'code': code, 'at': time.time()})
                 if code in PAUSING:
@@ -169,7 +182,10 @@ class Hub:
                     self.store.set('paused', {'code': code, 'since': time.time(), 'count': count})
                     logger.warning('collection paused code=bridge_timeout count=%d', count)
             elif isinstance(exc, (ConnectionRefusedError, FileNotFoundError)):
-                code = 'browser_unavailable'
+                self._requeue_unattempted(row['id'], today)
+                self.store.set('paused', {'code': 'browser_unavailable', 'since': time.time()})
+                logger.warning('job=%s collection paused code=browser_unavailable %s', row['id'], exc_summary(exc))
+                return True
             else:
                 code = 'request_failed'
             log = logger.error if code == 'request_failed' else logger.warning
@@ -191,7 +207,8 @@ class Hub:
             await asyncio.sleep(1)
 
     async def start(self, app):
-        self.store.interrupt_pending()
+        counts = self.store.interrupt_pending()
+        logger.info('interrupt_pending requeued=%d interrupted=%d', counts['requeued'], counts['interrupted'])
         self.store.import_results(self.root / 'results')
         self.worker_task = asyncio.create_task(self.worker(), name='index-hub-worker')
 
@@ -378,7 +395,7 @@ def mount(app, hub):
         if request.query.get('start_date'):body['start_date']=request.query['start_date']
         query=validate_insight(body)
         result=s.insight(query)
-        return reply({'status':'available' if result else 'not_collected','query':query,'result':result,'live_request':False})
+        return reply({'status':('no_data' if result.get('no_data') else 'available') if result else 'not_collected','query':query,'result':result,'live_request':False})
 
     async def history(request):
         require(request)
