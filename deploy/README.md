@@ -12,3 +12,5 @@ INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 `INDEX_HUB_LOGIN_MODE=desktop`（默认）沿用远程桌面登录；设为 `qr` 启用接入页扫码卡片与管理员扫码接口。其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
 
 `INDEX_HUB_QR_TIMEOUT` 设置每轮扫码超时秒数，默认 180；无效、非正或非有限值使用默认值。会话仅保存在内存，进程重启后需重新登录。此原型尚需真实页面校准，不改变取数保护限制。
+
+`INDEX_HUB_QR_BROWSER=headed|headless` 设置扫码浏览器模式，默认 `headed`，复用桌面单元导出的 `DISPLAY`；缺少 DISPLAY 时拒绝启动，不回退无头模式。`ProtectSystem=strict` 下无需额外可写路径：Chromium 使用 `PrivateTmp` 下的 `/tmp` 临时 profile，浏览器目录通过 `PLAYWRIGHT_BROWSERS_PATH` 只读即可。

@@ -86,9 +86,12 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(hub_bridge.qr_command(api, 'qr_image')['png_base64'], base64.b64encode(b'synthetic-png').decode())
             manager.qr_png.return_value = None
             self.assertEqual(hub_bridge.qr_command(api, 'qr_image')['code'], 'qr_not_ready')
-            for error in (qr_login.QrBusy, qr_login.QrUnsafeDebug):
+            for error in (qr_login.QrBusy, qr_login.QrUnsafeDebug, qr_login.QrNoDisplay):
                 manager.start.side_effect = error()
                 self.assertEqual(hub_bridge.qr_command(api, 'qr_start')['code'], error.code)
+            message = '有头扫码需要桌面显示环境（DISPLAY）'
+            manager.start.side_effect = qr_login.QrNoDisplay(message)
+            self.assertEqual(hub_bridge.qr_command(api, 'qr_start')['message'], message)
 
 
 class RoutesTests(unittest.IsolatedAsyncioTestCase):
@@ -115,7 +118,7 @@ class RoutesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post('/api/v1/login/qr/cancel', headers=self.admin)).status, 200)
         self.assertEqual(self.hub.store.get('daily')['count'], 7)
         self.assertEqual(self.hub.store.get('last_attempt_at'), 123)
-        for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('browser_unavailable',503)]:
+        for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('qr_no_display',409), ('browser_unavailable',503)]:
             self.hub.bridge = lambda *args: {'ok': False, 'code': code}
             self.assertEqual((await self.client.get('/api/v1/login/qr/image', headers=self.admin)).status, status)
         self.hub.bridge = Mock(side_effect=OSError())
@@ -178,13 +181,15 @@ class DirectRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(image.headers['Cache-Control'], 'no-store')
             self.assertEqual(image.body, b'PNG')
             await call('POST', '/api/v1/login/qr/cancel')
-            for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('browser_unavailable',503)]:
+            for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('qr_no_display',409), ('browser_unavailable',503)]:
                 bridge.return_value = {'ok': False, 'code': code}
                 response = await call('GET', '/api/v1/login/qr/image')
                 self.assertEqual(response.status, status)
                 error = json.loads(response.text)['error']
                 self.assertEqual(error['code'], code)
                 self.assertTrue(error['message'])
+                if code == 'qr_no_display':
+                    self.assertEqual(error['message'], '有头扫码需要桌面显示环境（DISPLAY）')
             bridge.side_effect = OSError()
             with self.assertRaises(HubError) as caught:
                 await call('GET', '/api/v1/login/qr')

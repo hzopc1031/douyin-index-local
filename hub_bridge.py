@@ -42,15 +42,15 @@ def call_bridge(command, payload=None, timeout=BRIDGE_TIMEOUT):
 
 
 def qr_command(api, command):
-    from qr_login import login_mode, QrBusy, QrUnsafeDebug
+    from qr_login import login_mode, QrBusy, QrUnsafeDebug, QrNoDisplay
     if login_mode() != 'qr':
         return {'ok': False, 'code': 'qr_disabled', 'message': '未启用扫码登录。'}
     manager = api._qr_manager()
     if command == 'qr_start':
         try:
             manager.start()
-        except (QrBusy, QrUnsafeDebug) as exc:
-            return {'ok': False, 'code': exc.code}
+        except (QrBusy, QrUnsafeDebug, QrNoDisplay) as exc:
+            return {'ok': False, 'code': exc.code, **({'message': str(exc)} if isinstance(exc, QrNoDisplay) else {})}
     elif command == 'qr_cancel':
         manager.cancel()
     elif command == 'qr_image':

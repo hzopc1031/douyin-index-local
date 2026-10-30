@@ -158,4 +158,4 @@ worker 保护状态码：
 | GET `/api/v1/login/qr/image` | PNG，`Cache-Control: no-store`；尚无二维码时 `404 qr_not_ready` |
 | POST `/api/v1/login/qr/cancel` | 取消本轮扫码 |
 
-全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。Cookie 只存于进程内存；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
+全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug`、`qr_no_display` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。Cookie 只存于进程内存；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
