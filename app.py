@@ -1,6 +1,7 @@
 """Single-account local verification UI. Credentials remain in memory only."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
@@ -244,6 +245,7 @@ def main():
     webview.settings["REMOTE_DEBUGGING_PORT"] = None
     # Explicit cloud deployment opts in; ordinary desktop launches are unchanged.
     if os.environ.get("INDEX_HUB_ENABLED") == "1":
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
         from hub_bridge import start_bridge
         start_bridge(api)
     webview.start(private_mode=True, debug=False, http_server=False)

@@ -1,6 +1,7 @@
 """Bounded projections for official index insight endpoints; no credential output."""
+import logging
 import math
-from hub_store import HubError, validate_query
+from hub_store import HubError, exc_summary, validate_query
 
 KINDS = {'related', 'audience'}
 
@@ -83,5 +84,6 @@ def collect(api, body):
         if isinstance(exc,ValueError):
             code='authentication_required' if getattr(exc,'code',None)=='authentication_required' else 'browser_unavailable'
             return {'ok':False,'code':code,'message':str(exc)}
+        logging.getLogger('index_hub.insights').error('collect kind=%s %s', query['kind'], exc_summary(exc))
         return {'ok':False,'code':'request_failed','message':'扩展数据读取失败，未输出原始错误。'}
     finally:api._lock.release()

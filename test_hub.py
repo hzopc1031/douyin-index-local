@@ -359,5 +359,85 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.hub.store.get('paused'))
 
 
+class DiagnosticTests(unittest.TestCase):
+    def test_summary_redacts_before_truncation(self):
+        from hub_store import exc_summary
+        for key in ('cookie', 'access_token', 'session', 'sessionid', 'passwd',
+                    'password', 'secret', 'authorization', 'api_key'):
+            for separator in ('=', ': '):
+                for value in ('short', '"two words"', "'two words'", SECRET):
+                    summary = exc_summary(RuntimeError(key + separator + value))
+                    self.assertIn('***', summary)
+                    self.assertNotIn(value, summary)
+        self.assertNotIn('A' * 24, exc_summary(ValueError('A' * 24)))
+        self.assertIn('errno=2', exc_summary(FileNotFoundError(2, 'missing')))
+        self.assertEqual(exc_summary(ValueError('错' * 200)), 'ValueError: ' + '错' * 160)
+
+    def test_handler_logs_sanitized_exception(self):
+        import io
+        import hub_bridge
+        class Server:
+            def __init__(self, address, handler):
+                self.handler = handler
+            def serve_forever(self):
+                pass
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), \
+                    patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
+                    patch.object(hub_bridge.os, 'chmod'):
+                api = unittest.mock.Mock()
+                api._page.get_current_url.side_effect = RuntimeError('cookie=' + SECRET)
+                server = hub_bridge.start_bridge(api)
+            handler = object.__new__(server.handler)
+            handler.request = unittest.mock.Mock()
+            handler.rfile = io.BytesIO(b'{"command":"status"}\n')
+            handler.wfile = io.BytesIO()
+            with self.assertLogs('index_hub.bridge', 'WARNING') as logs:
+                handler.handle()
+            self.assertIn('command=status', logs.output[0])
+            self.assertIn('RuntimeError', logs.output[0])
+            self.assertNotIn(SECRET, str(logs.output))
+            self.assertEqual(json.loads(handler.wfile.getvalue())['code'], 'browser_unavailable')
+
+
+class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bridge_exceptions_are_logged_without_retry(self):
+        from hub_web import Hub
+        for exc, code, level in (
+            (TimeoutError('token=' + SECRET), 'bridge_timeout', 'WARNING'),
+            (RuntimeError('cookie=' + SECRET), 'request_failed', 'ERROR'),
+            (ConnectionRefusedError(111, 'refused'), 'browser_unavailable', 'WARNING'),
+            (FileNotFoundError(2, 'missing'), 'browser_unavailable', 'WARNING'),
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as root:
+                calls = []
+                def bridge(command, payload, timeout):
+                    if command == 'status':
+                        return {'ok': True, 'state': 'browser_ready'}
+                    calls.append(command)
+                    raise exc
+                hub = Hub(root, bridge)
+                try:
+                    job, _ = hub.store.submit(QUERY, 'fixture', 'diagnostic')
+                    async def local_thread_call(func, *args):
+                        return func(*args)
+                    with patch('hub_web.asyncio.to_thread', local_thread_call), self.assertLogs('index_hub', level) as logs:
+                        self.assertTrue(await hub.run_one())
+                    saved = hub.store.job(job['id'])
+                    self.assertEqual(saved['status'], 'failed')
+                    self.assertEqual(saved['error']['code'], code)
+                    self.assertEqual(hub.store.get('daily')['count'], 1)
+                    self.assertIsNone(hub.store.get('paused'))
+                    self.assertEqual(hub.store.get('last_result')['code'], code)
+                    self.assertFalse(hub.store.get('last_result')['ok'])
+                    self.assertNotIn(SECRET, str(logs.output))
+                    self.assertIn(type(exc).__name__, str(logs.output))
+                    self.assertIn(job['id'], str(logs.output))
+                    self.assertFalse(await hub.run_one())
+                    self.assertEqual(len(calls), 1)
+                finally:
+                    hub.store.close()
+
+
 if __name__ == '__main__':
     unittest.main()

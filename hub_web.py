@@ -6,11 +6,15 @@ import datetime as dt
 import io
 import json
 import math
+import logging
+import socket
 import time
 from pathlib import Path
 
 from aiohttp import web
-from hub_store import HubError, PLATFORMS, Store, TZ, public_result, validate_query
+from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
+
+logger = logging.getLogger('index_hub')
 
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
@@ -19,6 +23,7 @@ SAFE_ERRORS = {
     'verification_required': '平台要求人工验证，请通过远程桌面处理后手动恢复。',
     'rate_limited': '平台返回限频信号，采集已暂停，未自动重试。',
     'access_denied': '平台拒绝访问，采集已暂停，请检查官方页面。',
+    'bridge_timeout': '浏览器桥接 45 秒内未返回；平台请求可能仍在进行，未自动重试。',
     'browser_unavailable': '浏览器未就绪，请检查远程桌面。',
     'network_error': '上游网络请求失败，未自动重试。',
     'response_schema': '平台响应格式变化，未自动重试。',
@@ -51,7 +56,8 @@ class Hub:
             result = await asyncio.to_thread(self.bridge, 'status', None, 2)
             state = result.get('state') if result.get('ok') else 'unavailable'
             return state if state in ('browser_ready', 'login_required') else 'unavailable'
-        except Exception:
+        except Exception as exc:
+            logger.warning('command=status %s', exc_summary(exc))
             return 'unavailable'
 
     def _requeue_unattempted(self, job_id, attempt_day):
@@ -95,6 +101,7 @@ class Hub:
         self.store.update_job(row['id'], 'running')
         self.store.set('last_attempt_at', now)
         self.store.set('daily', {'date': today, 'count': counter['count'] + 1})
+        started = time.monotonic()
         try:
             response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, 45)
             if response.get('ok') is not True:
@@ -131,9 +138,18 @@ class Hub:
         except asyncio.CancelledError:
             # Restart handling marks any interrupted job failed; never automatically replay it.
             raise
-        except Exception:
-            self.store.update_job(row['id'], 'failed', error={'code': 'request_failed', 'message': SAFE_ERRORS['request_failed']})
-            self.store.set('last_result', {'ok': False, 'code': 'request_failed', 'at': time.time()})
+        except Exception as exc:
+            if isinstance(exc, (socket.timeout, TimeoutError)):
+                code = 'bridge_timeout'
+            elif isinstance(exc, (ConnectionRefusedError, FileNotFoundError)):
+                code = 'browser_unavailable'
+            else:
+                code = 'request_failed'
+            log = logger.error if code == 'request_failed' else logger.warning
+            log('job=%s kind=%s elapsed=%.3fs %s', row['id'],
+                query.get('kind', 'query'), time.monotonic() - started, exc_summary(exc))
+            self.store.update_job(row['id'], 'failed', error={'code': code, 'message': SAFE_ERRORS[code]})
+            self.store.set('last_result', {'ok': False, 'code': code, 'at': time.time()})
         return True
 
     async def worker(self):
@@ -142,7 +158,8 @@ class Hub:
                 await self.run_one()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.error('worker %s', exc_summary(exc))
                 self.store.set('worker_error', '任务处理暂不可用，请检查服务。')
             await asyncio.sleep(1)
 

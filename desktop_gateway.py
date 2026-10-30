@@ -1,4 +1,5 @@
 """TLS index portal/API plus authenticated noVNC. Never logs access credentials."""
+import logging
 import asyncio
 import base64
 import hmac
@@ -120,6 +121,7 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(ROOT / '.cloud-state/server.crt', ROOT / '.cloud-state/server.key')
