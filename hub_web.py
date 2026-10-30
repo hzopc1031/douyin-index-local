@@ -11,6 +11,7 @@ import os
 import socket
 import time
 from pathlib import Path
+from hub_paths import state_dir
 
 from aiohttp import web
 import hub_bridge
@@ -63,7 +64,7 @@ class Hub:
         except ValueError:
             self.busy_requeue_limit = 20
         self.root = Path(root)
-        self.store = Store(self.root / '.cloud-state' / 'index-hub.sqlite3')
+        self.store = Store(state_dir(self.root) / 'index-hub.sqlite3')
         if bridge is None:
             from hub_bridge import call_bridge
             bridge = call_bridge

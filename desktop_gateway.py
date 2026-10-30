@@ -1,5 +1,6 @@
 """TLS index portal/API plus authenticated noVNC. Never logs access credentials."""
 import logging
+import os
 import asyncio
 import base64
 import hmac
@@ -7,6 +8,7 @@ import json
 import ssl
 import time
 from pathlib import Path
+from hub_paths import state_dir
 from aiohttp import web, WSMsgType
 from hub_logging import configure_logging
 from hub_store import HubError
@@ -18,7 +20,7 @@ HUB_KEY = web.AppKey('hub', Hub)
 
 def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
     root = Path(root)
-    state = root / '.cloud-state'
+    state = state_dir(root)
     credentials = json.loads((state / 'access.json').read_text())
     expected = ('Basic ' + base64.b64encode((credentials['username'] + ':' + credentials['password']).encode()).decode()).encode()
     hub = Hub(root, bridge)
@@ -128,8 +130,11 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
 
 
 if __name__ == '__main__':
+    port = int(os.environ.get('INDEX_HUB_PORT', '8443'))
+    if not 1 <= port <= 65535:
+        raise ValueError('INDEX_HUB_PORT must be between 1 and 65535')
     configure_logging('gateway', ROOT)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
-    tls.load_cert_chain(ROOT / '.cloud-state/server.crt', ROOT / '.cloud-state/server.key')
-    web.run_app(create_app(), host='0.0.0.0', port=8443, ssl_context=tls, access_log=None, print=None)
+    tls.load_cert_chain(state_dir(ROOT) / 'server.crt', state_dir(ROOT) / 'server.key')
+    web.run_app(create_app(), host=os.environ.get('INDEX_HUB_BIND', '0.0.0.0'), port=port, ssl_context=tls, access_log=None, print=None)

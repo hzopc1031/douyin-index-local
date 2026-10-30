@@ -6,12 +6,20 @@ import socket
 import socketserver
 import threading
 from pathlib import Path
+from hub_paths import state_dir
 
 import client
 from hub_store import HubError, exc_summary
 
 ROOT = Path(__file__).resolve().parent
 SOCKET = ROOT / '.cloud-state' / 'browser.sock'
+
+
+def _socket_path():
+    # Preserve the public constant (including existing test overrides).
+    return state_dir(ROOT) / 'browser.sock' if 'INDEX_HUB_STATE_DIR' in os.environ else SOCKET
+
+
 MAX = 2 * 1024 * 1024
 BRIDGE_TIMEOUT = 75
 JS_MARGIN = 20  # Allow for evaluate_js calls and local processing.
@@ -23,7 +31,7 @@ if BRIDGE_TIMEOUT < client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT 
 def call_bridge(command, payload=None, timeout=BRIDGE_TIMEOUT):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
-        sock.connect(str(SOCKET))
+        sock.connect(str(_socket_path()))
         sock.sendall(json.dumps({'command': command, 'payload': payload}, ensure_ascii=False).encode() + b'\n')
         with sock.makefile('rb') as stream:
             raw = stream.readline(MAX + 1)
@@ -33,9 +41,10 @@ def call_bridge(command, payload=None, timeout=BRIDGE_TIMEOUT):
 
 
 def start_bridge(api):
-    SOCKET.parent.mkdir(exist_ok=True, mode=0o700)
-    if SOCKET.exists():
-        SOCKET.unlink()
+    socket_path = _socket_path()
+    socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if socket_path.exists():
+        socket_path.unlink()
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
@@ -79,8 +88,8 @@ def start_bridge(api):
             except (OSError, ValueError) as exc:
                 logging.getLogger('index_hub.bridge').warning('command=%s write %s', command, exc_summary(exc))
 
-    server = socketserver.UnixStreamServer(str(SOCKET), Handler)
-    os.chmod(SOCKET, 0o600)
+    server = socketserver.UnixStreamServer(str(socket_path), Handler)
+    os.chmod(socket_path, 0o600)
     thread = threading.Thread(target=server.serve_forever, name='hub-browser', daemon=True)
     thread.start()
     return server
