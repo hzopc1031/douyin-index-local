@@ -9,9 +9,9 @@ import sys
 
 
 def check(mode):
-    from playwright.sync_api import sync_playwright
     if mode == 'headed' and not os.environ.get('DISPLAY'):
         return {'mode': mode, 'ok': False, 'error': 'DISPLAY unset'}
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=(mode == 'headless'))
         try:

@@ -10,7 +10,7 @@ class BrowserCheckTests(unittest.TestCase):
         self.assertEqual(qr_browser_check.main(['x', 'bogus']), 1)
 
     def test_headed_without_display(self):
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {}, clear=True), patch.dict('sys.modules', {'playwright': None, 'playwright.sync_api': None}):
             self.assertEqual(qr_browser_check.check('headed'), {'mode': 'headed', 'ok': False, 'error': 'DISPLAY unset'})
 
     def test_real_browser(self):
