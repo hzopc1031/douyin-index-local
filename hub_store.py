@@ -30,6 +30,18 @@ class HubError(ValueError):
         self.code, self.status = code, status
 
 
+def redact(text: str) -> str:
+    """Redact credential assignments and long opaque strings in diagnostics."""
+    # Cookie headers contain several assignments; redact the whole header first.
+    text = re.sub(
+        r"(?i)(?<![\w.-])([\w.-]*cookie[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\r\n\"'}]*",
+        r'\1***', text)
+    text = re.sub(
+        r"(?i)(?<![\w.-])([\w.-]*(?:cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key)[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\s,;\x26}\"']+",
+        r'\1***', text)
+    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', text)
+
+
 def exc_summary(exc) -> str:
     """Bounded local diagnostic; redact credentials before truncating."""
     message = redact(str(exc))
@@ -279,6 +291,35 @@ class Store:
             if result['metadata']['complete']:
                 return result
         return None
+
+    def trend_no_data(self, keyword, within_seconds=86400):
+        latest = None
+        for row in self.db.execute(
+                "SELECT query,status,result FROM jobs WHERE updated>=? "
+                "AND status IN ('no_data','partial','succeeded') ORDER BY updated DESC,rowid DESC",
+                (time.time() - within_seconds,)):
+            query = json.loads(row['query'])
+            if not query.get('kind') and keyword in query.get('keywords', []):
+                latest = row
+                break
+        if latest is None:
+            return False
+        result = json.loads(latest['result']) if latest['result'] else {}
+        rows = [r for r in result.get('rows', []) if r.get('keyword') == keyword]
+        if any(r.get('search_index') is not None for r in rows):
+            return False
+        if not rows and latest['status'] != 'no_data':
+            return False
+        # Historical nonempty observations prevent classifying a known term as empty.
+        for row in self.db.execute('SELECT value FROM points WHERE keyword=? AND metric=?',
+                                   (keyword, 'search_index')):
+            if json.loads(row['value']) is not None:
+                return False
+        for row in self.db.execute('SELECT result FROM datasets'):
+            if any(r.get('keyword') == keyword and r.get('search_index') is not None
+                   for r in json.loads(row['result']).get('rows', [])):
+                return False
+        return True
 
     def job(self, identifier):
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()

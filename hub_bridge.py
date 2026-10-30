@@ -7,14 +7,20 @@ import socketserver
 import threading
 from pathlib import Path
 
+import client
 from hub_store import exc_summary
 
 ROOT = Path(__file__).resolve().parent
 SOCKET = ROOT / '.cloud-state' / 'browser.sock'
 MAX = 2 * 1024 * 1024
+BRIDGE_TIMEOUT = 75
+JS_MARGIN = 20  # Allow for evaluate_js calls and local processing.
+# Worst case for one browser-side task: total deadline plus one blocking read plus JS margin.
+if BRIDGE_TIMEOUT < client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT + JS_MARGIN:
+    raise RuntimeError('Bridge timeout must cover the request deadline and browser processing margin')
 
 
-def call_bridge(command, payload=None, timeout=45):
+def call_bridge(command, payload=None, timeout=BRIDGE_TIMEOUT):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
         sock.connect(str(SOCKET))
@@ -33,7 +39,7 @@ def start_bridge(api):
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
-            self.request.settimeout(45)
+            self.request.settimeout(BRIDGE_TIMEOUT)
             command = 'unknown'
             try:
                 raw = self.rfile.readline(16385)

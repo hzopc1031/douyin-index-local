@@ -376,6 +376,45 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_redacts_cookie_headers_and_short_credentials(self):
+        from hub_store import exc_summary, redact
+        samples = (
+            ('Cookie: sessionid=abc; sid_guard=short|1700; odin_tt=xyz',
+             ('abc', 'short', '1700', 'xyz')),
+            ('set-cookie: uid_tt=uidv; Path=/; ttwid=ttw1', ('uidv', 'Path=/', 'ttw1')),
+            ('params msToken=tok1&a_bogus=bogus1&verifyFp=verify_abc',
+             ('tok1', 'bogus1', 'verify_abc')),
+            ("{'Cookie': 'sid_tt=s1; s_v_web_id=web_id_1', 'x-csrf-token': 'csrfv'}",
+             ('s1', 'web_id_1', 'csrfv')),
+            ('{"cookie": "passport_csrf_token=pc1; odin_tt=o2"}', ('pc1', 'o2')),
+        )
+        for message, values in samples:
+            with self.subTest(message=message):
+                summary = exc_summary(RuntimeError(message))
+                self.assertTrue(summary.startswith('RuntimeError: '))
+                for output in (redact(message), summary):
+                    self.assertIn('***', output)
+                    for value in values:
+                        self.assertNotIn(value, output)
+
+    def test_redaction_boundaries_and_plain_diagnostics(self):
+        from hub_store import exc_summary, redact
+        self.assertEqual(redact('ConnectionResetError: peer closed'),
+                         'ConnectionResetError: peer closed')
+        self.assertEqual(exc_summary(ConnectionResetError('peer closed')),
+                         'ConnectionResetError errno=None: peer closed')
+        for key in ('cookie', 'token', 'session', 'sessionid', 'sid_', 'sid', 'uid_tt',
+                    'odin_tt', 'ttwid', 'mstoken', 'a_bogus', 'verifyfp', 's_v_web_id',
+                    'csrf', 'passport', 'passwd', 'password', 'secret', 'auth', 'key'):
+            for template in ('prefix_{}=sensitive', '{}: sensitive', '"{}": "sensitive"'):
+                with self.subTest(key=key, template=template):
+                    self.assertNotIn('sensitive', redact(template.format(key.upper())))
+        self.assertEqual(redact('Cookie: a=short; b=tiny\npeer closed'),
+                         'Cookie: ***\npeer closed')
+        self.assertEqual(redact('errno=2, status: failed; peer closed'),
+                         'errno=2, status: failed; peer closed')
+        self.assertEqual(redact('A' * 24), '***')
+
     def test_summary_redacts_before_truncation(self):
         from hub_store import exc_summary
         for key in ('cookie', 'access_token', 'session', 'sessionid', 'passwd',
@@ -410,6 +449,7 @@ class DiagnosticTests(unittest.TestCase):
             handler.wfile = io.BytesIO()
             with self.assertLogs('index_hub.bridge', 'WARNING') as logs:
                 handler.handle()
+            handler.request.settimeout.assert_called_once_with(hub_bridge.BRIDGE_TIMEOUT)
             self.assertIn('command=status', logs.output[0])
             self.assertIn('RuntimeError', logs.output[0])
             self.assertNotIn(SECRET, str(logs.output))
@@ -417,6 +457,21 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_timeout_covers_browser_task(self):
+        import client
+        import hub_bridge
+        from hub_web import SAFE_ERRORS
+        self.assertEqual(hub_bridge.BRIDGE_TIMEOUT, 75)
+        self.assertEqual(hub_bridge.JS_MARGIN, 20)
+        self.assertGreaterEqual(hub_bridge.BRIDGE_TIMEOUT,
+                                client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT
+                                + hub_bridge.JS_MARGIN)
+        # Connection setup must also fit inside the total request deadline.
+        self.assertLess(client.REQUEST_CONNECT_TIMEOUT, client.REQUEST_TOTAL_DEADLINE)
+        self.assertEqual(hub_bridge.call_bridge.__defaults__[-1], hub_bridge.BRIDGE_TIMEOUT)
+        self.assertIn(f'{hub_bridge.BRIDGE_TIMEOUT} 秒', SAFE_ERRORS['bridge_timeout'])
+
+
     async def test_bridge_exceptions_are_logged_without_retry(self):
         from hub_web import Hub
         for exc, code, level in (
@@ -430,6 +485,8 @@ class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 def bridge(command, payload, timeout):
                     if command == 'status':
                         return {'ok': True, 'state': 'browser_ready'}
+                    from hub_bridge import BRIDGE_TIMEOUT
+                    self.assertEqual(timeout, BRIDGE_TIMEOUT)
                     calls.append(command)
                     raise exc
                 hub = Hub(root, bridge)
