@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from aiohttp import web
+import hub_bridge
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
 
 logger = logging.getLogger('index_hub')
@@ -23,7 +24,7 @@ SAFE_ERRORS = {
     'verification_required': '平台要求人工验证，请通过远程桌面处理后手动恢复。',
     'rate_limited': '平台返回限频信号，采集已暂停，未自动重试。',
     'access_denied': '平台拒绝访问，采集已暂停，请检查官方页面。',
-    'bridge_timeout': '浏览器桥接 45 秒内未返回；平台请求可能仍在进行，未自动重试。',
+    'bridge_timeout': f'浏览器桥接 {hub_bridge.BRIDGE_TIMEOUT} 秒内未返回；平台请求可能仍在进行，未自动重试。',
     'browser_unavailable': '浏览器未就绪，请检查远程桌面。',
     'network_error': '上游网络请求失败，未自动重试。',
     'response_schema': '平台响应格式变化，未自动重试。',
@@ -103,7 +104,7 @@ class Hub:
         self.store.set('daily', {'date': today, 'count': counter['count'] + 1})
         started = time.monotonic()
         try:
-            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, 45)
+            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, hub_bridge.BRIDGE_TIMEOUT)
             if response.get('ok') is not True:
                 code = response.get('code', '')
                 if code in {'cooldown', 'busy'}:

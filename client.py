@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import math
 import re
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -31,6 +32,12 @@ TREND_URL = ORIGIN + "/api/v2/index/get_multi_keyword_hot_trend"
 VALID_DATE_URL = ORIGIN + "/api/v2/index/get_keyword_valid_date"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+# Each trend or extension task sends exactly one POST, with no automatic retries.
+REQUEST_CONNECT_TIMEOUT = 10
+REQUEST_READ_TIMEOUT = 20
+# The deadline is checked between chunks, so one blocking read may add up to
+# REQUEST_READ_TIMEOUT: worst case per request is TOTAL_DEADLINE + READ_TIMEOUT.
+REQUEST_TOTAL_DEADLINE = 35
 _AES = {
     "1": ("91b4a33aa9fd3bb00f2ea519c5d0a44d", "26e84bd5c395e491fda23cedda0d843e"),
     "2": ("4a35db61325bef35e8513a1289c50bdc", "39e90c2e3821460f2f957fcf7a62dcf9"),
@@ -289,7 +296,7 @@ def parse_trends(payload: dict[str, Any], keywords: list[str], start: dt.date,
 
 class DouyinIndexClient:
     def __init__(self, session: requests.Session | None = None, user_agent: str | None = None,
-                 timeout: float = 25.0):
+                 timeout: float = REQUEST_READ_TIMEOUT):
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout must be positive and finite")
         self.session = session if session is not None else requests.Session()
@@ -310,9 +317,10 @@ class DouyinIndexClient:
         if endpoint not in (TREND_URL, VALID_DATE_URL, ORIGIN+'/api/v2/index/get_relation_word', ORIGIN+'/api/v2/index/get_portrait'):
             raise ValueError("Unsupported endpoint")
         response = None
+        started = time.monotonic()
         try:
             response = self.session.post(endpoint, json=body, headers=self.headers,
-                                         timeout=self.timeout, allow_redirects=False,
+                                         timeout=(REQUEST_CONNECT_TIMEOUT, self.timeout), allow_redirects=False,
                                          stream=True, verify=True)
             status = response.status_code
             if status != 200:
@@ -323,6 +331,8 @@ class DouyinIndexClient:
             chunks: list[bytes] = []
             size = 0
             for chunk in response.iter_content(chunk_size=65536):
+                if time.monotonic() - started > REQUEST_TOTAL_DEADLINE:
+                    raise _error("network_error", "平台响应超过总时限，本次请求已停止；未自动重试。")
                 size += len(chunk)
                 if size > MAX_RESPONSE_BYTES:
                     raise _error("response_too_large", "接口响应超过本地验证允许的大小。")

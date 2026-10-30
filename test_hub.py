@@ -433,6 +433,7 @@ class DiagnosticTests(unittest.TestCase):
             handler.wfile = io.BytesIO()
             with self.assertLogs('index_hub.bridge', 'WARNING') as logs:
                 handler.handle()
+            handler.request.settimeout.assert_called_once_with(hub_bridge.BRIDGE_TIMEOUT)
             self.assertIn('command=status', logs.output[0])
             self.assertIn('RuntimeError', logs.output[0])
             self.assertNotIn(SECRET, str(logs.output))
@@ -440,6 +441,21 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_timeout_covers_browser_task(self):
+        import client
+        import hub_bridge
+        from hub_web import SAFE_ERRORS
+        self.assertEqual(hub_bridge.BRIDGE_TIMEOUT, 75)
+        self.assertEqual(hub_bridge.JS_MARGIN, 20)
+        self.assertGreaterEqual(hub_bridge.BRIDGE_TIMEOUT,
+                                client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT
+                                + hub_bridge.JS_MARGIN)
+        # Connection setup must also fit inside the total request deadline.
+        self.assertLess(client.REQUEST_CONNECT_TIMEOUT, client.REQUEST_TOTAL_DEADLINE)
+        self.assertEqual(hub_bridge.call_bridge.__defaults__[-1], hub_bridge.BRIDGE_TIMEOUT)
+        self.assertIn(f'{hub_bridge.BRIDGE_TIMEOUT} 秒', SAFE_ERRORS['bridge_timeout'])
+
+
     async def test_bridge_exceptions_are_logged_without_retry(self):
         from hub_web import Hub
         for exc, code, level in (
@@ -453,6 +469,8 @@ class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 def bridge(command, payload, timeout):
                     if command == 'status':
                         return {'ok': True, 'state': 'browser_ready'}
+                    from hub_bridge import BRIDGE_TIMEOUT
+                    self.assertEqual(timeout, BRIDGE_TIMEOUT)
                     calls.append(command)
                     raise exc
                 hub = Hub(root, bridge)
