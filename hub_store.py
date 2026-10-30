@@ -30,18 +30,6 @@ class HubError(ValueError):
         self.code, self.status = code, status
 
 
-def redact(text: str) -> str:
-    """Redact credential assignments and long opaque strings in diagnostics."""
-    # Cookie headers contain several assignments; redact the whole header first.
-    text = re.sub(
-        r"(?i)(?<![\w.-])([\w.-]*cookie[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\r\n\"'}]*",
-        r'\1***', text)
-    text = re.sub(
-        r"(?i)(?<![\w.-])([\w.-]*(?:cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key)[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\s,;\x26}\"']+",
-        r'\1***', text)
-    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', text)
-
-
 def exc_summary(exc) -> str:
     """Bounded local diagnostic; redact credentials before truncating."""
     message = redact(str(exc))

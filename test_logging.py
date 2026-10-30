@@ -61,7 +61,7 @@ class LoggingTests(unittest.TestCase):
                 self.assertEqual((file_handler.maxBytes, file_handler.backupCount), (256, 2))
                 # Exercise only the added handlers, leaving the test runner's logging alone.
                 for handler in added:
-                    handler.handle(logging.makeLogRecord({'msg': 'cookie=%s readable', 'args': ('SECRET',),
+                    handler.handle(logging.makeLogRecord({'msg': 'token=%s readable', 'args': ('SECRET',),
                                                          'levelno': logging.INFO, 'levelname': 'INFO'}))
                     handler.flush()
                 self.assertIn('readable', path.read_text())

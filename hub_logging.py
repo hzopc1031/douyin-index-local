@@ -6,11 +6,22 @@ from pathlib import Path
 import re
 
 
+KEY_NAMES = ('cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|'
+             'verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key')
+
+
 def redact(text) -> str:
-    message = re.sub(
-        r"(?i)([\w.-]*(?:cookie|token|session|sessionid|passwd|password|secret|auth|key)[\w.-]*[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)",
-        r'\1***', str(text))
-    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', message)
+    """Redact credential assignments and long opaque strings in diagnostics."""
+    text = str(text)
+    # Cookie headers contain several assignments; redact the whole header first.
+    text = re.sub(
+        r"(?i)(?<![\w.-])([\w.-]*cookie[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\r\n\"'}]*",
+        r'\1***', text)
+    text = re.sub(
+        r"(?i)(?<![\w.-])([\w.-]*(?:" + KEY_NAMES + r")[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\x26}\"']+)",
+        r'\1***', text)
+    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', text)
 
 
 class RedactingFilter(logging.Filter):
