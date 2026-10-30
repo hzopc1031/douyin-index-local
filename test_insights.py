@@ -6,6 +6,21 @@ from hub_store import HubError, public_result, validate_query
 from test_hub import ApiTests as _ApiTests, fixture, QUERY
 
 class InsightTests(unittest.TestCase):
+    def test_client_precheck_error_classification(self):
+        import threading
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from app import LoginRequired
+        from hub_insights import collect
+        for kind in ('related', 'audience'):
+            for error, code in ((LoginRequired('请先完成登录。'), 'authentication_required'),
+                                (ValueError('暂时无法识别官方窗口。'), 'browser_unavailable')):
+                with self.subTest(kind=kind, code=code):
+                    api = SimpleNamespace(_lock=threading.Lock(), _client=Mock(side_effect=error))
+                    self.assertEqual(collect(api, {**QUERY, 'kind': kind}),
+                                     {'ok': False, 'code': code, 'message': str(error)})
+                    self.assertFalse(api._lock.locked())
+
     def test_official_insight_body_uses_param_wrapper(self):
         import threading
         from types import SimpleNamespace
@@ -53,6 +68,58 @@ class InsightTests(unittest.TestCase):
         self.assertNotIn('SECRET',json.dumps(p))
         with self.assertRaises(HubError):project({'unexpected':[]},'related')
         with self.assertRaises(HubError):validate_insight({**QUERY,'kind':'audience','keywords':['a','b']})
+
+class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import tempfile
+        from pathlib import Path
+        from hub_web import Hub
+        from unittest.mock import patch
+        async def inline_thread(func, *args):
+            return func(*args)
+        self.thread_patch = patch("hub_web.asyncio.to_thread", side_effect=inline_thread)
+        self.thread_patch.start()
+        self.addCleanup(self.thread_patch.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.hub = Hub(Path(self.temp.name), bridge=self.bridge)
+
+    def bridge(self, command, payload, timeout):
+        if command == 'status':
+            return {'ok': True, 'state': 'browser_ready'}
+        self.assertEqual(command, 'insight')
+        return self.response
+
+    async def asyncTearDown(self):
+        self.hub.store.close()
+        self.temp.cleanup()
+
+    async def test_insight_login_failure_pauses_queued_work(self):
+        from unittest.mock import Mock
+        for kind in ('related', 'audience'):
+            with self.subTest(kind=kind):
+                self.hub.store.set('paused', None)
+                self.hub.store.set('last_attempt_at', 0)
+                job, _ = self.hub.store.submit({**QUERY, 'kind': kind}, 'fixture', 'login-' + kind)
+                queued, _ = self.hub.store.submit({**QUERY, 'kind': kind, 'keywords': ['银杏']},
+                                                   'fixture', 'queued-' + kind)
+                # No login keyword: the explicit code must cause the pause.
+                self.response = {'ok': False, 'code': 'authentication_required', 'message': 'Session expired'}
+                self.assertTrue(await self.hub.run_one())
+                failed = self.hub.store.job(job['id'])
+                self.assertEqual(failed['status'], 'failed')
+                self.assertEqual(failed['error']['code'], 'authentication_required')
+                self.assertEqual(self.hub.store.get('paused')['code'], 'authentication_required')
+                self.hub.store.set('last_attempt_at', 0)
+                bridge = Mock(side_effect=AssertionError('Paused work must not call bridge'))
+                original = self.hub.bridge
+                self.hub.bridge = bridge
+                try:
+                    self.assertFalse(await self.hub.run_one())
+                    bridge.assert_not_called()
+                finally:
+                    self.hub.bridge = original
+                self.assertEqual(self.hub.store.job(queued['id'])['status'], 'queued')
+                self.hub.store.update_job(queued['id'], 'failed')
 
 class InsightApiTests(_ApiTests):
     async def test_priority_fifteen_seconds_and_http_diagnostics(self):

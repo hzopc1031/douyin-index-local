@@ -89,6 +89,14 @@ class ControllerTests(unittest.TestCase):
         self.output_patch.stop()
         self.temp.cleanup()
 
+    def test_cloud_login_precheck_returns_authentication_required(self):
+        self.assertTrue(issubclass(app.LoginRequired, ValueError))
+        reply = self.api.fetch_batch("银杏", "2025-01-07", cloud=True)
+        self.assertEqual(reply, {"ok": False, "code": "authentication_required",
+                                 "message": "请先打开官方登录窗口。"})
+        self.assertFalse(self.api._attempted)
+        self.assertFalse(self.api._lock.locked())
+
     def test_cache_hit_has_no_login_or_network_side_effect(self):
         result = complete_result()
         folder = self.api._store.save(result)
