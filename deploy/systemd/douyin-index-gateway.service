@@ -9,10 +9,9 @@ Group=work-tencent-manager
 WorkingDirectory=/srv/work-ecs-projects/douyin-index-local
 ExecStart=/bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-gateway.sh
 Restart=on-failure
-SuccessExitStatus=143
 RestartSec=10
 Environment=INDEX_HUB_LOG_DIR=/srv/work-ecs-projects/douyin-index-local/logs
-# 推荐：只监听 Tailscale 地址或 127.0.0.1（配合反向代理），而不是 0.0.0.0。
+# 推荐靠防火墙只放行 tailscale0；不要在前面加反向代理（所有客户端会变成同一个 IP，认证限流会失效）。
 #Environment=INDEX_HUB_BIND=100.x.y.z
 UMask=0077
 PrivateTmp=true

@@ -9,7 +9,6 @@ Group=work-tencent-manager
 WorkingDirectory=/srv/work-ecs-projects/douyin-index-local
 ExecStart=/usr/bin/dbus-run-session -- /bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-desktop.sh
 Restart=on-failure
-SuccessExitStatus=143
 RestartSec=10
 Environment=INDEX_HUB_LOG_DIR=/srv/work-ecs-projects/douyin-index-local/logs
 UMask=0077
