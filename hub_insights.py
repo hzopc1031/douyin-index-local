@@ -70,7 +70,20 @@ def collect(api, body):
             from client import ORIGIN
             endpoint=ORIGIN+'/api/v2/index/'+('get_relation_word' if query['kind']=='related' else 'get_portrait')
             result=client._post(endpoint,{'param':{'keyword':query['keywords'][0],
-                'start_date':query['start_date'].replace('-',''),'end_date':query['end_date'].replace('-',''),'app_name':'aweme'}})
+                'start_date':query['start_date'].replace('-',''),'end_date':query['end_date'].replace('-',''),'app_name':'aweme'}}, allow_empty_data=True)
+            raw_data=result['data']
+            if raw_data is None or raw_data == {}:
+                return {'ok':False,'code':'no_data'}
+            if isinstance(raw_data,dict):
+                if query['kind']=='related':
+                    keys={'relation_word_list','search_relation_word_list'}
+                    if all(raw_data.get(k) is None or raw_data.get(k) == [] for k in keys):
+                        metadata={'BaseResp','status_code','status','code','msg','message','extra','log_pb'}
+                        if raw_data.keys() <= keys | metadata:
+                            return {'ok':False,'code':'no_data'}
+                        raise HubError('response_schema','关联词空响应包含未知字段。',502)
+                elif 'data' in raw_data and (raw_data['data'] is None or raw_data['data'] == []):
+                    return {'ok':False,'code':'no_data'}
             data=project(result['data'],query['kind'])
             return {'ok':True,'data':data,'metadata':{**query,'source':'creator.douyin.com',
                 'fetched_at':result['metadata']['fetched_at'],'verification':'pending',

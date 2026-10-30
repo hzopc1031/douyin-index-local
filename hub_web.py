@@ -109,6 +109,10 @@ class Hub:
                 if code in {'cooldown', 'busy'}:
                     self._requeue_unattempted(row['id'], today)
                     return True
+                if code == 'no_data' and query.get('kind'):
+                    self.store.update_job(row['id'], 'no_data', error={'code':code,'message':SAFE_ERRORS[code]})
+                    self.store.set('last_result', {'ok': True, 'at': time.time()})
+                    return True
                 if code not in SAFE_ERRORS:
                     code = 'authentication_required' if '登录' in str(response.get('message', '')) else 'request_failed'
                 details={'code':code,'message':SAFE_ERRORS[code]}

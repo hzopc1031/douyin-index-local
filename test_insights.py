@@ -26,11 +26,13 @@ class InsightTests(unittest.TestCase):
         from types import SimpleNamespace
         from hub_insights import collect
         calls=[]
+        self_outer=self
         class Client:
             session=SimpleNamespace(cookies=SimpleNamespace(clear=lambda:None),close=lambda:None)
-            def _post(self,endpoint,body):
+            def _post(self,endpoint,body, *, allow_empty_data=False):
+                self_outer.assertTrue(allow_empty_data)
                 calls.append((endpoint,body))
-                return {'data':{'relation_word_list':[],'search_relation_word_list':[]},'metadata':{'fetched_at':'2026-10-28T12:00:00+08:00'}}
+                return {'data':{'relation_word_list':[{'relation_word':'银杏'}]},'metadata':{'fetched_at':'2026-10-28T12:00:00+08:00'}}
         api=SimpleNamespace(_lock=threading.Lock(),_client=lambda:Client())
         result=collect(api,{**QUERY,'kind':'related'})
         self.assertTrue(result['ok'])
@@ -45,6 +47,37 @@ class InsightTests(unittest.TestCase):
             self.assertEqual(len(calls),2)
         finally:
             api._lock.release()
+
+    def test_collect_empty_and_unknown_responses(self):
+        import threading
+        from types import SimpleNamespace
+        from client import DouyinIndexClient, ORIGIN, SanitizedClientError
+        from hub_insights import collect
+        from test_client import FixtureSession, response
+        cases = {
+            'related': [None, {}, {'BaseResp': {'StatusCode': 0}},
+                        {'relation_word_list': None},
+                        {'relation_word_list': [], 'search_relation_word_list': None},
+                        {'relation_word_list': [], 'search_relation_word_list': []}],
+            'audience': [None, {}, {'data': None}, {'data': []}, []],
+        }
+        for kind, values in cases.items():
+            for value in values + [{'foo': 1}, {'relation_word_list': [], 'foo': 1}, 'unknown', 0]:
+                with self.subTest(kind=kind, value=value):
+                    session = FixtureSession(response({'status': 0, 'data': value}))
+                    api = SimpleNamespace(_lock=threading.Lock(),
+                                          _client=lambda: DouyinIndexClient(session))
+                    result = collect(api, {**QUERY, 'kind': kind})
+                    self.assertFalse(result['ok'])
+                    self.assertEqual(result['code'], 'no_data' if value in values else 'response_schema')
+                    if value in values:
+                        self.assertEqual(result, {'ok': False, 'code': 'no_data'})
+                    self.assertEqual(len(session.calls), 1)
+                    self.assertFalse(api._lock.locked())
+        for kind in ('get_relation_word', 'get_portrait'):
+            client = DouyinIndexClient(FixtureSession(response({'status': 1, 'data': None})))
+            with self.assertRaises(SanitizedClientError):
+                client._post(ORIGIN+'/api/v2/index/'+kind, {}, allow_empty_data=True)
 
     def test_custom_dates_and_missing_day_integrity(self):
         today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
@@ -92,6 +125,30 @@ class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.hub.store.close()
         self.temp.cleanup()
+
+    async def test_insight_no_data_consumes_attempt_without_pause(self):
+        import threading
+        from types import SimpleNamespace
+        from client import DouyinIndexClient
+        from hub_insights import collect
+        from hub_web import SAFE_ERRORS
+        from test_client import FixtureSession, response
+        for kind in ('related', 'audience'):
+            with self.subTest(kind=kind):
+                self.hub.store.set('last_attempt_at', 0)
+                before = self.hub.store.get('daily', {}).get('count', 0)
+                job, _ = self.hub.store.submit({**QUERY, 'kind': kind}, 'fixture', 'empty-' + kind)
+                session = FixtureSession(response({'status': 0, 'data': None}))
+                api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: DouyinIndexClient(session))
+                self.response = collect(api, {**QUERY, 'kind': kind})
+                self.assertEqual(len(session.calls), 1)
+                self.assertTrue(await self.hub.run_one())
+                result = self.hub.store.job(job['id'])
+                self.assertEqual(result['status'], 'no_data')
+                self.assertEqual(result['error'], {'code': 'no_data', 'message': SAFE_ERRORS['no_data']})
+                self.assertFalse(self.hub.store.get('paused'))
+                self.assertTrue(self.hub.store.get('last_result')['ok'])
+                self.assertEqual(self.hub.store.get('daily')['count'], before + 1)
 
     async def test_insight_login_failure_pauses_queued_work(self):
         from unittest.mock import Mock

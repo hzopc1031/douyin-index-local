@@ -101,6 +101,11 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 6)
         self.assertEqual(result["metadata"]["missing_dates"], ["2025-01-02"])
 
+    def test_null_trend_data_is_response_schema(self):
+        with self.assertRaises(SanitizedClientError) as caught:
+            self.run_query({"status": 0, "data": None})
+        self.assertEqual(caught.exception.code, "response_schema")
+
     def test_empty_data_is_incomplete_not_zero(self):
         result, _ = self.run_query({"status": 0, "data": {"hot_list": []}})
         self.assertEqual(result["rows"], [])

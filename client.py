@@ -134,11 +134,14 @@ def _check_business_status(payload: dict[str, Any], http_status: int) -> None:
     raise SanitizedClientError(category, description, http_status=http_status, business_code=code)
 
 
-def _payload_object(envelope: dict[str, Any], http_status: int) -> dict[str, Any]:
+def _payload_object(envelope: dict[str, Any], http_status: int, *,
+                    allow_empty_data: bool = False) -> dict[str, Any] | None:
     _check_business_status(envelope, http_status)
     if "data" not in envelope:
         return envelope
     data = envelope["data"]
+    if data is None and allow_empty_data:
+        return None
     if not isinstance(data, dict):
         raise _error("response_schema", "接口业务数据不是预期的对象。")
     _check_business_status(data, http_status)
@@ -303,7 +306,7 @@ class DouyinIndexClient:
                 raise ValueError("Invalid user agent")
             self.headers["User-Agent"] = user_agent
 
-    def _post(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, endpoint: str, body: dict[str, Any], *, allow_empty_data: bool = False) -> dict[str, Any]:
         if endpoint not in (TREND_URL, VALID_DATE_URL, ORIGIN+'/api/v2/index/get_relation_word', ORIGIN+'/api/v2/index/get_portrait'):
             raise ValueError("Unsupported endpoint")
         response = None
@@ -338,7 +341,8 @@ class DouyinIndexClient:
                 _check_business_status(payload, status)
                 data = {'data': payload['data']}
             else:
-                data = _payload_object(payload, status)
+                data = _payload_object(payload, status, allow_empty_data=allow_empty_data and
+                                       endpoint in (ORIGIN+'/api/v2/index/get_relation_word', ORIGIN+'/api/v2/index/get_portrait'))
             return {"raw": {"response": envelope, "decoded": decoded}, "data": data,
                     "metadata": {"endpoint": endpoint, "http_status": status,
                                  "encryption": encryption, "timezone": "Asia/Shanghai",
