@@ -290,6 +290,35 @@ class Store:
                 return result
         return None
 
+    def trend_no_data(self, keyword, within_seconds=86400):
+        latest = None
+        for row in self.db.execute(
+                "SELECT query,status,result FROM jobs WHERE updated>=? "
+                "AND status IN ('no_data','partial','succeeded') ORDER BY updated DESC,rowid DESC",
+                (time.time() - within_seconds,)):
+            query = json.loads(row['query'])
+            if not query.get('kind') and keyword in query.get('keywords', []):
+                latest = row
+                break
+        if latest is None:
+            return False
+        result = json.loads(latest['result']) if latest['result'] else {}
+        rows = [r for r in result.get('rows', []) if r.get('keyword') == keyword]
+        if any(r.get('search_index') is not None for r in rows):
+            return False
+        if not rows and latest['status'] != 'no_data':
+            return False
+        # Historical nonempty observations prevent classifying a known term as empty.
+        for row in self.db.execute('SELECT value FROM points WHERE keyword=? AND metric=?',
+                                   (keyword, 'search_index')):
+            if json.loads(row['value']) is not None:
+                return False
+        for row in self.db.execute('SELECT result FROM datasets'):
+            if any(r.get('keyword') == keyword and r.get('search_index') is not None
+                   for r in json.loads(row['result']).get('rows', [])):
+                return False
+        return True
+
     def job(self, identifier):
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
         if not row:
