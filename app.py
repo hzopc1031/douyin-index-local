@@ -88,6 +88,7 @@ def compare_result(result, entries, *, compared_at=None):
 class Api:
     def __init__(self):
         from storage import ResultStore
+        self._qr_lock = threading.Lock()
         self._page = None
         self._lock = threading.Lock()
         self._result = None
@@ -105,7 +106,9 @@ class Api:
         if login_mode() != 'qr':
             return None
         if not hasattr(self, '_qr'):
-            self._qr = QrLoginManager()
+            with self._qr_lock:
+                if not hasattr(self, '_qr'):
+                    self._qr = QrLoginManager()
         return self._qr
 
     def _on_auth_failed(self):

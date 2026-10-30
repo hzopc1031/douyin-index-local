@@ -2,6 +2,8 @@
 import copy
 import json
 import tempfile
+import threading
+import time
 import unittest
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -38,6 +40,30 @@ class TrackingSession(requests.Session):
     def close(self):
         self.was_closed = True
         super().close()
+
+
+class QrManagerConcurrencyTests(unittest.TestCase):
+    def test_single_lazy_manager(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(app, 'OUTPUT', Path(temp)):
+            api = app.Api()
+            barrier = threading.Barrier(8)
+            results = []
+            def construct():
+                time.sleep(.03)
+                return object()
+            def get_manager():
+                barrier.wait(timeout=3)
+                results.append(api._qr_manager())
+            with patch('qr_login.login_mode', return_value='qr'), patch('qr_login.QrLoginManager', side_effect=construct) as constructor:
+                threads = [threading.Thread(target=get_manager) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(3)
+                    self.assertFalse(thread.is_alive())
+                constructor.assert_called_once_with()
+            self.assertEqual(len(results), 8)
+            self.assertTrue(all(result is results[0] for result in results))
 
 
 class ComparisonTests(unittest.TestCase):
