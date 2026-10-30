@@ -5,6 +5,7 @@ import csv
 import datetime as dt
 import io
 import json
+import math
 import time
 from pathlib import Path
 
@@ -26,7 +27,8 @@ SAFE_ERRORS = {
     'unexpected_keyword': '返回关键词与请求不一致，已阻止存入错误数据；请在官方页面核实准确词条。',
     'duplicate_keyword': '平台重复返回关键词，未保存不可靠结果。',
     'response_format': '平台返回格式异常，请检查官方页面。',
-    'cooldown': '采集进程仍处于请求冷却期，未自动重试。',
+    'cooldown': '采集进程仍处于请求冷却期，任务已回到队列。',
+    'busy': '采集进程正忙，任务已回到队列。',
     'no_data': '平台未返回该关键词在此日期范围的有效指数；可能未收录或该范围无数据，不代表指数为零。',
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
     'request_failed': '本次取数未完成，未自动重试。',
@@ -51,6 +53,14 @@ class Hub:
             return state if state in ('browser_ready', 'login_required') else 'unavailable'
         except Exception:
             return 'unavailable'
+
+    def _requeue_unattempted(self, job_id, attempt_day):
+        """Refund only the reserved attempt from the current Shanghai day."""
+        self.store.update_job(job_id, 'queued', error=None)
+        today = dt.datetime.now(TZ).date().isoformat()
+        counter = self.store.get('daily')
+        if today == attempt_day and counter and counter['date'] == attempt_day:
+            self.store.set('daily', {'date': attempt_day, 'count': max(0, counter['count'] - 1)})
 
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
@@ -89,6 +99,9 @@ class Hub:
             response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, 45)
             if response.get('ok') is not True:
                 code = response.get('code', '')
+                if code in {'cooldown', 'busy'}:
+                    self._requeue_unattempted(row['id'], today)
+                    return True
                 if code not in SAFE_ERRORS:
                     code = 'authentication_required' if '登录' in str(response.get('message', '')) else 'request_failed'
                 details={'code':code,'message':SAFE_ERRORS[code]}
@@ -241,9 +254,13 @@ def mount(app, hub):
         daily = s.get('daily', {'date': day, 'count': 0})
         if daily['date'] != day:
             daily = {'date': day, 'count': 0}
-        return reply({'version': '1.0.0', 'browser': await hub.browser_status(), 'paused': s.get('paused'),
+        browser = await hub.browser_status()
+        next_attempt = s.get('last_attempt_at', 0) + 15
+        remaining = max(0, math.ceil(next_attempt - time.time()))
+        return reply({'version': '1.0.0', 'browser': browser, 'paused': s.get('paused'),
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
-                      'next_online_attempt_at': s.get('last_attempt_at', 0) + 15,
+                      'next_online_attempt_at': next_attempt,
+                      'cooldown_remaining_seconds': remaining,
                       'daily_online_attempts': daily['count'],
                       'limits': {'keywords': 5, 'days': 731, 'online_interval_seconds': 15,
                                  'online_attempts_per_day': 50, 'cache_hours': 24,

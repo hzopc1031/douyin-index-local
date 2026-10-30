@@ -16,11 +16,20 @@ class InsightTests(unittest.TestCase):
             def _post(self,endpoint,body):
                 calls.append((endpoint,body))
                 return {'data':{'relation_word_list':[],'search_relation_word_list':[]},'metadata':{'fetched_at':'2026-10-28T12:00:00+08:00'}}
-        api=SimpleNamespace(_lock=threading.Lock(),_cloud_last_attempt=0,_client=lambda:Client())
+        api=SimpleNamespace(_lock=threading.Lock(),_client=lambda:Client())
         result=collect(api,{**QUERY,'kind':'related'})
         self.assertTrue(result['ok'])
         self.assertEqual(calls[0][1],{'param':{'keyword':'酵素','start_date':'20250101','end_date':'20250107','app_name':'aweme'}})
         self.assertFalse(api._lock.locked())
+        # A second explicit call has no browser-side cooldown.
+        self.assertTrue(collect(api,{**QUERY,'kind':'related'})['ok'])
+        self.assertEqual(len(calls),2)
+        api._lock.acquire()
+        try:
+            self.assertEqual(collect(api,{**QUERY,'kind':'related'})['code'],'busy')
+            self.assertEqual(len(calls),2)
+        finally:
+            api._lock.release()
 
     def test_custom_dates_and_missing_day_integrity(self):
         today=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()

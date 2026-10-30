@@ -1,6 +1,5 @@
 """Bounded projections for official index insight endpoints; no credential output."""
 import math
-import time
 from hub_store import HubError, validate_query
 
 KINDS = {'related', 'audience'}
@@ -63,11 +62,9 @@ def project(data, kind):
 
 def collect(api, body):
     query=validate_insight(body)
-    if not api._lock.acquire(blocking=False):return {'ok':False,'code':'cooldown'}
+    if not api._lock.acquire(blocking=False):return {'ok':False,'code':'busy'}
     try:
-        if time.time()-api._cloud_last_attempt<15:return {'ok':False,'code':'cooldown'}
         client=api._client()
-        api._cloud_last_attempt=time.time()
         try:
             from client import ORIGIN
             endpoint=ORIGIN+'/api/v2/index/'+('get_relation_word' if query['kind']=='related' else 'get_portrait')

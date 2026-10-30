@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 from desktop_gateway import HUB_KEY, create_app
@@ -235,6 +236,53 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.hub.store.submit(QUERY, 'fixture', 'two')
         self.assertFalse(await self.hub.run_one())
         self.assertEqual(len(self.calls), 1)
+
+    async def test_unattempted_bridge_response_requeues_and_refunds(self):
+        day = dt.datetime.now(TZ).date().isoformat()
+        previous_result = {'ok': True, 'at': 1}
+        for code in ('cooldown', 'busy'):
+            with self.subTest(code=code):
+                self.hub.store.set('last_attempt_at', 0)
+                self.hub.store.set('daily', {'date': day, 'count': 7})
+                self.hub.store.set('last_result', previous_result)
+                self.response = {'ok': False, 'code': code}
+                job, _ = self.hub.store.submit(QUERY, 'fixture', 'requeue-' + code)
+                before = time.time()
+                self.assertTrue(await self.hub.run_one())
+                saved = self.hub.store.job(job['id'])
+                self.assertEqual(saved['status'], 'queued')
+                self.assertIsNone(saved['error'])
+                self.assertEqual(self.hub.store.get('daily'), {'date': day, 'count': 7})
+                self.assertIsNone(self.hub.store.get('paused'))
+                self.assertEqual(self.hub.store.get('last_result'), previous_result)
+                self.assertGreaterEqual(self.hub.store.get('last_attempt_at'), before)
+                self.assertFalse(await self.hub.run_one())
+                self.hub.store.update_job(job['id'], 'failed')
+
+    async def test_refund_is_same_day_only_and_never_negative(self):
+        today = dt.datetime.now(TZ).date()
+        day = today.isoformat()
+        old_day = (today - dt.timedelta(days=1)).isoformat()
+        job, _ = self.hub.store.submit(QUERY, 'fixture', 'refund-boundaries')
+        for attempt_day, counter, expected in (
+            (day, {'date': day, 'count': 0}, {'date': day, 'count': 0}),
+            (old_day, {'date': old_day, 'count': 1}, {'date': old_day, 'count': 1}),
+            (old_day, {'date': day, 'count': 3}, {'date': day, 'count': 3}),
+            (day, {'date': old_day, 'count': 1}, {'date': old_day, 'count': 1}),
+        ):
+            self.hub.store.set('daily', counter)
+            self.hub._requeue_unattempted(job['id'], attempt_day)
+            self.assertEqual(self.hub.store.get('daily'), expected)
+
+    async def test_status_cooldown_remaining_seconds(self):
+        for last_attempt, expected in ((1000, 15), (985.1, 1), (985, 0), (900, 0)):
+            self.hub.store.set('last_attempt_at', last_attempt)
+            with patch('hub_web.time.time', return_value=1000):
+                response = await self.client.get('/api/v1/status', headers=self.bearer)
+                state = await response.json()
+            self.assertEqual(state['next_online_attempt_at'], last_attempt + 15)
+            self.assertEqual(state['cooldown_remaining_seconds'], expected)
+            self.assertIs(type(state['cooldown_remaining_seconds']), int)
 
     async def test_daily_limit_before_touching_upstream(self):
         self.hub.store.set('daily', {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 50})

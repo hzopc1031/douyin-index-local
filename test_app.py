@@ -137,6 +137,18 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(session.was_closed)
         self.assertEqual(len(session.cookies), 0)
 
+    def test_cloud_explicit_calls_have_no_browser_cooldown(self):
+        client = Mock(session=TrackingSession())
+        client.query_many.side_effect = lambda *args: complete_result()
+        with patch.object(self.api, "_client", return_value=client), \
+                patch.object(self.api._store, "lookup", return_value=None):
+            for _ in range(2):
+                reply = self.api.fetch_batch("银杏\n酵素", "2025-01-07", cloud=True)
+                self.assertTrue(reply["ok"])
+                self.assertFalse(reply["cache_hit"])
+        self.assertEqual(client.query_many.call_count, 2)
+        self.assertEqual(self.api.fetch_batch("消化酶", "2025-01-07")["code"], "session_request_used")
+
     def test_input_errors_do_not_consume_request_and_successful_batch_exports(self):
         session = TrackingSession()
         client = Mock(session=session)
@@ -187,7 +199,7 @@ class ControllerTests(unittest.TestCase):
     def test_query_and_compare_use_the_same_exclusion_lock(self):
         self.api._lock.acquire()
         try:
-            self.assertFalse(self.api.fetch_batch("银杏", "2025-01-07")["ok"])
+            self.assertEqual(self.api.fetch_batch("银杏", "2025-01-07")["code"], "busy")
             self.assertFalse(self.api.compare([])["ok"])
         finally:
             self.api._lock.release()

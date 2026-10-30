@@ -88,7 +88,6 @@ class Api:
         self._result = None
         self._folder = None
         self._attempted = False
-        self._cloud_last_attempt = 0.0
         self._store = ResultStore(OUTPUT)
 
     def show_official_page(self):
@@ -149,7 +148,7 @@ class Api:
 
     def fetch_batch(self, keywords_text, end_date, cloud=False, start_date=None):
         if not self._lock.acquire(blocking=False):
-            return {"ok": False, "message": "取数或核对正在进行，请等待。"}
+            return {"ok": False, "code": "busy", "message": "取数或核对正在进行，请等待。"}
         try:
             if not isinstance(keywords_text, str):
                 raise ValueError("请每行输入一个关键词。")
@@ -178,15 +177,8 @@ class Api:
                 return self._response(result, folder, cache_hit=True, comparison=comparison)
             if self._attempted and not cloud:
                 return {"ok": False, "code": "session_request_used", "message": "本次会话已发出过一次线上请求。可以查看已有缓存；新的线上批次请重新启动工具。"}
-            if cloud:
-                import time
-                if time.time() - self._cloud_last_attempt < 15:
-                    return {"ok": False, "code": "cooldown", "message": "云端请求间隔至少 15 秒，请稍后提交。"}
             client = self._client()
             self._attempted = True
-            if cloud:
-                import time
-                self._cloud_last_attempt = time.time()
             try:
                 result = client.query_many(words, start.isoformat(), end_date)
             finally:
