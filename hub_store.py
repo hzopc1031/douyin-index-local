@@ -10,6 +10,8 @@ import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from hub_logging import redact
+
 TZ = ZoneInfo('Asia/Shanghai')
 PLATFORMS = [
     {'id': 'douyin', 'name': '抖音指数', 'available': True, 'metric': 'search_index',
@@ -30,10 +32,7 @@ class HubError(ValueError):
 
 def exc_summary(exc) -> str:
     """Bounded local diagnostic; redact credentials before truncating."""
-    message = re.sub(
-        r"(?i)([\w.-]*(?:cookie|token|session|sessionid|passwd|password|secret|auth|key)[\w.-]*[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)",
-        r'\1***', str(exc))
-    message = re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', message)
+    message = redact(str(exc))
     message = ' '.join(message.split())[:160]
     errno = f' errno={exc.errno}' if isinstance(exc, OSError) else ''
     return f'{type(exc).__name__}{errno}: {message}'

@@ -198,6 +198,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         listed = (await (await self.client.get('/api/v1/jobs', headers=self.bearer)).json())['jobs']
         self.assertTrue(all('request_source' not in j for j in listed))
 
+    async def test_auth_failure_logs_no_credentials(self):
+        authorization = 'Basic ' + base64.b64encode(b'fixture:SYNTHETIC_PASSWORD').decode()
+        with self.assertLogs('index_hub.auth', level='WARNING') as captured:
+            for _ in range(12):
+                response = await self.client.get('/api/v1/platforms?ignored=SYNTHETIC_PASSWORD',
+                                                 headers={'Authorization': authorization})
+                self.assertEqual(response.status, 401)
+            response = await self.client.get('/', headers={'Authorization': authorization})
+            self.assertEqual(response.status, 429)
+        self.assertEqual(len(captured.output), 13)
+        output = '\n'.join(captured.output)
+        for secret in ('SYNTHETIC_PASSWORD', authorization, 'Authorization', 'Basic'):
+            self.assertNotIn(secret, output)
+        self.assertIn('method=GET path=/api/v1/platforms kind=api', output)
+        self.assertIn('method=GET path=/ kind=web', output)
+
     async def test_auth_required_and_keys_not_admin(self):
         self.assertEqual((await self.client.get('/api/v1/series?keyword=酵素')).status, 401)
         self.assertEqual((await self.client.get('/', headers=self.bearer)).status, 401)

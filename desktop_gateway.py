@@ -8,6 +8,7 @@ import ssl
 import time
 from pathlib import Path
 from aiohttp import web, WSMsgType
+from hub_logging import configure_logging
 from hub_store import HubError
 from hub_web import Hub, PRINCIPAL_KEY, mount, reply
 
@@ -31,6 +32,9 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
             ip = request.remote or 'unknown'
             failed = [t for t in failures.get(ip, []) if now - t < 60]
             if len(failed) >= 12:
+                logging.getLogger('index_hub.auth').warning(
+                    'ip=%s method=%s path=%s kind=%s', ip, request.method, request.path[:200],
+                    'api' if is_api else 'web')
                 raise HubError('authentication_throttled', '认证失败次数过多，请一分钟后再试。', 429)
             auth = request.headers.get('Authorization', '')
             principal = None
@@ -39,6 +43,9 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
             elif is_api and auth.startswith('Bearer '):
                 principal = hub.store.key_principal(auth[7:])
             if principal is None:
+                logging.getLogger('index_hub.auth').warning(
+                    'ip=%s method=%s path=%s kind=%s', ip, request.method, request.path[:200],
+                    'api' if is_api else 'web')
                 if len(failures) >= 1024:
                     failures.pop(next(iter(failures)))
                 failures[ip] = failed + [now]
@@ -121,7 +128,7 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc'):
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    configure_logging('gateway', ROOT)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(ROOT / '.cloud-state/server.crt', ROOT / '.cloud-state/server.key')
