@@ -172,3 +172,31 @@ class GatewayMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request(ip='new', authorization=self.admin)).status, 429)
         self.assertEqual((await self.request(authorization=self.admin)).status, 200)
         self.assertEqual((await self.request(ip='new')).status, 401)
+
+
+class TrustedNetworkTests(unittest.TestCase):
+    def test_global_lockout_skips_tailnet_but_not_ip_ban(self):
+        import os
+        from unittest.mock import patch
+        from hub_auth_throttle import AuthThrottle
+        now = [1000.0]
+        with patch.dict(os.environ, {'INDEX_HUB_AUTH_GLOBAL_LIMIT': '3'}):
+            throttle = AuthThrottle(clock=lambda: now[0])
+        for i in range(3):
+            throttle.failure(f'203.0.113.{i}')
+        self.assertGreater(throttle.remaining('198.51.100.7'), 0)
+        self.assertEqual(throttle.remaining('100.112.4.9'), 0)
+        for _ in range(12):
+            throttle.failure('100.112.4.9')
+        self.assertGreater(throttle.remaining('100.112.4.9'), 0)
+
+    def test_trusted_networks_configurable(self):
+        import os
+        from unittest.mock import patch
+        from hub_auth_throttle import AuthThrottle
+        with patch.dict(os.environ, {'INDEX_HUB_AUTH_TRUSTED_NETS': '10.0.0.0/8, bad'}):
+            with self.assertLogs('index_hub.auth', 'WARNING'):
+                throttle = AuthThrottle()
+        self.assertTrue(throttle.is_trusted('10.1.2.3'))
+        self.assertFalse(throttle.is_trusted('100.112.4.9'))
+        self.assertFalse(throttle.is_trusted('unknown'))

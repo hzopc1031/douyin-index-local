@@ -2,6 +2,7 @@
 from collections import deque
 from dataclasses import dataclass, field
 import logging
+import ipaddress
 import math
 import os
 import time
@@ -17,6 +18,21 @@ AUTH_MAX_IPS = 4096
 AUTH_WARNING_LIMIT = 20
 AUTH_LOG_SECONDS = 60
 LOGGER = logging.getLogger('index_hub.auth')
+# Tailnet (CGNAT) clients skip the global lockout; per-IP bans still apply.
+AUTH_TRUSTED_NETS = '100.64.0.0/10'
+
+
+def _trusted_nets(value):
+    nets = []
+    for part in value.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            LOGGER.warning('ignored invalid INDEX_HUB_AUTH_TRUSTED_NETS entry')
+    return tuple(nets)
 
 
 def _positive_env(name, default):
@@ -47,6 +63,7 @@ class AuthThrottle:
         self.fail_limit = _positive_env('INDEX_HUB_AUTH_FAIL_LIMIT', AUTH_FAIL_LIMIT)
         self.ban_seconds = _positive_env('INDEX_HUB_AUTH_BAN_SECONDS', AUTH_BAN_SECONDS)
         self.global_limit = _positive_env('INDEX_HUB_AUTH_GLOBAL_LIMIT', AUTH_GLOBAL_LIMIT)
+        self.trusted = _trusted_nets(os.environ.get('INDEX_HUB_AUTH_TRUSTED_NETS', AUTH_TRUSTED_NETS))
         self.ips = {}
         self.failures = deque()
         self.global_until = 0
@@ -70,11 +87,18 @@ class AuthThrottle:
             self.global_until = now + AUTH_GLOBAL_BAN_SECONDS
             LOGGER.warning('ip=all duration=%s strikes=1', AUTH_GLOBAL_BAN_SECONDS)
 
+    def is_trusted(self, ip):
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return any(address in net for net in self.trusted)
+
     def remaining(self, ip):
         now = self.clock()
         entry = self.ips.get(ip)
         until = entry.banned_until if entry else 0
-        if entry is None or entry.success_until <= now:
+        if (entry is None or entry.success_until <= now) and not self.is_trusted(ip):
             until = max(until, self.global_until)
         return max(1, math.ceil(until - now)) if until > now else 0
 
