@@ -167,7 +167,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(payload)
             return self.response
 
-        app = create_app(self.root, bridge=bridge, desktop_dir=self.root)
+        from hub_auth_throttle import AuthThrottle
+        self.auth_now = 1000.0
+        self.throttle = AuthThrottle(clock=lambda: self.auth_now)
+        app = create_app(self.root, bridge=bridge, desktop_dir=self.root, auth_throttle=self.throttle)
         self.hub = app[HUB_KEY]
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
@@ -212,7 +215,26 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         for secret in ('SYNTHETIC_PASSWORD', authorization, 'Authorization', 'Basic'):
             self.assertNotIn(secret, output)
         self.assertIn('method=GET path=/api/v1/platforms kind=api', output)
-        self.assertIn('method=GET path=/ kind=web', output)
+        self.assertIn('duration=900 strikes=1', output)
+
+    async def test_auth_ban_remaining_and_missing_header(self):
+        for _ in range(25):
+            self.assertEqual((await self.client.get('/')).status, 401)
+        self.assertFalse(self.throttle.failures)
+        for _ in range(12):
+            self.assertEqual((await self.client.get('/', headers={'Authorization': 'wrong'})).status, 401)
+        self.auth_now += 0.25
+        response = await self.client.get('/api/v1/platforms', headers=self.admin)
+        self.assertEqual(response.status, 429)
+        self.assertEqual(response.headers['Retry-After'], '900')
+        self.assertEqual((await response.json())['error'], {
+            'code': 'authentication_throttled', 'message': '认证失败次数过多，请稍后再试。'})
+        self.auth_now += 100
+        response = await self.client.get('/', headers=self.admin)
+        self.assertEqual(response.headers['Retry-After'], '800')
+        self.assertEqual((await self.client.get('/')).status, 401)
+        self.auth_now = 1900
+        self.assertEqual((await self.client.get('/api/v1/platforms', headers=self.admin)).status, 200)
 
     async def test_auth_required_and_keys_not_admin(self):
         self.assertEqual((await self.client.get('/api/v1/series?keyword=酵素')).status, 401)
