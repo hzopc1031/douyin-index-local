@@ -98,6 +98,19 @@ async def collect(video, transport, page_budget=1500):
             cursors.add(next_cursor)
             cursor = next_cursor
 
+    async def walk_seeds(root, reason):
+        # The cursor-0 walk may never reach an observed seed. Validate its
+        # pagination too; a successful extra walk cannot erase an earlier fault.
+        seed_cursors = getattr(transport, "seed_cursors", None)
+        while seed_cursors:
+            cursors = seed_cursors(video.video_id, root)
+            if not cursors:
+                break
+            observed = await walk(root, cursors[0])
+            if reason == "exhausted":
+                reason = observed
+        return reason
+
     try:
         preserve = getattr(transport, "preserve_seeds", None)
         if preserve:
@@ -105,6 +118,9 @@ async def collect(video, transport, page_budget=1500):
             # cursor is not on the subsequent walk, or the root reports zero.
             preserve(video, consume=False)
         top_reason = await walk()
+        # Finish every observed top-level branch before processing threads:
+        # seed continuations can introduce additional roots with replies.
+        top_reason = await walk_seeds(None, top_reason)
         video.reason = top_reason
         for root, thread in video.threads.items():
             # Zero replies permits skipping a new request, never validation of
@@ -113,17 +129,7 @@ async def collect(video, transport, page_budget=1500):
             reason = "exhausted"
             if thread.reported != 0 or thread.ids:
                 reason = await walk(root)
-            # The cursor-0 walk may never reach an observed seed. Validate its
-            # pagination too, regardless of the reported count, before declaring
-            # completion. A successful extra walk cannot erase an earlier fault.
-            seed_cursors = getattr(transport, "seed_cursors", None)
-            while seed_cursors:
-                cursors = seed_cursors(video.video_id, root)
-                if not cursors:
-                    break
-                observed = await walk(root, cursors[0])
-                if reason == "exhausted":
-                    reason = observed
+            reason = await walk_seeds(root, reason)
             if thread.reported is not None and len(thread.ids) < thread.reported:
                 reason = "reply_shortfall" if reason == "exhausted" else reason
             thread.reason = reason

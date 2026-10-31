@@ -663,6 +663,118 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(browser.seed_pages, {})
         self.assertEqual(fake.foreign, [])
 
+    async def check_off_path_top_seed(self, seed, replays, reason, top_ids, *,
+                                      replies=None, reply_ids=(), max_pages=1500):
+        replies = replies or {}
+
+        class OffPathTopSeed(FakeSite):
+            def html(self, video_id):
+                return super().html(video_id).replace(
+                    "set(cfg.params.cursor, '0')", "set(cfg.params.cursor, '19')")
+
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if not kind:
+                    await super().deliver(route)
+                    return
+                params = parse_qs(urlsplit(route.request.url).query)
+                cursor = params[site.PARAM["cursor"]][0]
+                root = params.get(site.PARAM["root"], [None])[0]
+                self.calls.append((kind, root, cursor))
+                if kind == "top":
+                    data = seed if cursor == "19" else replays[cursor]
+                else:
+                    data = replies[root]
+                await route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+        args, fake = self.args(), OffPathTopSeed()
+        args.urls, args.max_pages = args.urls[:1], max_pages
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        complete = reason == "exhausted"
+        status = "complete" if complete else "partial"
+        exit_reason = "complete" if complete else "partial"
+        if reason == "video_page_budget":
+            exit_reason = reason
+        self.assertEqual((code, result["exit_reason"]), (0 if complete else 2, exit_reason))
+        video, = result["videos"]
+        self.assertEqual((video["status"], video["reason"], video["top_count"], video["reply_count"]),
+                         (status, reason, len(top_ids), len(reply_ids)))
+        self.assertEqual(fake.calls, [("top", None, "19")] +
+                         [("top", None, cursor) for cursor in replays] +
+                         [("reply", root, "0") for root in replies])
+        # Received seeds count once, without being requested again.
+        self.assertEqual((video["pages"], result["requests"]), (len(fake.calls), len(fake.calls)))
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual({row["comment_id"] for row in rows if row["level"] == "1"}, set(top_ids))
+        self.assertEqual({row["comment_id"] for row in rows if row["level"] == "2"}, set(reply_ids))
+        if complete:
+            self.assertEqual(video["partial_threads"], [])
+            self.assertTrue(all(row["thread_status"] == "complete" for row in rows))
+        else:
+            self.assertIn(reason, (args.out / "summary.md").read_text())
+        self.assertEqual(json.loads((args.out / "run.json").read_text()), result)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_off_path_top_seed_follows_continuation_before_threads(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002, 1)], 23, True),
+            {"0": fixture_page([fixture_comment(10001, 1)], 7, True),
+             "7": fixture_page([fixture_comment(10004)], 11),
+             "23": fixture_page([fixture_comment(10003, 1)], 29)},
+            "exhausted", ("10001", "10002", "10003", "10004"),
+            replies={"10002": fixture_page([fixture_comment(10200)], 0),
+                     "10001": fixture_page([fixture_comment(10100)], 0),
+                     "10003": fixture_page([fixture_comment(10300)], 0)},
+            reply_ids=("10100", "10200", "10300"))
+
+    async def test_off_path_top_seed_validates_empty_page_with_more(self):
+        await self.check_off_path_top_seed(
+            fixture_page([], 23, True), {"0": fixture_page([fixture_comment(10001)], 7)},
+            "empty_with_more", ("10001",))
+
+    async def test_off_path_top_seed_validates_unchanged_cursor(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002)], 19, True),
+            {"0": fixture_page([fixture_comment(10001)], 7)},
+            "cursor_unchanged", ("10001", "10002"))
+
+    async def test_off_path_top_seed_validates_cursor_cycle(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002)], 23, True),
+            {"0": fixture_page([fixture_comment(10001)], 7),
+             "23": fixture_page([fixture_comment(10003)], 19, True)},
+            "cursor_cycle", ("10001", "10002", "10003"))
+
+    async def test_off_path_top_seed_validates_duplicate_continuation(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002)], 23, True),
+            {"0": fixture_page([fixture_comment(10001)], 7),
+             "23": fixture_page([fixture_comment(10002)], 29)},
+            "duplicate_page", ("10001", "10002"))
+
+    async def test_final_off_path_top_seed_allows_completion(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002)], 23),
+            {"0": fixture_page([fixture_comment(10001)], 7)},
+            "exhausted", ("10001", "10002"))
+
+    async def test_final_off_path_top_seed_keeps_main_walk_failure(self):
+        await self.check_off_path_top_seed(
+            fixture_page([], 23), {"0": fixture_page([fixture_comment(10001)], 0, True)},
+            "cursor_unchanged", ("10001",))
+
+    async def test_off_path_top_seed_keeps_first_failure(self):
+        await self.check_off_path_top_seed(
+            fixture_page([], 23, True), {"0": fixture_page([fixture_comment(10001)], 0, True)},
+            "cursor_unchanged", ("10001",))
+
+    async def test_off_path_top_seed_budget_stops_before_continuation(self):
+        await self.check_off_path_top_seed(
+            fixture_page([fixture_comment(10002)], 23, True),
+            {"0": fixture_page([fixture_comment(10001)], 7)},
+            "video_page_budget", ("10001", "10002"), max_pages=2)
+
     async def test_interrupted_after_seed_before_collection_still_exports(self):
         original = Browser.open_video
         async def interrupted(browser, url):
