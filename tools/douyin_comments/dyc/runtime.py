@@ -33,12 +33,17 @@ def private_dir(path):
 
 
 def private_open(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC):
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fd = os.open(path, (flags & ~os.O_TRUNC) | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError:
+        raise Stop(5, "file_unavailable") from None
     info = os.fstat(fd)
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or info.st_mode & 0o077 or info.st_nlink != 1):
         os.close(fd)
         raise Stop(5, "file_permissions")
+    if flags & os.O_TRUNC:
+        os.ftruncate(fd, 0)
     return fd
 
 
@@ -64,9 +69,10 @@ def atomic_text(path, text):
 
 
 class Profile:
-    def __init__(self, path):
+    def __init__(self, path, clear_stale=True):
         self.path = Path(path)
         self.fd = None
+        self.clear_stale = clear_stale
 
     def __enter__(self):
         self.path = private_dir(self.path)
@@ -79,7 +85,7 @@ class Profile:
             raise Stop(5, "profile_locked") from None
         try:
             # This profile is exclusively ours. Never touch any other profile.
-            for entry in self.path.glob("Singleton*"):
+            for entry in self.path.glob("Singleton*") if self.clear_stale else ():
                 if entry.is_symlink() or entry.is_file():
                     entry.unlink()
         except BaseException:
@@ -139,6 +145,8 @@ class DailyCounter:
                     or data["count"] < 0 or not isinstance(data["day"], str)):
                 raise ValueError
             datetime.strptime(data["day"], "%Y-%m-%d")
+            if data["day"] > self.today():
+                raise ValueError
             return data["count"] if data["day"] == self.today() else 0
         except (OSError, ValueError, TypeError):
             raise Stop(5, "usage_corrupt") from None

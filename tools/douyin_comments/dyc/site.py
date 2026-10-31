@@ -62,6 +62,8 @@ def parse_url(value, *, fake=False):
         if parsed.port not in (None, 443):
             raise ValueError
         hosts = HOSTS | ({urlsplit(FAKE_ORIGIN).hostname} if fake else set())
+        if fake and parsed.hostname == urlsplit(FAKE_ORIGIN).hostname and re.fullmatch(r"/short/[A-Za-z0-9_-]+/?", parsed.path):
+            return Target(FAKE_ORIGIN + parsed.path, None)
         if parsed.hostname == SHORT_HOST:
             if not re.fullmatch(r"/[A-Za-z0-9_-]+/?", parsed.path):
                 raise ValueError
