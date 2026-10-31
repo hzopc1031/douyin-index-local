@@ -33,3 +33,5 @@ children+=($!)
 .venv/bin/python app.py >>"$LOG_DIR/app.stdout.log" 2>&1 &
 children+=($!)
 wait -n "${children[@]}"
+# 任一子进程以 0 退出（例如有人关掉了窗口）也视为故障，让 Restart=on-failure 拉起
+exit 1

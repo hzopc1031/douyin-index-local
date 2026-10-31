@@ -1,5 +1,6 @@
 """Authenticated index API and task worker, mounted by desktop_gateway.py."""
 import asyncio
+import base64
 import contextlib
 import csv
 import datetime as dt
@@ -15,6 +16,7 @@ from hub_paths import state_dir
 
 from aiohttp import web
 import hub_bridge
+from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
 
 logger = logging.getLogger('index_hub')
@@ -68,6 +70,7 @@ class Hub:
         if bridge is None:
             from hub_bridge import call_bridge
             bridge = call_bridge
+        self._qr_last_start = None
         self.bridge = bridge
         self.worker_task = None
 
@@ -287,6 +290,10 @@ def openapi():
             operation['parameters'] = [{'in': 'query', 'name': k, 'required': k == 'keyword',
                                         'schema': {'type': 'string'}} for k in ('platform', 'keyword', 'start_date', 'end_date')]
         paths[path] = {method: operation}
+    for path, method in (('/api/v1/login/qr', 'get'), ('/api/v1/login/qr/image', 'get'),
+                         ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
+        paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
+                              'responses': {'200': {'description': '成功'}, '403': error, '409': error, '429': error, '503': error}}}
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
              'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
@@ -306,6 +313,29 @@ def mount(app, hub):
         require(request, admin=True)
         return web.FileResponse(hub.root / 'hub.html')
 
+    async def qr_login(request):
+        require(request, admin=True)
+        action = request.match_info.get('action', 'status')
+        if action == 'start':
+            now = time.monotonic()
+            if hub._qr_last_start is not None and now - hub._qr_last_start < 10:
+                raise HubError('qr_rate_limited', '请等待 10 秒后再启动扫码。', 429)
+            hub._qr_last_start = now
+        try:
+            result = await asyncio.to_thread(hub.bridge, 'qr_' + action, None, 2)
+        except Exception:
+            raise HubError('browser_unavailable', '浏览器未就绪，请检查远程桌面。', 503) from None
+        if not result.get('ok'):
+            code = result.get('code', 'browser_unavailable')
+            status = 404 if code == 'qr_not_ready' else 409 if code in ('qr_busy', 'qr_disabled', 'qr_unsafe_debug', 'qr_no_display') else 503
+            messages = {'qr_no_display': '有头扫码需要桌面显示环境（DISPLAY）', 'qr_busy': '扫码登录正在进行，请先取消或等待结束。', 'qr_disabled': '未启用扫码登录。',
+                        'qr_unsafe_debug': '浏览器调试环境变量已开启，已拒绝启动。', 'qr_not_ready': '二维码尚未就绪。'}
+            return reply({'error': {'code': code, 'message': messages.get(code, '浏览器未就绪，请检查远程桌面。')}}, status)
+        if action == 'image':
+            return web.Response(body=base64.b64decode(result['png_base64'], validate=True),
+                                content_type='image/png', headers={'Cache-Control': 'no-store'})
+        return reply({**result, 'login_mode': login_mode()})
+
     async def platforms(request):
         require(request)
         return reply({'platforms': PLATFORMS})
@@ -319,7 +349,7 @@ def mount(app, hub):
         browser = await hub.browser_status()
         next_attempt = s.get('last_attempt_at', 0) + 15
         remaining = max(0, math.ceil(next_attempt - time.time()))
-        return reply({'version': '1.0.0', 'browser': browser, 'paused': s.get('paused'),
+        return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser, 'paused': s.get('paused'),
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,
@@ -443,6 +473,9 @@ def mount(app, hub):
         return reply(openapi())
 
     app.router.add_get('/', index)
+    app.router.add_get('/api/v1/login/qr', qr_login)
+    app.router.add_get('/api/v1/login/qr/{action:image}', qr_login)
+    app.router.add_post('/api/v1/login/qr/{action:start|cancel}', qr_login)
     app.router.add_get('/api/v1/platforms', platforms)
     app.router.add_get('/api/v1/status', status)
     app.router.add_post('/api/v1/queries', submit)

@@ -99,7 +99,7 @@ HTTP 接口可用不等于登录有效；`browser_ready` 只代表页面预检�
 - 平台要求重新登录、验证、拒绝访问或限频时暂停；人工处理后在网页恢复。
 - 不自动重试上游失败。服务重启将未完成任务标为中断，不自动重放。
 - 无无人值守扫码、验证码绕过或自动刷新登录承诺。浏览器重启需要重新扫码。
-- Cookie 仅在腾讯浏览器及该进程的单次请求客户端内存里；API 返回经过筛选的业务数据。
+- 交接后的 Cookie 仅在 `app.py` 进程及其单次请求客户端内存里；扫码临时 profile 的边界见下文。API 返回经过筛选的业务数据。
 
 ## 持久化与部署
 
@@ -146,3 +146,18 @@ worker 保护状态码：
 - `busy_requeue_exhausted`：浏览器长时间被占用，已放回队列多次仍未执行，未自动重试。`busy` / `cooldown` 最多回队 `INDEX_HUB_BUSY_REQUEUE_LIMIT` 次（默认 20，非法值回退默认，0 直接失败）；耗尽后任务 `failed`，本次仍退还次数。任务的 `requeues` 记录回队处理次数（含耗尽的最后一次）。
 - `invalid_query` / `invalid_dates` / `invalid_keywords` / `invalid_kind`：参数错误，请检查请求。任务失败、不暂停，未发送上游请求，退还次数。
 - 扩展任务平台明确返回空数据时缓存 `no_data` 24 小时；命中任务保持 `no_data`、`cache_hit=true`，不请求浏览器、不扣次数。读取 `/api/v1/insights` 返回 `status=no_data`，结果含 `no_data=true`，不作为成功数据或零值。
+
+## 扫码登录（实验）
+
+默认仍为远程桌面登录。设置 `INDEX_HUB_LOGIN_MODE=qr` 后，管理员可使用：
+
+| 接口 | 用途 |
+| --- | --- |
+| POST `/api/v1/login/qr/start` | 启动；同一 Hub 每 10 秒最多一次，超限 `429 qr_rate_limited` |
+| GET `/api/v1/login/qr` | 返回 login_mode、state、qr_version、expires_in、message、session.has_session / age_seconds |
+| GET `/api/v1/login/qr/image` | PNG，`Cache-Control: no-store`；尚无二维码时 `404 qr_not_ready` |
+| POST `/api/v1/login/qr/cancel` | 取消本轮扫码 |
+
+全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug`、`qr_no_display` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。交接后的会话只在 `app.py` 进程内存中；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
+
+交接后的会话只在 `app.py` 进程内存中，不写状态文件和日志。扫码期间 Chromium 使用 Playwright 在 `/tmp`（单元的 `PrivateTmp`）下创建的临时 profile，Cookie 会短暂写入其中（无系统钥匙串时近似明文）；浏览器正常关闭时目录被删除，若进程被强杀则残留在 PrivateTmp 中直到单元停止。Chromium 沙箱由 Playwright 默认关闭（`--no-sandbox`），代码显式设置 `chromium_sandbox=False`；开启需另做 AppArmor/userns 配置。

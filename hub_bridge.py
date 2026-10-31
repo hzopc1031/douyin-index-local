@@ -1,5 +1,6 @@
 """Private Unix socket into the existing desktop process; no cookies leave it."""
 import json
+import base64
 import logging
 import os
 import socket
@@ -40,6 +41,26 @@ def call_bridge(command, payload=None, timeout=BRIDGE_TIMEOUT):
         return json.loads(raw)
 
 
+def qr_command(api, command):
+    from qr_login import login_mode, QrBusy, QrUnsafeDebug, QrNoDisplay
+    if login_mode() != 'qr':
+        return {'ok': False, 'code': 'qr_disabled', 'message': '未启用扫码登录。'}
+    manager = api._qr_manager()
+    if command == 'qr_start':
+        try:
+            manager.start()
+        except (QrBusy, QrUnsafeDebug, QrNoDisplay) as exc:
+            return {'ok': False, 'code': exc.code, **({'message': str(exc)} if isinstance(exc, QrNoDisplay) else {})}
+    elif command == 'qr_cancel':
+        manager.cancel()
+    elif command == 'qr_image':
+        png = manager.qr_png()
+        return ({'ok': True, 'png_base64': base64.b64encode(png).decode('ascii'),
+                 'qr_version': manager.status()['qr_version']} if png else
+                {'ok': False, 'code': 'qr_not_ready'})
+    return {'ok': True, **manager.status(), 'session': manager.holder_info()}
+
+
 def start_bridge(api):
     socket_path = _socket_path()
     socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -56,8 +77,13 @@ def start_bridge(api):
                     raise ValueError
                 message = json.loads(raw)
                 command = message.get('command')
-                command = command if command in ('status', 'insight', 'query') else 'unknown'
-                if message.get('command') == 'status':
+                command = command if command in ('status', 'insight', 'query', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel') else 'unknown'
+                from qr_login import login_mode
+                if command.startswith('qr_'):
+                    answer = qr_command(api, command)
+                elif command == 'status' and login_mode() == 'qr' and api._qr_manager().holder.has_session():
+                    answer = {'ok': True, 'state': 'browser_ready'}
+                elif message.get('command') == 'status':
                     from urllib.parse import urlsplit
                     page = api._page
                     url = urlsplit(page.get_current_url() or '')
