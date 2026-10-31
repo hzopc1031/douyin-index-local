@@ -440,6 +440,11 @@ class Browser:
     def take_seed(self, video_id, root, cursor):
         return self.seed_pages.pop((video_id, root, cursor), None)
 
+    def seed_cursors(self, video_id, root):
+        """Snapshot received pages for this thread, still owned by the transport."""
+        return tuple(cursor for video, thread, cursor in self.seed_pages
+                     if video == video_id and thread == root)
+
     def preserve_seeds(self, video, *, consume=True):
         """Drain received pages even if navigation/metadata or collection stopped."""
         if not video.video_id and self.video_id:

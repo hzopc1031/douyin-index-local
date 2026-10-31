@@ -5,16 +5,40 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from dyc.cli import check_env, defaults, parser
 from dyc.models import Comment, Thread, Video, normalize
 from dyc.output import COLUMNS, Log, export, ranking
+from dyc import runner
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class RunnerExportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_export_failure_still_removes_signal_handlers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            # Invalid input stops before any browser can be created.
+            args = Namespace(out=Path(temp), urls=["synthetic-invalid-url"], urls_file=None, top=30)
+
+            def fail_export(*args):
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    self.assertNotEqual(signal.getsignal(sig), signal.SIG_DFL)
+                    self.assertNotEqual(signal.getsignal(sig), signal.default_int_handler)
+                raise OSError("synthetic write failure")
+
+            with patch.object(runner, "export", side_effect=fail_export), \
+                    patch.object(runner, "remove_signals", wraps=runner.remove_signals) as remove:
+                with self.assertRaisesRegex(OSError, "synthetic write failure"):
+                    await runner.fetch(args)
+                remove.assert_called_once_with()
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.default_int_handler)
 
 
 class OutputTests(unittest.TestCase):
@@ -102,6 +126,38 @@ class OutputTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def check_synthetic_browser_cache(self, *, selected=False, executable=True):
+        from playwright.sync_api import sync_playwright
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache = root / "browsers"
+            with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}):
+                # Resolve the actual package-selected revision without launching
+                # a browser or contacting any host.
+                with sync_playwright() as playwright:
+                    required = Path(playwright.chromium.executable_path)
+                stale = cache / "chromium-1/chrome-linux/chrome"
+                self.assertNotEqual(required, stale)
+                target = required if selected else stale
+                target.parent.mkdir(parents=True)
+                target.write_text("#!/bin/sh\nexit 0\n")
+                target.chmod(0o700 if executable else 0o600)
+                args = defaults(Namespace(profile_dir=root / "profile", state_dir=root / "state", display=None))
+                return check_env(args)
+
+    def test_check_env_rejects_only_stale_chromium_revision(self):
+        code, result = self.check_synthetic_browser_cache()
+        self.assertEqual((code, result["exit_reason"]), (5, "chromium_missing"))
+
+    def test_check_env_accepts_selected_chromium_executable(self):
+        code, result = self.check_synthetic_browser_cache(selected=True)
+        self.assertEqual((code, result["exit_reason"]), (0, "ready"))
+
+    def test_check_env_rejects_nonexecutable_selected_chromium(self):
+        code, result = self.check_synthetic_browser_cache(selected=True, executable=False)
+        self.assertEqual((code, result["exit_reason"]), (5, "chromium_missing"))
+
     def test_wrapper_resolves_urls_file_and_output_from_callers_directory(self):
         with tempfile.TemporaryDirectory(prefix="dyc-wrapper-") as temp:
             root = Path(temp)

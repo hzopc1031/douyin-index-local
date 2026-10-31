@@ -74,8 +74,8 @@ async def collect(video, transport, page_budget=1500):
                     raise Stop(3, "repeated_" + error.reason) from None
                 raise
 
-    async def walk(root=None):
-        cursor, cursors, seen = "0", {"0"}, set()
+    async def walk(root=None, cursor="0"):
+        cursors, seen = {cursor}, set()
         while True:
             decoded = await page(root, cursor)
             comments, next_cursor, more, _ = decoded
@@ -107,9 +107,17 @@ async def collect(video, transport, page_budget=1500):
         top_reason = await walk()
         video.reason = top_reason
         for root, thread in video.threads.items():
-            # Unknown reported counts still require independent reply pagination.
+            # Zero replies permits skipping a new request, never validation of
+            # an already received seed (including an empty page with more=1).
+            # Unknown reported counts still require independent pagination.
             if thread.reported == 0 and not thread.ids:
+                seed_cursors = getattr(transport, "seed_cursors", None)
+                cursors = seed_cursors(video.video_id, root) if seed_cursors else ()
                 reason = "exhausted"
+                for cursor in cursors:
+                    observed = await walk(root, cursor)
+                    if observed != "exhausted":
+                        reason = observed
             else:
                 reason = await walk(root)
             if thread.reported is not None and len(thread.ids) < thread.reported:

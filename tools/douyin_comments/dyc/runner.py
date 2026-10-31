@@ -99,17 +99,22 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
         # Playwright errors can include full URLs/headers. Do not stringify them.
         code, reason = 1, "internal_error"
     finally:
-        remove_signals()
-        for video in videos:
-            if video.reason == "pending":
-                video.reason = reason if reason != "complete" else "not_started"
-            for thread in video.threads.values():
-                if thread.reason == "pending":
-                    thread.reason = video.reason
-        log.event(reason)
-        log.close()
-    videos = [video for video in videos if video.status != "duplicate"]
-    result = export(out, identity, videos, code, reason, budget.used if budget else 0, args.top)
+        try:
+            for video in videos:
+                if video.reason == "pending":
+                    video.reason = reason if reason != "complete" else "not_started"
+                for thread in video.threads.values():
+                    if thread.reason == "pending":
+                        thread.reason = video.reason
+            log.event(reason)
+            log.close()
+            videos = [video for video in videos if video.status != "duplicate"]
+            # Collection and browser cleanup are finished. Keep the handlers
+            # installed throughout synchronous serialization and atomic writes:
+            # late signals must not interrupt export or change its settled result.
+            result = export(out, identity, videos, code, reason, budget.used if budget else 0, args.top)
+        finally:
+            remove_signals()
     return code, result
 
 

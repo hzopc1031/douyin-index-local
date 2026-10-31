@@ -673,6 +673,58 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.calls, ["top", "reply"])
         self.assertEqual(fake.foreign, [])
 
+    async def check_empty_reply_seed(self, more, cursor="0"):
+        class EmptyReplySeed(FakeSite):
+            def html(self, video_id):
+                return super().html(video_id).replace(
+                    "u.pathname = cfg.reply;",
+                    "u.pathname = cfg.reply; u.searchParams.set(cfg.params.cursor, " + json.dumps(cursor) + ");")
+
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if kind:
+                    self.calls.append(kind)
+                    comments = [fixture_comment(10001, 0)] if kind == "top" else []
+                    data = fixture_page(comments, 7, more if kind == "reply" else False)
+                    del data[site.FIELDS["total"]]
+                    await route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+                else:
+                    await super().deliver(route)
+
+        args = self.args()
+        args.urls, args.max_pages = args.urls[:1], 2
+        fake = EmptyReplySeed(reply_seed=True)
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"]), (2, "partial") if more else (0, "complete"))
+        video = result["videos"][0]
+        self.assertEqual((video["pages"], video["top_count"], video["reply_count"]), (2, 1, 0))
+        self.assertEqual(video["status"], "partial" if more else "complete")
+        if more:
+            self.assertEqual(video["reason"], "partial_threads")
+            thread, = video["partial_threads"]
+            self.assertEqual((thread["reason"], thread["reported"], thread["collected"]),
+                             ("empty_with_more", 0, 0))
+            self.assertIn("empty_with_more", (args.out / "summary.md").read_text())
+        else:
+            self.assertEqual(video["partial_threads"], [])
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            row, = list(csv.DictReader(stream))
+        self.assertEqual(row["thread_status"], "partial" if more else "complete")
+        self.assertEqual(json.loads((args.out / "run.json").read_text()), result)
+        self.assertEqual((result["requests"], fake.calls, fake.foreign), (2, ["top", "reply"], []))
+
+    async def test_zero_reply_root_validates_empty_seed_with_more(self):
+        await self.check_empty_reply_seed(True)
+
+    async def test_zero_reply_root_consumes_final_empty_seed_without_replay(self):
+        await self.check_empty_reply_seed(False)
+
+    async def test_zero_reply_root_validates_empty_seed_at_nonzero_cursor(self):
+        await self.check_empty_reply_seed(True, "19")
+
+    async def test_zero_reply_root_consumes_final_empty_seed_at_nonzero_cursor(self):
+        await self.check_empty_reply_seed(False, "19")
+
     async def test_reply_page_total_shortfall_is_exported_as_partial_batch(self):
         class Shortfall(FakeSite):
             async def deliver(self, route):
@@ -787,6 +839,58 @@ class BrowserProcessTests(unittest.TestCase):
 
     def test_sigint_exports_and_reaps_owned_children(self):
         self.check_signal(signal.SIGINT)
+
+    def test_sigterm_during_csv_serialization_finishes_export(self):
+        self.check_export_signal(signal.SIGTERM, "serialize")
+
+    def test_sigint_during_csv_serialization_finishes_export(self):
+        self.check_export_signal(signal.SIGINT, "serialize")
+
+    def test_sigterm_during_file_write_finishes_export(self):
+        self.check_export_signal(signal.SIGTERM, "write")
+
+    def test_sigint_during_file_write_finishes_export(self):
+        self.check_export_signal(signal.SIGINT, "write")
+
+    def check_export_signal(self, sig, stage):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            proc = subprocess.Popen([sys.executable, "-m", "tests.export_signal_worker", temp, stage],
+                                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, start_new_session=True)
+            try:
+                deadline = time.monotonic() + 30
+                while not (root / "ready").exists() and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue((root / "ready").exists(), "fixture never reached export gate")
+                # Browser cleanup must already have completed before exporting.
+                self.assertEqual(set(_processes(proc.pid)), {proc.pid})
+                proc.send_signal(sig)
+                time.sleep(0.05)
+                if proc.poll() is None:
+                    proc.send_signal(sig)
+                (root / "continue").write_text("finish export")
+                stdout, stderr = proc.communicate(timeout=15)
+                self.assertEqual(proc.returncode, 0, stdout + stderr)
+                self.assertEqual(len(stdout.splitlines()), 1)
+                result = json.loads(stdout)
+                self.assertEqual((result["exit_code"], result["exit_reason"]), (0, "complete"))
+                self.assertEqual((result["requests"], result["videos"][0]["top_count"]), (1, 30000))
+                out = root / "out"
+                self.assertEqual({p.name for p in out.iterdir()},
+                                 {"run.log", "comments.csv", "summary.md", "run.json"})
+                self.assertEqual(json.loads((out / "run.json").read_text()), result)
+                self.assertIn("采集一级：30000", (out / "summary.md").read_text())
+                self.assertEqual((out / "run.log").read_text().splitlines()[-1], "complete")
+                with (out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+                    rows = list(csv.DictReader(stream))
+                self.assertEqual(len(rows), 30000)
+                self.assertEqual({r["comment_id"] for r in rows}, {str(i) for i in range(1, 30001)})
+                self.assertTrue(all(r["thread_status"] == "complete" for r in rows))
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate(timeout=5)
 
     def check_signal(self, sig):
         with tempfile.TemporaryDirectory() as temp:

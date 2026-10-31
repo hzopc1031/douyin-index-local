@@ -78,7 +78,12 @@ def check_env(args):
             raise Stop(5, "daily_cap_at_start")
         if not result["xvfb"] and not args.display:
             raise Stop(5, "xvfb_missing")
-        if not any(browsers.glob("chromium-*/chrome-*/chrome")):
+        # Ask the installed package which headed Chromium it will launch. A
+        # different cached revision (or headless shell alone) is insufficient.
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+        if not executable.is_file() or not os.access(executable, os.X_OK):
             raise Stop(5, "chromium_missing")
         code, reason = 0, "ready"
     except Stop as error:
