@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 import tempfile
@@ -12,7 +13,7 @@ from unittest.mock import Mock, patch
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 import app
-from browser_login import BrowserLoginState, _cookie_snapshot, sid_guard_expiry
+from browser_login import BrowserLoginState, _cookie_snapshot, _expiry, sid_guard_expiry
 from client import SanitizedClientError
 from hub_bridge import browser_status
 from hub_insights import collect
@@ -27,6 +28,21 @@ def cookie(name='sessionid', value='synthetic-session', domain='.douyin.com', **
     for key, value in attrs.items():
         result[name][key] = value
     return result
+
+
+class CocoaDate:
+    """NSDate-shaped expiry, deliberately neither a number nor a string."""
+    def __init__(self, stamp):
+        self.stamp = stamp
+
+    def timeIntervalSince1970(self):
+        return self.stamp
+
+
+class UnknownExpiry:
+    def __str__(self):
+        # A plausible representation must not be mistaken for a known expiry.
+        return 'Tue, 14 Nov 2023 20:00:00 GMT'
 
 
 class LoginStateTests(unittest.TestCase):
@@ -68,6 +84,37 @@ class LoginStateTests(unittest.TestCase):
             with self.subTest(attrs=attrs):
                 self.assertEqual(self.state([cookie(**attrs)]), expected)
         self.assertEqual(self.state([cookie(), cookie('sid_guard', 'hash|1699990000|60')]), 'expired')
+
+    def test_native_and_datetime_expiries(self):
+        for stamp in (1699999999, 1700000000, 1700003600):
+            date = datetime.fromtimestamp(stamp, timezone.utc)
+            for expiry in (CocoaDate(stamp), date,
+                           date.astimezone(timezone(timedelta(hours=8))),
+                           date.replace(tzinfo=None)):
+                with self.subTest(stamp=stamp, kind=type(expiry).__name__):
+                    self.assertEqual(_expiry(expiry), stamp)
+                    self.assertEqual(self.state([cookie(expires=expiry)]),
+                                     'expired' if stamp <= 1700000000 else 'cookie_present')
+
+    def test_unknown_and_nonfinite_expiries_are_unknown(self):
+        for expiry in (UnknownExpiry(), object(), [], {}, None, '',
+                       float('nan'), float('inf'), float('-inf'), 10 ** 400,
+                       CocoaDate(float('nan')), CocoaDate(float('inf')),
+                       CocoaDate(UnknownExpiry())):
+            with self.subTest(kind=type(expiry).__name__):
+                self.assertIsNone(_expiry(expiry))
+                self.assertEqual(self.state([cookie(expires=expiry)]), 'cookie_present')
+
+    def test_qt_and_gtk_header_cookie_types(self):
+        # Both backends pass a decoded Set-Cookie header to SimpleCookie.
+        for expires, expected in (('Tue, 14 Nov 2023 20:00:00 GMT', 'expired'),
+                                  ('Tue, 14 Nov 2023 23:00:00 GMT', 'cookie_present')):
+            with self.subTest(expires=expires):
+                item = SimpleCookie('sessionid=synthetic-session; Domain=.douyin.com; '
+                                    f'Path=/; Expires={expires}; Secure; HttpOnly')
+                self.assertEqual(self.state([item]), expected)
+                self.assertEqual(_cookie_snapshot([item])[1],
+                                 _cookie_snapshot([cookie(path='/')])[1])
 
     def test_names_domains_and_empty_values(self):
         self.assertEqual(self.state([]), 'no_session_cookie')
@@ -119,6 +166,30 @@ class DesktopLoginTests(unittest.TestCase):
         self.page.get_current_url.return_value = 'https://creator.douyin.com/'
         self.page.evaluate_js.side_effect = lambda js: 'Synthetic UA' if js == 'navigator.userAgent' else False
         self.page.get_cookies.return_value = [cookie()]
+
+    def test_desktop_client_with_native_and_unknown_expiries(self):
+        date = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        for expiry in (CocoaDate(date.timestamp()), date, UnknownExpiry()):
+            with self.subTest(kind=type(expiry).__name__), \
+                    patch.object(app.requests.Session, 'request',
+                                 side_effect=AssertionError('No network expected')):
+                self.page.get_cookies.return_value = [cookie(expires=expiry, secure=True)]
+                self.assertEqual(self.api._login_state(), 'cookie_present')
+                client = self.api._client()
+                try:
+                    from client import DouyinIndexClient
+                    self.assertIsInstance(client, DouyinIndexClient)
+                    self.assertEqual(len(client.session.cookies), 1)
+                    item = next(iter(client.session.cookies))
+                    self.assertEqual((item.name, item.domain, item.path, item.secure),
+                                     ('sessionid', '.douyin.com', '/', True))
+                    self.assertIsNotNone(self.api._fetch_cookie_fingerprint)
+                    self.api._on_auth_failed()
+                    self.assertEqual(self.api._login_state(), 'rejected')
+                finally:
+                    client.session.cookies.clear()
+                    client.session.close()
+                    self.api._browser_login = BrowserLoginState()
 
     def test_bridge_mapping_and_page_check(self):
         for state in ('cookie_present', 'qr_session', 'no_session_cookie', 'expired', 'rejected', 'unknown'):

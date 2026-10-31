@@ -4,7 +4,7 @@ import json
 import math
 import threading
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import unquote
 
@@ -18,13 +18,20 @@ def _expiry(value):
     if value in ('', None):
         return None
     try:
+        # Cocoa preserves NSDate; Qt/GTK supply parsed header strings.
+        if isinstance(value, datetime):
+            value = value.replace(tzinfo=value.tzinfo or timezone.utc).timestamp()
+        elif callable(getattr(value, 'timeIntervalSince1970', None)):
+            value = value.timeIntervalSince1970()
         stamp = float(value)
         return stamp if math.isfinite(stamp) else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError, OverflowError, OSError):
+        if not isinstance(value, str):
+            return None
         try:
             date = parsedate_to_datetime(value)
             return date.replace(tzinfo=date.tzinfo or timezone.utc).timestamp()
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError, OSError):
             return None
 
 
