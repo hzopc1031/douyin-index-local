@@ -167,7 +167,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append(payload)
             return self.response
 
-        app = create_app(self.root, bridge=bridge, desktop_dir=self.root)
+        from hub_auth_throttle import AuthThrottle
+        self.auth_now = 1000.0
+        self.throttle = AuthThrottle(clock=lambda: self.auth_now)
+        app = create_app(self.root, bridge=bridge, desktop_dir=self.root, auth_throttle=self.throttle)
         self.hub = app[HUB_KEY]
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
@@ -197,6 +200,41 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, again)
         listed = (await (await self.client.get('/api/v1/jobs', headers=self.bearer)).json())['jobs']
         self.assertTrue(all('request_source' not in j for j in listed))
+
+    async def test_auth_failure_logs_no_credentials(self):
+        authorization = 'Basic ' + base64.b64encode(b'fixture:SYNTHETIC_PASSWORD').decode()
+        with self.assertLogs('index_hub.auth', level='WARNING') as captured:
+            for _ in range(12):
+                response = await self.client.get('/api/v1/platforms?ignored=SYNTHETIC_PASSWORD',
+                                                 headers={'Authorization': authorization})
+                self.assertEqual(response.status, 401)
+            response = await self.client.get('/', headers={'Authorization': authorization})
+            self.assertEqual(response.status, 429)
+        self.assertEqual(len(captured.output), 13)
+        output = '\n'.join(captured.output)
+        for secret in ('SYNTHETIC_PASSWORD', authorization, 'Authorization', 'Basic'):
+            self.assertNotIn(secret, output)
+        self.assertIn('method=GET path=/api/v1/platforms kind=api', output)
+        self.assertIn('duration=900 strikes=1', output)
+
+    async def test_auth_ban_remaining_and_missing_header(self):
+        for _ in range(25):
+            self.assertEqual((await self.client.get('/')).status, 401)
+        self.assertFalse(self.throttle.failures)
+        for _ in range(12):
+            self.assertEqual((await self.client.get('/', headers={'Authorization': 'wrong'})).status, 401)
+        self.auth_now += 0.25
+        response = await self.client.get('/api/v1/platforms', headers=self.admin)
+        self.assertEqual(response.status, 429)
+        self.assertEqual(response.headers['Retry-After'], '900')
+        self.assertEqual((await response.json())['error'], {
+            'code': 'authentication_throttled', 'message': '认证失败次数过多，请稍后再试。'})
+        self.auth_now += 100
+        response = await self.client.get('/', headers=self.admin)
+        self.assertEqual(response.headers['Retry-After'], '800')
+        self.assertEqual((await self.client.get('/')).status, 401)
+        self.auth_now = 1900
+        self.assertEqual((await self.client.get('/api/v1/platforms', headers=self.admin)).status, 200)
 
     async def test_auth_required_and_keys_not_admin(self):
         self.assertEqual((await self.client.get('/api/v1/series?keyword=酵素')).status, 401)
@@ -481,12 +519,18 @@ class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
                     with patch('hub_web.asyncio.to_thread', local_thread_call), self.assertLogs('index_hub', level) as logs:
                         self.assertTrue(await hub.run_one())
                     saved = hub.store.job(job['id'])
-                    self.assertEqual(saved['status'], 'failed')
-                    self.assertEqual(saved['error']['code'], code)
-                    self.assertEqual(hub.store.get('daily')['count'], 1)
-                    self.assertIsNone(hub.store.get('paused'))
-                    self.assertEqual(hub.store.get('last_result')['code'], code)
-                    self.assertFalse(hub.store.get('last_result')['ok'])
+                    if code == 'browser_unavailable':
+                        self.assertEqual(saved['status'], 'queued')
+                        self.assertIsNone(saved['error'])
+                        self.assertEqual(hub.store.get('daily')['count'], 0)
+                        self.assertEqual(hub.store.get('paused')['code'], code)
+                    else:
+                        self.assertEqual(saved['status'], 'failed')
+                        self.assertEqual(saved['error']['code'], code)
+                        self.assertEqual(hub.store.get('daily')['count'], 1)
+                        self.assertIsNone(hub.store.get('paused'))
+                        self.assertEqual(hub.store.get('last_result')['code'], code)
+                        self.assertFalse(hub.store.get('last_result')['ok'])
                     self.assertNotIn(SECRET, str(logs.output))
                     self.assertIn(type(exc).__name__, str(logs.output))
                     self.assertIn(job['id'], str(logs.output))

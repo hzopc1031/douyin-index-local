@@ -130,7 +130,8 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
         job, _ = self.hub.store.submit({**self.q, 'kind': 'related'}, 'fixture', 'not-skipped')
         self.hub.bridge = Mock(return_value={'ok': False, 'state': 'unavailable'})
         await self.hub.run_one()
-        self.assertEqual(self.hub.store.job(job['id'])['error']['code'], 'browser_unavailable')
+        self.assertEqual(self.hub.store.job(job['id'])['status'], 'queued')
+        self.assertEqual(self.hub.store.get('paused')['code'], 'browser_unavailable')
         self.hub.bridge.assert_called_once()
 
     def test_latest_matching_and_historical_observations(self):

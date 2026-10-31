@@ -14,11 +14,11 @@ class InsightTests(unittest.TestCase):
         from hub_insights import collect
         for kind in ('related', 'audience'):
             for error, code in ((LoginRequired('请先完成登录。'), 'authentication_required'),
-                                (ValueError('暂时无法识别官方窗口。'), 'browser_unavailable')):
+                                (ValueError('暂时无法识别官方窗口。'), 'request_failed')):
                 with self.subTest(kind=kind, code=code):
                     api = SimpleNamespace(_lock=threading.Lock(), _client=Mock(side_effect=error))
                     self.assertEqual(collect(api, {**QUERY, 'kind': kind}),
-                                     {'ok': False, 'code': code, 'message': str(error)})
+                                     {'ok': False, 'code': code, 'message': str(error) if code == 'authentication_required' else '扩展数据读取失败，未输出原始错误。'})
                     self.assertFalse(api._lock.locked())
 
     def test_official_insight_body_uses_param_wrapper(self):

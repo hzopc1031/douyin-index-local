@@ -1,0 +1,25 @@
+# Install as /etc/logrotate.d/douyin-index (root). Python *.log files rotate themselves;
+# this covers the shell-redirected *.stdout.log files that nothing else limits.
+/srv/work-ecs-projects/douyin-index-local/logs/*.stdout.log {
+    su work-tencent-manager work-tencent-manager
+    daily
+    maxsize 20M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+/var/log/douyin-index/*.stdout.log {
+    su douyin-svc douyin-logs
+    daily
+    maxsize 20M
+    rotate 5
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

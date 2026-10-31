@@ -10,6 +10,8 @@ import uuid
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from hub_logging import redact
+
 TZ = ZoneInfo('Asia/Shanghai')
 PLATFORMS = [
     {'id': 'douyin', 'name': '抖音指数', 'available': True, 'metric': 'search_index',
@@ -26,18 +28,6 @@ class HubError(ValueError):
     def __init__(self, code, message, status=400):
         super().__init__(message)
         self.code, self.status = code, status
-
-
-def redact(text: str) -> str:
-    """Redact credential assignments and long opaque strings in diagnostics."""
-    # Cookie headers contain several assignments; redact the whole header first.
-    text = re.sub(
-        r"(?i)(?<![\w.-])([\w.-]*cookie[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\r\n\"'}]*",
-        r'\1***', text)
-    text = re.sub(
-        r"(?i)(?<![\w.-])([\w.-]*(?:cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key)[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*[\"']?)[^\s,;\x26}\"']+",
-        r'\1***', text)
-    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', text)
 
 
 def exc_summary(exc) -> str:
@@ -149,6 +139,8 @@ class Store:
         ''')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
+        if 'requeues' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
+            self.db.execute('ALTER TABLE jobs ADD COLUMN requeues INTEGER NOT NULL DEFAULT 0')
         self.db.commit()
         path.chmod(0o600)
         self.deduplicate()
@@ -279,6 +271,13 @@ class Store:
         if not row or (max_age is not None and time.time()-row['fetched']>max_age):return None
         return json.loads(row['result'])
 
+    def latest_real_insight(self, query):
+        for row in self.db.execute('SELECT result FROM insights WHERE qhash=? ORDER BY fetched DESC', (query_hash(query),)):
+            result = json.loads(row['result'])
+            if not result.get('no_data'):
+                return result
+        return None
+
     def cached(self, query):
         if query.get('kind'):
             return self.insight(query, 86400)
@@ -329,7 +328,7 @@ class Store:
     def _job(row):
         return {'id': row['id'], 'query': json.loads(row['query']), 'status': row['status'],
                 'created_at': row['created'], 'updated_at': row['updated'],
-                'cache_hit': bool(row['cache_hit']),
+                'cache_hit': bool(row['cache_hit']), 'requeues': row['requeues'],
                 'request_source': json.loads(row['request_source']) if row['request_source'] else None,
                 'result': json.loads(row['result']) if row['result'] else None,
                 'error': json.loads(row['error']) if row['error'] else None}
@@ -350,8 +349,8 @@ class Store:
         now, identifier = time.time(), uuid.uuid4().hex
         with self.db:
             self.db.execute('INSERT INTO jobs(id,owner,idem,qhash,query,status,created,updated,result,error,cache_hit,request_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                (identifier, owner, idem, query_hash(query), encode(query), 'succeeded' if cache else 'queued',
-                 now, now, encode(cache) if cache else None, None, int(bool(cache)), encode(request_source) if request_source else None))
+                (identifier, owner, idem, query_hash(query), encode(query), ('no_data' if cache.get('no_data') else 'succeeded') if cache else 'queued',
+                 now, now, encode(cache) if cache else None, encode({'code': 'no_data', 'message': '平台明确返回无数据，不代表指数为零。'}) if cache and cache.get('no_data') else None, int(bool(cache)), encode(request_source) if request_source else None))
         return self.job(identifier), True
 
     def update_job(self, identifier, status, *, result=None, error=None):
@@ -359,6 +358,23 @@ class Store:
             self.db.execute('UPDATE jobs SET status=?,updated=?,result=?,error=? WHERE id=?',
                 (status, time.time(), encode(result) if result is not None else None,
                  encode(error) if error else None, identifier))
+
+    def refund_attempt(self, attempt_day):
+        # Caller owns the transaction; never commit a partial requeue.
+        counter = self.get('daily')
+        if dt.datetime.now(TZ).date().isoformat() == attempt_day and counter and counter['date'] == attempt_day:
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                            ('daily', encode({'date': attempt_day, 'count': max(0, counter['count'] - 1)})))
+
+    def requeue_job(self, job_id, attempt_day, limit=None):
+        with self.db:
+            count = self.db.execute('SELECT requeues FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
+            exhausted = limit is not None and count >= limit
+            error = {'code': 'busy_requeue_exhausted', 'message': '浏览器长时间被占用，已放回队列多次仍未执行，未自动重试'} if exhausted else None
+            self.db.execute('UPDATE jobs SET status=?,updated=?,result=NULL,error=?,requeues=requeues+1 WHERE id=?',
+                            ('failed' if exhausted else 'queued', time.time(), encode(error) if error else None, job_id))
+            self.refund_attempt(attempt_day)
+        return exhausted
 
     def interrupt_pending(self):
         with self.db:

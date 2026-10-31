@@ -140,3 +140,9 @@ GET /api/v1/insights?keyword=酵素&kind=related&start_date=2026-10-21&end_date=
 前端验证：node test_report_ui.cjs；无需抖音会话或在线请求。
 
 2026-10-28 故障修复：关联词及画像请求体需包在 param 对象中，已与官方前端 post 调用核实。云端串行间隔由 60 秒调整为 15 秒试运行，指数任务优先；50 次每日上限及异常暂停保持。平台 HTTP/业务错误码单独展示，空指数任务标记 no_data。
+
+worker 保护状态码：
+- `browser_unavailable`：暂停采集，须浏览器就绪后手动恢复。预检不可用时任务保持 `queued`，不占次数；socket 未监听时回队并退还次数；浏览器已接收后返回此码则任务失败且保留次数，因为可能已请求平台。
+- `busy_requeue_exhausted`：浏览器长时间被占用，已放回队列多次仍未执行，未自动重试。`busy` / `cooldown` 最多回队 `INDEX_HUB_BUSY_REQUEUE_LIMIT` 次（默认 20，非法值回退默认，0 直接失败）；耗尽后任务 `failed`，本次仍退还次数。任务的 `requeues` 记录回队处理次数（含耗尽的最后一次）。
+- `invalid_query` / `invalid_dates` / `invalid_keywords` / `invalid_kind`：参数错误，请检查请求。任务失败、不暂停，未发送上游请求，退还次数。
+- 扩展任务平台明确返回空数据时缓存 `no_data` 24 小时；命中任务保持 `no_data`、`cache_hit=true`，不请求浏览器、不扣次数。读取 `/api/v1/insights` 返回 `status=no_data`，结果含 `no_data=true`，不作为成功数据或零值。

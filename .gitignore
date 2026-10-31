@@ -53,3 +53,8 @@ secrets*
 node_modules/
 *.pyc
 .git-credentials
+
+/logs/
+
+vnc.passwd
+*.passwd

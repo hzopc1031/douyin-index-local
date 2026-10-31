@@ -2,12 +2,13 @@
 import fcntl
 import os
 from pathlib import Path
+from hub_paths import state_dir
 
 ROOT = Path(__file__).resolve().parent
 
 def main():
     os.umask(0o077)
-    lock_path = ROOT / ".cloud-state" / "baidu-window.lock"
+    lock_path = state_dir(ROOT) / "baidu-window.lock"
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
         try:
