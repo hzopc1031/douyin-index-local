@@ -88,6 +88,8 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
                         code, reason = 2, "partial"
                         continue
                     raise
+                finally:
+                    browser.preserve_seeds(video)
         videos = [v for v in videos if v.status != "duplicate"]
         if any(v.status != "complete" for v in videos):
             code, reason = 2, "partial"
@@ -181,7 +183,7 @@ async def selftest(args):
             rows = list(csv.DictReader(stream))
         md = (Path(out) / "summary.md").read_text()
         machine = json.loads((Path(out) / "run.json").read_text())
-        valid = (len(rows) == 46 and len(fake.calls) == 10 and not fake.foreign
+        valid = (len(rows) == 46 and len(fake.calls) == 8 and not fake.foreign
                  and all(v["top_count"] == 2 and v["reply_count"] == 21 for v in result["videos"])
                  and "仅CSV合成昵称" not in md and "仅CSV合成属地" not in md
                  and "990000000000000001" not in md and machine == result)

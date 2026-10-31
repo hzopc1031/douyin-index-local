@@ -5,6 +5,51 @@ from .errors import Stop
 from .models import Thread, normalize
 
 
+def ingest_page(video, root, decoded):
+    """Retain validated observations, including seeds on an interrupted run."""
+    comments, _, _, reported = decoded
+    thread = video.threads.get(root)
+    if root is not None and thread is None:
+        thread = video.threads[root] = Thread(root, None)
+    if reported is not None:
+        if root is None:
+            video.reported = reported
+        elif thread is not None:
+            # Counts may be missing or stale in either endpoint. Never erase
+            # a known shortfall with a later smaller (or missing) observation.
+            thread.reported = max(thread.reported or 0, reported)
+    for raw in comments:
+        comment = normalize(raw, root, "reply" if root else "top")
+        cid = comment.comment_id
+        existing = video.comments.get(cid)
+        if existing and (existing.level != comment.level or
+                         existing.root_comment_id != comment.root_comment_id):
+            raise Stop(3, "conflicting_comment_relation")
+        if existing is None or existing.source == "inline":
+            video.comments[cid] = comment
+        if root:
+            thread.ids.add(cid)
+        else:
+            if cid not in video.threads:
+                video.threads[cid] = Thread(cid, comment.reply_count_reported)
+            elif comment.reply_count_reported is not None:
+                current = video.threads[cid]
+                current.reported = max(current.reported or 0, comment.reply_count_reported)
+            inline = raw.get(site.FIELDS["inline"])
+            inline = [] if inline is None else inline
+            if not isinstance(inline, list):
+                raise Stop(3, "suspicious_schema")
+            for reply in inline:
+                if not isinstance(reply, dict):
+                    raise Stop(3, "suspicious_schema")
+                item = normalize(reply, cid, "inline")
+                previous = video.comments.get(item.comment_id)
+                if previous and (previous.level != 2 or previous.root_comment_id != cid):
+                    raise Stop(3, "conflicting_comment_relation")
+                video.comments.setdefault(item.comment_id, item)
+                video.threads[cid].ids.add(item.comment_id)
+
+
 async def collect(video, transport, page_budget=1500):
     used = 0
 
@@ -15,6 +60,10 @@ async def collect(video, transport, page_budget=1500):
                 raise Stop(2, "video_page_budget")
             used += 1
             video.pages += 1
+            take_seed = getattr(transport, "take_seed", None)
+            seed = take_seed(video.video_id, root, cursor) if take_seed else None
+            if seed is not None:
+                return seed
             result = await transport.fetch(video.video_id, root, cursor)
             try:
                 return site.decode_page(result)
@@ -27,42 +76,16 @@ async def collect(video, transport, page_budget=1500):
 
     async def walk(root=None):
         cursor, cursors, seen = "0", {"0"}, set()
-        thread = video.threads.get(root)
         while True:
-            comments, next_cursor, more, reported = await page(root, cursor)
-            if root is None and reported is not None:
-                video.reported = reported
+            decoded = await page(root, cursor)
+            comments, next_cursor, more, _ = decoded
+            ingest_page(video, root, decoded)
             fresh = 0
             for raw in comments:
-                comment = normalize(raw, root, "reply" if root else "top")
-                cid = comment.comment_id
+                cid = site.identifier(raw.get(site.FIELDS["id"]))
                 if cid not in seen:
                     fresh += 1
                     seen.add(cid)
-                existing = video.comments.get(cid)
-                if existing and (existing.level != comment.level or
-                                 existing.root_comment_id != comment.root_comment_id):
-                    raise Stop(3, "conflicting_comment_relation")
-                if existing is None or existing.source == "inline":
-                    video.comments[cid] = comment
-                if root:
-                    thread.ids.add(cid)
-                else:
-                    if cid not in video.threads:
-                        video.threads[cid] = Thread(cid, comment.reply_count_reported)
-                    inline = raw.get(site.FIELDS["inline"])
-                    inline = [] if inline is None else inline
-                    if not isinstance(inline, list):
-                        raise Stop(3, "suspicious_schema")
-                    for reply in inline:
-                        if not isinstance(reply, dict):
-                            raise Stop(3, "suspicious_schema")
-                        item = normalize(reply, cid, "inline")
-                        previous = video.comments.get(item.comment_id)
-                        if previous and (previous.level != 2 or previous.root_comment_id != cid):
-                            raise Stop(3, "conflicting_comment_relation")
-                        video.comments.setdefault(item.comment_id, item)
-                        video.threads[cid].ids.add(item.comment_id)
             # Even a final all-duplicate page is not proof of completion.
             if comments and not fresh:
                 return "duplicate_page"
@@ -76,6 +99,11 @@ async def collect(video, transport, page_budget=1500):
             cursor = next_cursor
 
     try:
+        preserve = getattr(transport, "preserve_seeds", None)
+        if preserve:
+            # Include every received seed in completeness checks even when its
+            # cursor is not on the subsequent walk, or the root reports zero.
+            preserve(video, consume=False)
         top_reason = await walk()
         video.reason = top_reason
         for root, thread in video.threads.items():

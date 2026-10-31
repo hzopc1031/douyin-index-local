@@ -4,12 +4,12 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dyc.errors import Stop
 from dyc.models import Video, normalize
 from dyc.paging import collect
-from dyc.runtime import Budget, DailyCounter, Pacer, Profile, check_memory, private_dir
+from dyc.runtime import Budget, DailyCounter, Display, Pacer, Profile, check_memory, private_dir
 from dyc.site import decode_page, parse_url
 from tests.helpers import Transport, comment, response
 
@@ -85,6 +85,41 @@ class PaginationTests(unittest.IsolatedAsyncioTestCase):
                                          ("1", "0"): response([comment(10)])})
         self.assertEqual(video.threads["1"].summary()["shortfall"], 2)
         self.assertEqual(video.status, "partial")
+
+    async def test_reply_page_total_recovers_missing_or_stale_root_count(self):
+        for reported in (None, 1, 2):
+            with self.subTest(root_reported=reported):
+                video, _ = await self.run_pages({
+                    (None, "0"): response([comment(1, reported)]),
+                    ("1", "0"): response([comment(10)], total=3),
+                })
+                thread = video.threads["1"].summary()
+                self.assertEqual((thread["reported"], thread["collected"], thread["shortfall"]), (3, 1, 2))
+                self.assertEqual((thread["status"], thread["reason"]), ("partial", "reply_shortfall"))
+                self.assertEqual((video.status, video.reason), ("partial", "partial_threads"))
+                self.assertTrue(all(c.thread_status == "partial" for c in video.comments.values()))
+
+    async def test_reply_totals_never_erase_an_observed_shortfall(self):
+        for totals in ((5, 2), (5, None), (None, 5), (0, None)):
+            with self.subTest(totals=totals):
+                video, _ = await self.run_pages({
+                    (None, "0"): response([comment(1, 4)]),
+                    ("1", "0"): response([comment(10)], 20, True, total=totals[0]),
+                    ("1", "20"): response([comment(11)], total=totals[1]),
+                })
+                expected = max(4, *(total for total in totals if total is not None))
+                thread = video.threads["1"].summary()
+                self.assertEqual(thread["reported"], expected)
+                self.assertEqual(thread["shortfall"], expected - 2)
+                self.assertEqual(thread["reason"], "reply_shortfall")
+
+    async def test_reply_total_matching_collected_is_complete(self):
+        video, _ = await self.run_pages({
+            (None, "0"): response([comment(1, None)]),
+            ("1", "0"): response([comment(10)], total=1),
+        })
+        self.assertEqual(video.status, "complete")
+        self.assertEqual(video.threads["1"].reported, 1)
 
     async def test_video_budget_exports_collected(self):
         video = Video("1", "synthetic")
@@ -266,3 +301,27 @@ class PacingTests(unittest.IsolatedAsyncioTestCase):
             await pacer.before()
         await pacer.between_videos()
         self.assertEqual(sleeps, [3] * 14 + [14.5, 30])
+
+
+class DisplayCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_failure_removes_authority(self):
+        display = Display()
+        with patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
+                patch("dyc.runtime.subprocess.Popen", side_effect=OSError):
+            with self.assertRaises(OSError):
+                await display.start()
+        self.assertIsNotNone(display.authority)
+        self.assertFalse(display.authority.parent.exists())
+        await display.close()
+
+    async def test_cancelled_start_reaps_server_and_removes_authority(self):
+        display = Display()
+        process = Mock()
+        process.poll.side_effect = [None, None, 0]
+        with patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
+                patch("dyc.runtime.subprocess.Popen", return_value=process), \
+                patch("dyc.runtime.asyncio.sleep", side_effect=asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
+                await display.start()
+        process.terminate.assert_called_once()
+        self.assertFalse(display.authority.parent.exists())

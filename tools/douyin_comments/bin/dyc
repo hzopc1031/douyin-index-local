@@ -9,7 +9,10 @@ import sys
 root = Path(__file__).resolve().parent.parent
 python = os.environ.get("DYC_PYTHON") or (str(root / ".venv/bin/python")
                                          if (root / ".venv/bin/python").exists() else sys.executable)
-os.chdir(root)
+# Keep filesystem arguments (and relative environment overrides) relative to
+# the caller, including when systemd-run re-executes the command.
+os.environ["PYTHONPATH"] = str(root) + (os.pathsep + os.environ["PYTHONPATH"]
+                                       if os.environ.get("PYTHONPATH") else "")
 command = [python, "-m", "dyc", *sys.argv[1:]]
 if not os.environ.get("DYC_NO_SCOPE") and not os.environ.get("DYC_IN_SCOPE"):
     available = False

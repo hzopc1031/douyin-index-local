@@ -8,9 +8,11 @@ import json
 import os
 from pathlib import Path
 import random
+import secrets
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -232,22 +234,41 @@ class Display:
         self.supplied = supplied
         self.process = None
         self.name = supplied
+        self.authority = None
+        self._auth_dir = None
+
+    def environment(self):
+        env = {"DISPLAY": self.name}
+        if self.authority is not None:
+            env["XAUTHORITY"] = str(self.authority)
+        return env
 
     async def start(self):
         if self.supplied:
             return self.name
         if not shutil.which("Xvfb"):
             raise Stop(5, "xvfb_missing")
-        read_fd, write_fd = os.pipe()
+        read_fd = write_fd = None
         try:
+            self._auth_dir = tempfile.TemporaryDirectory(prefix="dyc-xauth-")
+            self.authority = Path(self._auth_dir.name) / "Xauthority"
+            # Xauthority's binary format: FamilyWild and an empty display
+            # number allow -displayfd to choose a display after auth is ready.
+            # The random cookie is private to this server and its Chromium.
+            fields = (b"", b"", b"MIT-MAGIC-COOKIE-1", secrets.token_bytes(16))
+            record = struct.pack("!H", 65535) + b"".join(
+                struct.pack("!H", len(value)) + value for value in fields)
+            with os.fdopen(private_open(self.authority, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as stream:
+                stream.write(record)
+            read_fd, write_fd = os.pipe()
             self.process = subprocess.Popen(
-                ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x900x24", "-nolisten", "tcp"],
+                ["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1280x900x24",
+                 "-nolisten", "tcp", "-auth", str(self.authority)],
                 pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
-        finally:
             os.close(write_fd)
-        os.set_blocking(read_fd, False)
-        try:
+            write_fd = None
+            os.set_blocking(read_fd, False)
             buffer = b""
             for _ in range(100):
                 try:
@@ -264,18 +285,29 @@ class Display:
                     break
                 await asyncio.sleep(0.05)
             raise Stop(5, "xvfb_start_failed")
+        except BaseException:
+            await self.close()
+            raise
         finally:
-            os.close(read_fd)
+            for fd in (read_fd, write_fd):
+                if fd is not None:
+                    os.close(fd)
 
     async def close(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            for _ in range(20):
-                if self.process.poll() is not None:
-                    return
-                await asyncio.sleep(0.025)
-            self.process.kill()
-            self.process.wait(timeout=1)
+        try:
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+                for _ in range(20):
+                    if self.process.poll() is not None:
+                        break
+                    await asyncio.sleep(0.025)
+                else:
+                    self.process.kill()
+                    self.process.wait(timeout=1)
+        finally:
+            if self._auth_dir is not None:
+                self._auth_dir.cleanup()
+                self._auth_dir = None
 
 
 def browser_defaults():

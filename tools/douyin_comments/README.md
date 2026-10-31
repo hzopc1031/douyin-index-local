@@ -7,7 +7,7 @@
 
 ## 使用
 
-在本目录执行（也可用自动切换目录的 `bin/dyc`）：
+在本目录执行，也可从任何目录调用 `bin/dyc`；相对文件路径始终以调用时的工作目录为准：
 
 ```sh
 bin/dyc check-env
@@ -50,7 +50,8 @@ bin/dyc selftest
 不可用时向 stderr 发警告并继续，**此时不强制内存上限**；`DYC_NO_SCOPE=1` 可显式关闭 scope。
 `DYC_PYTHON` 可指定解释器，否则优先本目录 `.venv/bin/python`。
 启动可用内存必须至少 2 GiB。除非显式传 `--display :N`，即使环境已有 DISPLAY，也另起自己的
-`Xvfb -displayfd`，退出时只清理本工具的进程。
+`Xvfb -displayfd`，用私有 0700 临时目录内的 0600 Xauthority 文件和随机授权 cookie 保护本地显示，
+通过 `-auth` / `XAUTHORITY` 仅交给自己的 Xvfb 和 Chromium，退出或启动失败时删除授权文件，只清理本工具的进程。
 
 资料目录默认 `~/.local/share/dyc/profile`（`--profile-dir` / `DYC_PROFILE_DIR`），必须归当前用户、0700，
 拒绝符号链接和第二实例。持有 flock 后才清理确认已失效的 Chromium Singleton 锁；仍存活或来自其他主机的锁拒绝启动。
@@ -71,6 +72,8 @@ bin/dyc selftest
 验证码（含 iframe）、非零业务状态、可疑/空响应立即停整批；不会尝试解题、等待消失或跳到下一条视频。
 登录失效单独返回 4；异常和中断导出已收到的数据。v1 **不做 SQLite、断点、自动恢复或后台守护**。
 页面自己追加的评论请求会被拦下，后续分页完全由串行调度器控制。
+首个有效响应按视频、线程和请求 cursor 保存在内存中，直接用于分页；达到预算或中断时也保留在导出中。
+回复完整性取根评论与各回复页已报告总数的最大值，避免较小或缺失的后续值掩盖已知缺口。
 
 | 退出码 | 含义 |
 |---|---|

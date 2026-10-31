@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,48 @@ class OutputTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_wrapper_resolves_urls_file_and_output_from_callers_directory(self):
+        with tempfile.TemporaryDirectory(prefix="dyc-wrapper-") as temp:
+            root = Path(temp)
+            # Invalid synthetic input stops before constructing any browser.
+            (root / "urls.txt").write_text("synthetic-invalid-url\n")
+            relative_out = root.name + "-out"
+            misplaced = ROOT / relative_out
+            self.assertFalse(misplaced.exists())
+            self.addCleanup(shutil.rmtree, misplaced, True)
+            env = {**os.environ, "DYC_PYTHON": sys.executable, "DYC_NO_SCOPE": "1"}
+            result = subprocess.run([str(ROOT / "bin/dyc"), "fetch", "--urls-file", "urls.txt",
+                                     "--out", relative_out], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["exit_reason"], "invalid_video_url")
+            self.assertEqual(data["out"], str(root / relative_out))
+            self.assertTrue((root / relative_out / "comments.csv").exists())
+            self.assertFalse(misplaced.exists())
+
+    def test_wrapper_resolves_relative_profile_and_state_flags_and_environment(self):
+        with tempfile.TemporaryDirectory(prefix="dyc-wrapper-") as temp:
+            root = Path(temp)
+            misplaced = ROOT / root.name
+            self.assertFalse(misplaced.exists())
+            self.addCleanup(shutil.rmtree, misplaced, True)
+            for use_env in (False, True):
+                with self.subTest(environment=use_env):
+                    profile, state = root.name + "/profile", root.name + "/state"
+                    env = {**os.environ, "DYC_PYTHON": sys.executable, "DYC_NO_SCOPE": "1"}
+                    argv = [str(ROOT / "bin/dyc"), "check-env"]
+                    if use_env:
+                        env.update(DYC_PROFILE_DIR=profile, DYC_STATE_DIR=state)
+                    else:
+                        argv += ["--profile-dir", profile, "--state-dir", state]
+                    result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["profile_dir"], str(root / profile))
+                    self.assertTrue((root / profile / ".dyc.lock").exists())
+                    self.assertTrue((root / state / ".usage.lock").exists())
+                    self.assertFalse(misplaced.exists())
+
     def test_help_everywhere(self):
         for command in ([], ["fetch"], ["login"], ["check-env"], ["selftest"]):
             result = subprocess.run([sys.executable, "-m", "dyc", *command, "--help"],
@@ -136,7 +179,7 @@ class CLITests(unittest.TestCase):
                    "DYC_PYTHON": sys.executable, "SYNTHETIC_SCOPE_RECORD": str(record)}
             env.pop("DYC_NO_SCOPE", None)
             env.pop("DYC_IN_SCOPE", None)
-            result = subprocess.run([str(ROOT / "bin/dyc"), "--help"], env=env,
+            result = subprocess.run([str(ROOT / "bin/dyc"), "--help"], env=env, cwd=root,
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(record.read_text())[:5],

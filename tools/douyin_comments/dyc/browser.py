@@ -4,13 +4,16 @@ import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import secrets
 import signal
 from urllib.parse import parse_qs, urlsplit
 
 from . import site
 from .errors import Stop
+from .paging import ingest_page
 from .runtime import Display, Profile, browser_defaults, check_memory
 
+REPLAY_HEADER = "x-dyc-replay"
 
 STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
@@ -64,6 +67,7 @@ XHR_JS = """cfg => new Promise(resolve => {
     xhr.open('GET', url.href, true);
     xhr.withCredentials = true;
     for (const [key, value] of Object.entries(cfg.headers)) xhr.setRequestHeader(key, value);
+    xhr.setRequestHeader(cfg.markerHeader, cfg.marker);
     xhr.onload = () => finish({status: xhr.status, text: xhr.responseText});
     xhr.onerror = () => finish({kind: 'network'});
     xhr.onabort = () => finish({kind: 'cancelled'});
@@ -129,6 +133,7 @@ class Browser:
         self.accepted = {}
         self.active = {}
         self.seeded = set()
+        self.seed_pages = {}
         self.seed_ready = asyncio.Event()
         self.armed = self.seeding = False
         self.expected = None
@@ -146,14 +151,14 @@ class Browser:
         check_memory(self.memory_minimum)
         self.profile.__enter__()
         try:
-            name = await self.control.run(self.display.start())
+            await self.control.run(self.display.start())
             browser_defaults()
             from playwright.async_api import async_playwright
             self.playwright = await self.control.run(async_playwright().start())
             # Private driver handle is used only for emergency cleanup, never data acquisition.
             self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
             self.context = await self.control.run(self.playwright.chromium.launch_persistent_context(
-                str(self.profile.path), headless=False, env={**os.environ, "DISPLAY": name},
+                str(self.profile.path), headless=False, env={**os.environ, **self.display.environment()},
                 handle_sigint=False, handle_sigterm=False, handle_sighup=False,
                 service_workers="block", accept_downloads=False,
                 args=["--disable-background-networking", "--disable-component-update",
@@ -181,29 +186,71 @@ class Browser:
         await self.close()
 
     def on_request(self, request):
-        kind = site.request_kind(request.url)
-        if self.armed and kind and kind not in self.templates:
+        key = self.request_key(request)
+        if self.armed and self.seeding and key and key[2] not in self.templates:
             headers = {key: value for key, value in request.headers.items()
                        if key.lower() in site.REPLAY_HEADERS}
-            self.templates[kind] = Template(request.url, headers)
+            self.templates[key[2]] = Template(request.url, headers)
+
+    def request_key(self, request):
+        """Only unambiguous GETs for the intended video's main-frame origin."""
+        try:
+            if request.method != "GET" or request.frame != self.page.main_frame:
+                return None
+            url, frame = urlsplit(request.url), urlsplit(request.frame.url)
+            hosts = {urlsplit(site.FAKE_ORIGIN).hostname} if self.backend else site.HOSTS
+            origin = (url.scheme, url.hostname, url.port or 443)
+            if (origin != (frame.scheme, frame.hostname, frame.port or 443)
+                    or url.scheme != "https" or url.hostname not in hosts
+                    or url.port not in (None, 443) or url.username or url.password):
+                return None
+            kind = {site.TOP_PATH: "top", site.REPLY_PATH: "reply"}.get(url.path)
+            if kind is None:
+                return None
+            params = parse_qs(url.query, keep_blank_values=True)
+            for name in ("video", "item", "root", "cursor"):
+                values = params.get(site.PARAM[name], [])
+                if len(values) > 1 or (values and not values[0].isascii()) or (values and not values[0].isdigit()):
+                    return None
+            video = params.get(site.PARAM["video"], params.get(site.PARAM["item"], [None]))[0]
+            item = params.get(site.PARAM["item"], [video])[0]
+            current = site.parse_url(request.frame.url, fake=self.backend is not None).video_id
+            if not video or item != video or video != (self.video_id or current) or video != current:
+                return None
+            root = params.get(site.PARAM["root"], [None])[0]
+            if (kind == "reply") != bool(root):
+                return None
+            cursor = params.get(site.PARAM["cursor"], ["0"])[0]
+            return origin, video, kind, root, cursor
+        except (ValueError, Stop):
+            return None
 
     async def on_response(self, response):
         request = response.request
-        if self.accepted.get(request) != "seed":
+        accepted = self.accepted.get(request)
+        if not accepted or accepted[0] != "seed":
             return
         try:
-            site.decode_page({"status": response.status, "text": await response.text()})
-            if site.request_kind(request.url) == "top":
+            decoded = site.decode_page({"status": response.status, "text": await response.text()})
+            _, video, kind, root, cursor = accepted[1]
+            self.seed_pages[video, root, cursor] = decoded
+            if kind == "top":
                 self.seed_ready.set()
         except Stop as error:
             self.control.stop(error.code, error.reason)
         except Exception:
             if not self.closing:
                 self.control.stop(3, "seed_response_unavailable")
+        finally:
+            event = self.active.get(request)
+            if event:
+                event.set()
 
     def on_finished(self, request):
         event = self.active.get(request)
-        if event:
+        accepted = self.accepted.get(request)
+        # A seed isn't settled until its body has been decoded and retained.
+        if event and (not accepted or accepted[0] != "seed" or request.failure):
             event.set()
 
     async def route(self, route):
@@ -235,19 +282,22 @@ class Browser:
             if not self.armed or self.control.event.is_set():
                 await route.abort()
                 return
-            params = parse_qs(urlsplit(request.url).query)
-            actual = (kind, params.get(site.PARAM["root"], [None])[0],
-                      params.get(site.PARAM["cursor"], ["0"])[0])
-            if self.expected == actual:
+            actual = self.request_key(request)
+            marker = request.headers.get(REPLAY_HEADER)
+            if actual is None:
+                await route.abort()
+                return
+            if self.expected is not None and self.expected == (actual, marker):
                 self.expected = None
                 admission = "replay"
-            elif self.seeding and kind not in self.seeded:
+            elif self.seeding and not marker and kind not in self.seeded:
                 self.seeded.add(kind)
                 admission = "seed"
             else:
                 # Block page auto-pagination: all further work is explicit/serial.
                 await route.abort()
                 return
+            self.video_id = actual[1]
             try:
                 await self.control.run(self.pacer.before())
                 state = await self.state()
@@ -263,12 +313,15 @@ class Browser:
                 return
             done = asyncio.Event()
             self.active[request] = done
-            self.accepted[request] = admission
+            self.accepted[request] = admission, actual
             try:
                 if self.backend:
                     await self.backend.deliver(route)
                 else:
-                    await route.continue_()
+                    # This one-use marker is local admission metadata, never
+                    # a header sent to the site or retained in a template.
+                    await route.continue_(headers={key: value for key, value in request.headers.items()
+                                                   if key.lower() != REPLAY_HEADER})
                 await asyncio.wait_for(done.wait(), self.timeout_ms / 1000 + 2)
             except asyncio.TimeoutError:
                 self.control.stop(3, "unsettled_request")
@@ -333,7 +386,9 @@ class Browser:
     async def open_video(self, url):
         self.templates.clear()
         self.seeded.clear()
+        self.seed_pages.clear()
         self.seed_ready.clear()
+        self.video_id = site.parse_url(url, fake=self.backend is not None).video_id
         self.budget.new_video()
         self.armed = self.seeding = True
         await self.control.run(self.page.goto(url, wait_until="domcontentloaded"))
@@ -351,13 +406,34 @@ class Browser:
             await self.control.run(asyncio.wait_for(self.seed_ready.wait(), 15))
         except asyncio.TimeoutError:
             raise Stop(2, "comment_template_missing") from None
-        self.seeding = False
+        await self.control.run(self.gate.acquire())
+        try:
+            self.seeding = False
+        finally:
+            self.gate.release()
         async def text_at(selector):
             locator = self.page.locator(selector)
             return await locator.first.text_content() if await locator.count() else ""
         title = await self.control.run(text_at(site.SIGNALS["title"]))
         displayed = await self.control.run(text_at(site.SIGNALS["count"]))
         return resolved, title or "", displayed or ""
+
+    def take_seed(self, video_id, root, cursor):
+        return self.seed_pages.pop((video_id, root, cursor), None)
+
+    def preserve_seeds(self, video, *, consume=True):
+        """Drain received pages even if navigation/metadata or collection stopped."""
+        if not video.video_id and self.video_id:
+            video.video_id = self.video_id
+            video.video_url = site.parse_url(self.page.url, fake=self.backend is not None).url
+        # Roots first, then reply seeds, regardless of response event timing.
+        for key in sorted(self.seed_pages, key=lambda key: key[1] is not None):
+            video_id, root, _ = key
+            if video_id == video.video_id:
+                ingest_page(video, root, self.seed_pages[key])
+                if consume:
+                    self.seed_pages.pop(key)
+                    video.pages += 1
 
     async def fetch(self, video_id, root, cursor):
         self.control.check()
@@ -372,14 +448,20 @@ class Browser:
         template = self.templates.get(kind) or self.templates.get("top")
         if template is None:
             raise Stop(2, "comment_template_missing")
-        self.expected = (kind, root, cursor)
-        result = await self.control.run(self.page.evaluate(XHR_JS, dict(
-            url=template.url, headers=template.headers, video=video_id, root=root,
-            cursor=cursor, path=site.REPLY_PATH if root else site.TOP_PATH,
-            params=site.PARAM, signatures=site.SIGNATURES, storage=site.TOKEN_STORAGE,
-            signals=site.SIGNALS, timeout=self.timeout_ms,
-        )))
-        self.expected = None
+        origin = urlsplit(template.url)
+        key = (origin.scheme, origin.hostname, origin.port or 443), video_id, kind, root, cursor
+        marker = secrets.token_hex(16)
+        self.expected = key, marker
+        try:
+            result = await self.control.run(self.page.evaluate(XHR_JS, dict(
+                url=template.url, headers=template.headers, video=video_id, root=root,
+                cursor=cursor, path=site.REPLY_PATH if root else site.TOP_PATH,
+                params=site.PARAM, signatures=site.SIGNATURES, storage=site.TOKEN_STORAGE,
+                signals=site.SIGNALS, timeout=self.timeout_ms,
+                markerHeader=REPLAY_HEADER, marker=marker,
+            )))
+        finally:
+            self.expected = None
         if result.get("kind") in ("risk", "login"):
             self.control.stop(3 if result["kind"] == "risk" else 4,
                               "verification_widget" if result["kind"] == "risk" else "login_expired")
@@ -411,3 +493,4 @@ class Browser:
         await self.display.close()
         self.profile.__exit__(None, None, None)
         self.templates.clear()
+        self.seed_pages.clear()

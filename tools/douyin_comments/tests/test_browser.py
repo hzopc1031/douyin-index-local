@@ -6,17 +6,20 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from dyc import site
-from dyc.browser import Browser, _processes
+from dyc.browser import Browser, REPLAY_HEADER, _processes
 from dyc.errors import Control, Stop
-from dyc.fake import FakeSite, FastPacer
+from dyc.fake import FakeSite, FastPacer, fixture_comment, fixture_page
 from dyc.runner import fetch, login
 from dyc.models import Video
 from dyc.paging import collect
@@ -44,6 +47,113 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     def browser(self, fake, **kwargs):
         return Browser(self.root / "profile", self.control,
                        Budget(DailyCounter(self.root / "state")), FastPacer(), backend=fake, **kwargs)
+
+    async def test_owned_display_requires_private_authorization(self):
+        fake = FakeSite()
+        async with self.browser(fake) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            authority = browser.display.authority
+            self.assertEqual(authority.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(authority.parent.stat().st_mode & 0o777, 0o700)
+            command = Path(f"/proc/{browser.display.process.pid}/cmdline").read_bytes().split(b"\0")
+            self.assertEqual(command[command.index(b"-auth") + 1], os.fsencode(authority))
+            data = authority.read_bytes()
+            fields, pos = [], 2
+            for _ in range(4):
+                length, = struct.unpack_from("!H", data, pos)
+                pos += 2
+                fields.append(data[pos:pos + length])
+                pos += length
+            name, cookie = fields[2:]
+            self.assertEqual(name, b"MIT-MAGIC-COOKIE-1")
+            self.assertEqual(len(cookie), 16)
+
+            def connect(auth_name, auth_data):
+                # A real X11 setup handshake, exclusively over the owned Unix
+                # socket. No display contents or generated secrets are logged.
+                header = struct.pack("<BBHHHHH", ord("l"), 0, 11, 0, len(auth_name), len(auth_data), 0)
+                padded = lambda value: value + b"\0" * (-len(value) % 4)
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(2)
+                    client.connect("/tmp/.X11-unix/X" + browser.display.name[1:])
+                    client.sendall(header + padded(auth_name) + padded(auth_data))
+                    return client.recv(1)
+
+            self.assertEqual(await asyncio.to_thread(connect, b"", b""), b"\0")
+            self.assertEqual(await asyncio.to_thread(connect, name, b"synthetic-wrong!"), b"\0")
+            self.assertEqual(await asyncio.to_thread(connect, name, cookie), b"\1")
+        self.assertFalse(authority.parent.exists())
+        self.assertEqual(fake.foreign, [])
+
+    async def test_page_requests_cannot_consume_collector_replay(self):
+        fake = FakeSite()
+        async with self.browser(fake) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            await browser.page.evaluate("""markerHeader => {
+                const open = XMLHttpRequest.prototype.open;
+                const send = XMLHttpRequest.prototype.send;
+                const header = XMLHttpRequest.prototype.setRequestHeader;
+                XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                    this.testURL = url;
+                    return open.call(this, method, url, ...rest);
+                };
+                XMLHttpRequest.prototype.setRequestHeader = function(key, value) {
+                    if (key === markerHeader) this.testMarker = value;
+                    return header.call(this, key, value);
+                };
+                window.unsolicited = [];
+                XMLHttpRequest.prototype.send = function(...args) {
+                    if (!this.testMarker) return send.apply(this, args);
+                    const collector = this;
+                    (async () => {
+                        for (const [video, item, marked] of [
+                            ['999', null, false], ['100', null, false],
+                            ['999', null, true], ['100', '999', true]
+                        ]) {
+                            await new Promise(resolve => {
+                                const url = new URL(collector.testURL);
+                                url.searchParams.set('aweme_id', video);
+                                if (item) url.searchParams.set('item_id', item);
+                                const extra = new XMLHttpRequest();
+                                open.call(extra, 'GET', url.href, true);
+                                if (marked) header.call(extra, markerHeader, collector.testMarker);
+                                extra.onload = () => { window.unsolicited.push('admitted'); resolve(); };
+                                extra.onerror = () => { window.unsolicited.push('blocked'); resolve(); };
+                                send.call(extra);
+                            });
+                        }
+                        send.apply(collector, args);
+                    })();
+                };
+            }""", REPLAY_HEADER)
+            result = await browser.fetch("100", None, "7")
+            self.assertEqual([c["cid"] for c in site.decode_page(result)[0]], ["10002"])
+            self.assertEqual(await browser.page.evaluate("window.unsolicited"), ["blocked"] * 4)
+            self.assertEqual(browser.budget.used, 2)
+            self.assertEqual(len(fake.calls), 2)
+            self.assertEqual(fake.calls[-1][1][site.PARAM["video"]], "100")
+            self.assertEqual(fake.calls[-1][1][site.PARAM["cursor"]], "7")
+            self.assertIsNone(browser.expected)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_request_identity_rejects_foreign_origins_and_ambiguous_parameters(self):
+        fake = FakeSite()
+        async with self.browser(fake) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            base = site.FAKE_ORIGIN + site.TOP_PATH
+            for url in ("https://foreign.invalid" + site.TOP_PATH + "?aweme_id=100",
+                        "http://dyc.invalid" + site.TOP_PATH + "?aweme_id=100",
+                        base + "?aweme_id=100&aweme_id=999", base + "?aweme_id=100&cursor=0&cursor=1",
+                        base + "extra?aweme_id=100", base + "?aweme_id=100&item_id=999"):
+                with self.subTest(url=url):
+                    request = Namespace(url=url, method="GET", frame=browser.page.main_frame)
+                    self.assertIsNone(browser.request_key(request))
+            self.assertEqual(browser.request_key(Namespace(
+                url=base + "?aweme_id=100&cursor=7", method="GET", frame=browser.page.main_frame))[1:],
+                ("100", "top", None, "7"))
+        self.assertEqual(fake.foreign, [])
 
     async def test_sdk_template_signatures_token_and_reply_derivation(self):
         fake = FakeSite()
@@ -89,6 +199,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
             await browser.open_video(site.FAKE_ORIGIN + "/video/100")
             result = await browser.fetch("100", None, "0")
             self.assertEqual(result, {"kind": "timeout"})
+            self.assertIsNone(browser.expected)
             self.assertEqual(await browser.page.evaluate("window.abortCount"), 1)
             self.assertEqual(len(fake.calls), 2)
         self.assertEqual(fake.foreign, [])
@@ -176,12 +287,15 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         code, result = await fetch(args, backend=fake, pacer=FastPacer())
         self.assertEqual(code, 0, result)
         self.assertEqual(len(result["videos"]), 2)
-        self.assertEqual(result["requests"], 10)
+        self.assertEqual(result["requests"], 8)
+        self.assertEqual(len(fake.calls), 8)
+        self.assertEqual([params[site.PARAM["cursor"]] for kind, params in fake.calls if kind == "top"],
+                         ["0", "7", "0", "7"])
         with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
             rows = list(csv.DictReader(stream))
         self.assertEqual(len(rows), 46)
         self.assertEqual(len({(row["video_id"], row["comment_id"]) for row in rows}), 46)
-        self.assertEqual(json.loads((args.state_dir / "usage.json").read_text())["count"], 10)
+        self.assertEqual(json.loads((args.state_dir / "usage.json").read_text())["count"], 8)
         for file in args.out.iterdir():
             text = file.read_text(encoding="utf-8-sig")
             for secret in ("synthetic-sdk-signature", "synthetic-stale-signature", "synthetic-fresh-token",
@@ -208,8 +322,153 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(result["exit_reason"], "video_page_budget")
         self.assertEqual(result["requests"], 2)
-        self.assertEqual(result["videos"][0]["top_count"], 1)
+        self.assertEqual(result["videos"][0]["top_count"], 2)
         self.assertNotIn("/video/200", fake.navigations)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_one_request_budget_exports_seed_comments_and_inline_replies(self):
+        class InlineSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url):
+                    self.calls.append(route.request.url)
+                    root = fixture_comment(10001, 3)
+                    root[site.FIELDS["inline"]] = [fixture_comment(10100)]
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page([root], 7, True, 4)))
+                else:
+                    await super().deliver(route)
+        args = self.args()
+        args.max_pages = 1
+        fake = InlineSeed()
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"], result["requests"]), (2, "video_page_budget", 1))
+        video = result["videos"][0]
+        self.assertEqual((video["top_count"], video["reply_count"], video["pages"]), (1, 1, 1))
+        self.assertEqual(video["partial_threads"][0]["shortfall"], 2)
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([row["comment_id"] for row in rows], ["10001", "10100"])
+        self.assertTrue(all(row["thread_status"] == "partial" for row in rows))
+        self.assertEqual(len(fake.calls), 1)
+        self.assertNotIn("/video/200", fake.navigations)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_final_seed_page_completes_without_replay(self):
+        class FinalSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url):
+                    self.calls.append(route.request.url)
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page([fixture_comment(10001)], 0, False, 1)))
+                else:
+                    await super().deliver(route)
+        args = self.args()
+        args.max_pages, args.urls = 1, args.urls[:1]
+        fake = FinalSeed()
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["requests"], result["videos"][0]["top_count"]), (0, 1, 1))
+        self.assertEqual(result["videos"][0]["status"], "complete")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_seed_is_bound_to_video_and_original_cursor(self):
+        class LaterSeed(FakeSite):
+            def html(self, video_id):
+                return super().html(video_id).replace("set(cfg.params.cursor, '0')", "set(cfg.params.cursor, '7')")
+        fake = LaterSeed()
+        async with self.browser(fake) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            self.assertIsNone(browser.take_seed("999", None, "7"))
+            self.assertIsNone(browser.take_seed("100", None, "0"))
+            video = Video("100", site.FAKE_ORIGIN + "/video/100")
+            await collect(video, browser)
+            self.assertEqual(video.status, "complete")
+            self.assertEqual((video.summary()["top_count"], video.summary()["reply_count"]), (2, 21))
+            self.assertEqual([params[site.PARAM["cursor"]] for kind, params in fake.calls if kind == "top"],
+                             ["7", "0"])
+            self.assertEqual(browser.budget.used, 4)
+            self.assertEqual(browser.seed_pages, {})
+        self.assertEqual(fake.foreign, [])
+
+    async def test_interrupted_after_seed_before_collection_still_exports(self):
+        original = Browser.open_video
+        async def interrupted(browser, url):
+            await original(browser, url)
+            browser.control.stop(2, "interrupted")
+            browser.control.check()
+        args = self.args()
+        args.urls = [site.FAKE_ORIGIN + "/short/synthetic"]
+        fake = FakeSite()
+        with patch.object(Browser, "open_video", interrupted):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"], result["requests"]), (2, "interrupted", 1))
+        video = result["videos"][0]
+        self.assertEqual((video["video_id"], video["top_count"], video["pages"]), ("100", 1, 1))
+        self.assertEqual(video["status"], "partial")
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([(row["video_id"], row["comment_id"]) for row in rows], [("100", "10001")])
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_reply_seed_is_preserved_when_budget_stops_top_pagination(self):
+        fake = FakeSite(reply_seed=True)
+        args = self.args()
+        args.max_pages = 2
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["requests"]), (2, 2))
+        video = result["videos"][0]
+        self.assertEqual((video["top_count"], video["reply_count"]), (1, 20))
+        self.assertEqual(video["partial_threads"][0]["shortfall"], 1)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_reply_seed_total_overrides_stale_zero_before_completeness_check(self):
+        class StaleRoot(FakeSite):
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if kind:
+                    self.calls.append(kind)
+                    comments = [fixture_comment(10001, 0)] if kind == "top" else [fixture_comment(10100)]
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page(comments, 0, False, 3)))
+                else:
+                    await super().deliver(route)
+        args = self.args()
+        args.urls = args.urls[:1]
+        args.max_pages = 2
+        fake = StaleRoot(reply_seed=True)
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["requests"]), (2, 2))
+        video = result["videos"][0]
+        self.assertEqual((video["status"], video["top_count"], video["reply_count"]), ("partial", 1, 1))
+        self.assertEqual(video["partial_threads"][0]["reason"], "reply_shortfall")
+        self.assertEqual(video["partial_threads"][0]["shortfall"], 2)
+        self.assertEqual(fake.calls, ["top", "reply"])
+        self.assertEqual(fake.foreign, [])
+
+    async def test_reply_page_total_shortfall_is_exported_as_partial_batch(self):
+        class Shortfall(FakeSite):
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if kind:
+                    self.calls.append(kind)
+                    comments = [fixture_comment(10001, None)] if kind == "top" else [fixture_comment(10100)]
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page(comments, 0, False, 3)))
+                else:
+                    await super().deliver(route)
+        args = self.args()
+        args.urls = args.urls[:1]
+        fake = Shortfall()
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"]), (2, "partial"))
+        thread = result["videos"][0]["partial_threads"][0]
+        self.assertEqual((thread["reported"], thread["collected"], thread["shortfall"]), (3, 1, 2))
+        self.assertEqual(thread["reason"], "reply_shortfall")
+        self.assertIn("报告 3，已采 1，缺口 2", (args.out / "summary.md").read_text())
+        self.assertEqual(json.loads((args.out / "run.json").read_text()), result)
+        self.assertEqual(fake.calls, ["top", "reply"])
         self.assertEqual(fake.foreign, [])
 
     async def test_daily_cap_refused_before_browser(self):
@@ -230,7 +489,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         code, result = await fetch(self.args(), backend=fake, pacer=FastPacer())
         self.assertEqual((code, result["exit_reason"]), (2, "daily_cap"))
         self.assertEqual(result["requests"], 2)
-        self.assertEqual(result["videos"][0]["top_count"], 1)
+        self.assertEqual(result["videos"][0]["top_count"], 2)
         self.assertEqual(counter.usage(), 3000)
         self.assertEqual(len(fake.calls), 2)
         self.assertNotIn("/video/200", fake.navigations)
@@ -293,7 +552,7 @@ class BrowserProcessTests(unittest.TestCase):
                                     cwd=ROOT, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(len(result.stdout.splitlines()), 1)
-            self.assertEqual(json.loads(result.stdout)["requests"], 10)
+            self.assertEqual(json.loads(result.stdout)["requests"], 8)
             self.assertFalse(real_profile.exists())
             self.assertFalse((root / "untouched-state").exists())
 
@@ -315,6 +574,12 @@ class BrowserProcessTests(unittest.TestCase):
                 self.assertTrue((root / "ready").exists(), "fixture never reached in-flight request")
                 children = _processes(proc.pid)
                 self.assertGreater(len(children), 3)
+                authorities = []
+                for pid in children:
+                    command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                    if command and Path(os.fsdecode(command[0])).name == "Xvfb":
+                        authorities.append(Path(os.fsdecode(command[command.index(b"-auth") + 1])))
+                self.assertEqual(len(authorities), 1)
                 start = time.monotonic()
                 proc.send_signal(sig)
                 stdout, stderr = proc.communicate(timeout=8)
@@ -323,9 +588,10 @@ class BrowserProcessTests(unittest.TestCase):
                 self.assertEqual(len(stdout.splitlines()), 1)
                 result = json.loads(stdout)
                 self.assertEqual(result["exit_reason"], "interrupted")
-                self.assertEqual(result["videos"][0]["top_count"], 1)
+                self.assertEqual(result["videos"][0]["top_count"], 2)
                 self.assertEqual(result["videos"][1]["status"], "partial")
                 self.assertTrue((root / "out/comments.csv").exists())
+                self.assertTrue(all(not authority.parent.exists() for authority in authorities))
                 # Check the exact owned process identities, never production browser names.
                 for pid, born in children.items():
                     path = Path(f"/proc/{pid}/stat")
