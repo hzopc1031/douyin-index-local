@@ -18,4 +18,9 @@ from cryptography.hazmat.primitives import padding
 
 root = Path(sys.executable).resolve().parents[4] if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 sys.path.insert(0, str(root))
+# Expose helpers used by the dynamically loaded app to PyInstaller analysis.
+import browser_login
+import webview_cookies
+import webview_shutdown
+
 runpy.run_path(str(root / "app.py"), run_name="__main__")

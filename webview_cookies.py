@@ -5,7 +5,6 @@ from email.utils import formatdate
 from http.cookies import CookieError, SimpleCookie
 import os
 from pathlib import Path
-import sqlite3
 import stat
 import threading
 import time
@@ -45,6 +44,8 @@ class CookieMirror:
         mode=ro preserves SQLite's committed WAL view; immutable=1 would ignore
         a WAL left by an interrupted browser. No backup or cookie export is made.
         """
+        import sqlite3  # Only persistent-profile recovery needs SQLite.
+
         database = Path(storage_path) / 'Cookies'
         try:
             try:

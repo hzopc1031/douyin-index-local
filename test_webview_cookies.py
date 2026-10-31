@@ -119,7 +119,7 @@ class CookieRestoreTests(unittest.TestCase):
         # resurrect a removed cookie or overwrite a current login.
         self.mirror.removed(network_cookie())
         self.mirror.added(network_cookie(name=b'plain', value=b'synthetic-new'))
-        with patch('webview_cookies.sqlite3.connect', side_effect=AssertionError('no reread')):
+        with patch('sqlite3.connect', side_effect=AssertionError('no reread')):
             self.assertEqual({m.key: m.value for c in self.mirror.snapshot() for m in c.values()},
                              {'sid_guard': 'synthetic-session', 'plain': 'synthetic-new'})
 
