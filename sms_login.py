@@ -180,6 +180,7 @@ class SmsLoginSession:
 
     def __init__(self, phone, now):
         self.state = 'opening'
+        self.state_generation = 0
         self.phone = phone
         self.masked_phone = phone[:3] + '****' + phone[-4:]
         self.started = self.entered = now
@@ -467,6 +468,7 @@ class SmsLoginManager:
     def _set(self, session, state):
         if session.state != state:
             session.state, session.entered = state, self._clock()
+            session.state_generation += 1
         if state not in VERIFY:
             session.frame = None
             session.frame_hash = None
@@ -529,6 +531,9 @@ class SmsLoginManager:
                 self._finish(session, 'timeout')
                 return
             action = session.actions.popleft() if session.actions else None
+            # Bind the read before releasing admission's lock: a new code/send
+            # may be queued even before driver.probe() starts reading the page.
+            generation = session.state_generation
         if action is not None:
             self._action(session, action)
             return
@@ -537,6 +542,8 @@ class SmsLoginManager:
                 probe = self.driver.probe()  # Driver bounds one read-only JS call to 5s.
             except DriverTimeout:
                 with self._lock:
+                    if session.state in TERMINAL or generation != session.state_generation:
+                        return
                     session.probe_timeouts += 1
                     if session.probe_timeouts >= 3 and session.state not in TERMINAL:
                         self._finish(session, 'failed')
@@ -547,8 +554,10 @@ class SmsLoginManager:
                 return
             else:
                 with self._lock:
+                    if session.state in TERMINAL or generation != session.state_generation:
+                        return
                     session.probe_timeouts = 0
-                self._observe(session, probe)
+                self._observe(session, probe, generation=generation)
             session.next_probe = self._clock()+1
         with self._lock:
             capture = (session.state in VERIFY and session.verification_mode != 'desktop'
@@ -562,10 +571,12 @@ class SmsLoginManager:
                 and not probe.get('login_page', True) and not probe.get('login_form', True)
                 and probe.get('session_present') is True)
 
-    def _observe(self, session, probe):
+    def _observe(self, session, probe, *, generation):
         try_solver = False
         with self._lock:
-            if session.state in TERMINAL:
+            # Check inside the same lock as submit()/resend(), including the
+            # interval between a probe returning and its result being applied.
+            if session.state in TERMINAL or generation != session.state_generation:
                 return
             if not is_official_origin(probe.get('url')):
                 self._finish(session, 'failed')
@@ -687,6 +698,7 @@ class SmsLoginManager:
                 if session.state not in VERIFY or session.cancelled.is_set():
                     return
                 epoch, frame = session.challenge_epoch, session.frame
+                generation = session.state_generation
                 session.auto_attempted_epoch = epoch
                 challenge = session.challenge
             points = self.solver.solve(frame, challenge, session.cancelled)
@@ -695,7 +707,7 @@ class SmsLoginManager:
             points = validate_points('drag', points)
             # Re-probe after inference: no input if the question/layout changed,
             # or if a stop/success signal appeared while the model was working.
-            self._observe(session, self.driver.probe())
+            self._observe(session, self.driver.probe(), generation=generation)
             with self._lock:
                 if (session.state not in VERIFY or session.cancelled.is_set()
                         or session.challenge_epoch != epoch or session.verification_mode != 'auto'
@@ -761,7 +773,9 @@ class SmsLoginManager:
                 frame_id, kind, points = action.value
                 # A request can arrive just before the next scheduled probe.
                 # Validate the live challenge/layout before applying old pixels.
-                self._observe(session, self.driver.probe())
+                with self._lock:
+                    generation = session.state_generation
+                self._observe(session, self.driver.probe(), generation=generation)
                 if session.state in VERIFY and session.verification_mode == 'manual':
                     self._capture(session)
                 with self._lock:

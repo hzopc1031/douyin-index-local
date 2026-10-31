@@ -263,6 +263,114 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(self.manager.status()['attempts_left'], 3-index)
         self.assertIsNone(self.manager._session.phone)
 
+    def overtaken_submission_probe(self, attempt, *, before_observe=False, timeout=False):
+        self.sent()
+        session = self.manager._session
+        # Model the prior rejected submissions without introducing other codes.
+        session.submissions = session.code_count = attempt-1
+        self.manager._set(session, 'code_invalid')
+        self.driver.current = page(code_invalid=True)
+        if timeout:
+            session.probe_timeouts = 2
+        nonce = session.nonce
+        actions_before = list(self.driver.actions)
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+
+        def wait_for_submission():
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('submission did not release the old probe')
+
+        original_probe, original_observe = self.driver.probe, self.manager._observe
+        def probe():
+            observation = original_probe()
+            wait_for_submission()
+            if timeout:
+                raise DriverTimeout()
+            return observation
+
+        def observe(*args, **kwargs):
+            wait_for_submission()
+            return original_observe(*args, **kwargs)
+
+        def worker():
+            try:
+                self.step()
+            except Exception as exc:
+                errors.append(type(exc))
+
+        target, method, callback = ((self.manager, '_observe', observe) if before_observe
+                                    else (self.driver, 'probe', probe))
+        with patch.object(target, method, side_effect=callback):
+            thread = threading.Thread(target=worker)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(self.manager.submit(CODE, nonce=nonce)['state'], 'submitting')
+                action = session.actions[0]
+            finally:
+                release.set()
+                thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.state('submitting')
+        self.assertTrue(session.code_consumed)
+        self.assertEqual(session.submissions, attempt)
+        self.assertEqual(session.code_count, attempt)
+        self.assertEqual(self.manager.status()['attempts_left'], 3-attempt)
+        self.assertEqual(session.nonce, nonce)
+        self.assertFalse(session.cancelled.is_set())
+        self.assertEqual(list(session.actions), [action])
+        self.assertFalse(action.done.is_set())
+        self.assertEqual(self.driver.actions, actions_before)
+        self.error('code_consumed', self.manager.submit, CODE, nonce=nonce)
+        self.error('code_consumed', self.manager.resend)
+        self.step()  # The admitted input must still type and submit exactly once.
+        self.assertEqual(self.driver.actions[len(actions_before):],
+                         [('click', 70, 50), ('type_text', len(CODE)), ('click', 70, 50)])
+        self.assertTrue(action.done.is_set())
+        self.assertEqual(action.error, '')
+        self.assertIsNone(action.value)
+        self.assertFalse(action.nonce)
+        self.assertEqual(list(session.actions), [])
+        self.state('submitting')
+        self.assertTrue(session.code_consumed)
+
+    def test_old_invalid_probe_cannot_unconsume_second_submission(self):
+        self.overtaken_submission_probe(2)
+        self.step(page(code_invalid=True))
+        self.state('code_invalid')
+        self.assertFalse(self.manager._session.code_consumed)
+        self.assertEqual(self.manager.status()['attempts_left'], 1)
+        self.error('code_consumed', self.manager.submit, CODE)
+        self.error('resend_too_early', self.manager.resend)
+
+    def test_old_invalid_probe_cannot_fail_third_submission_before_input(self):
+        self.overtaken_submission_probe(3)
+        self.step(page(code_invalid=True))
+        self.state('failed')  # Only the fresh rejection exhausts the send.
+        self.assertTrue(self.manager._session.code_consumed)
+        self.assertIsNone(self.manager._session.phone)
+        self.error('login_not_active', self.manager.submit, CODE)
+
+    def test_third_submission_can_succeed_after_old_invalid_probe(self):
+        self.overtaken_submission_probe(3)
+        self.step(success())
+        self.state('succeeded')
+
+    def test_submission_after_probe_return_before_observe_discards_result(self):
+        self.overtaken_submission_probe(3, before_observe=True)
+        self.step(success())
+        self.state('succeeded')
+
+    def test_overtaken_probe_timeout_cannot_discard_admitted_submission(self):
+        self.overtaken_submission_probe(3, timeout=True)
+        self.assertEqual(self.manager._session.probe_timeouts, 2)
+        self.step(success())
+        self.state('succeeded')
+        self.assertEqual(self.manager._session.probe_timeouts, 0)
+
     def test_resend_changes_nonce_and_rejects_old_generation(self):
         self.sent()
         old = self.manager._session.nonce

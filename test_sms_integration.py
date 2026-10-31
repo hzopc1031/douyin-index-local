@@ -95,7 +95,7 @@ class BridgeTests(unittest.TestCase):
             try:
                 self.assertFalse(api._lock.acquire(blocking=False))
                 self.assertEqual(api.fetch_batch('synthetic', '2026-10-25', cloud=True)['code'], 'busy')
-                manager._observe(manager._session, success())
+                manager._observe(manager._session, success(), generation=manager._session.state_generation)
                 api._qr.holder.clear.assert_called_once_with()
             finally:
                 manager.cancel()
@@ -242,9 +242,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def start_sent(self):
         await self.post('start', {'phone': PHONE})
         self.session = self.manager._session
-        self.manager._observe(self.session, page())
+        self.manager._observe(self.session, page(), generation=self.session.state_generation)
         self.manager._step(self.session)
-        self.manager._observe(self.session, page(countdown=60))
+        self.manager._observe(self.session, page(countdown=60), generation=self.session.state_generation)
 
     async def test_every_route_admin_basic_only_and_csrf(self):
         routes = [('GET', '', None), ('GET', '/frame?v=1', None),
@@ -294,7 +294,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['state'], 'submitting')
         self.assertEqual(result['phone'], '138****8000')
         self.assertEqual((await self.post('code', {'code': CODE}, 409))['error']['code'], 'code_consumed')
-        self.manager._observe(self.session, success())
+        self.manager._observe(self.session, success(), generation=self.session.state_generation)
         self.manager._release(self.session)
         await self.hub.sync_sms_pause()  # Works even if the user closed the tab.
         self.assertEqual(self.hub.store.get('paused'), {'code': 'manual_resume_required'})
@@ -431,7 +431,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_frames_modes_epochs_animation_and_pointer_timeout_budget(self):
         await self.start_sent()
-        self.manager._observe(self.session, page(verification=True, challenge_key='synthetic-one'))
+        self.manager._observe(self.session, page(verification=True, challenge_key='synthetic-one'),
+                              generation=self.session.state_generation)
         self.manager._capture(self.session)
         response = await self.client.get('/api/v1/login/sms', headers=self.admin)
         data = await response.json()
@@ -453,7 +454,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             await self.post('pointer', {'frame': old_frame, 'kind': 'tap', 'points': [[.5, .5, 0]]})
             pointer.assert_called_once_with(old_frame, 'tap', [[.5, .5, 0]])
             self.assertIn(('sms_pointer', 12), self.commands)
-        self.manager._observe(self.session, page(verification=True, challenge_key='synthetic-two'))
+        self.manager._observe(self.session, page(verification=True, challenge_key='synthetic-two'),
+                              generation=self.session.state_generation)
         self.manager._capture(self.session)
         self.assertFalse(self.manager._valid_frame(self.session, old_frame))
         await self.post('pointer', {'frame': old_frame, 'kind': 'tap', 'points': [[.5, .5, 0]]}, 409)
@@ -474,7 +476,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.post('resend', {}, 429)
         self.session.code_count = 5
         await self.post('code', {'code': CODE}, 429)
-        self.manager._observe(self.session, page(verification=True))
+        self.manager._observe(self.session, page(verification=True), generation=self.session.state_generation)
         self.manager._capture(self.session)
         self.session.text_count = 5
         await self.post('text', {'text': 'abc'}, 429)
