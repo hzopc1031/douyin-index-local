@@ -1,4 +1,5 @@
 """Synthetic cookie stores only; never open the service's browser profile."""
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -8,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from browser_login import BrowserLoginState
+from browser_login import BrowserLoginState, _cookie_snapshot
 from webview_cookies import CookieMirror, CookieSignals, cookie_domains
 
 
@@ -176,6 +177,28 @@ class CookieSignalTests(unittest.TestCase):
         for callback in self.deferred:
             callback()
         self.deferred.clear()
+
+    def test_paired_removals_preserve_snapshots_and_rejected_login_between_signals(self):
+        snapshot = self.mirror.snapshot()
+        _, fingerprint = _cookie_snapshot(snapshot)
+        page = Mock(get_cookies=self.mirror.snapshot)
+        with ThreadPoolExecutor(max_workers=1) as bridge:
+            for rejected in (False, True):
+                with self.subTest(rejected=rejected):
+                    login = BrowserLoginState()
+                    if rejected:
+                        login.reject(fingerprint)
+                    expected = 'rejected' if rejected else 'cookie_present'
+                    states, snapshots = [], []
+                    # Pause the GUI after each signal so the bridge can read
+                    # the single credential before deferred batch resolution.
+                    for operation in (lambda: self.signals.removed(self.cookie),
+                                      lambda: self.signals.removed(self.cookie), self.flush):
+                        operation()
+                        states.append(bridge.submit(login.read, page).result(timeout=1))
+                        snapshots.append(bridge.submit(self.mirror.snapshot).result(timeout=1))
+                    self.assertEqual(states, [expected] * 3)
+                    self.assertEqual(snapshots, [snapshot] * 3)
 
     def test_identical_pair_is_retained_but_subsequent_real_deletion_is_not(self):
         self.signals.removed(self.cookie)

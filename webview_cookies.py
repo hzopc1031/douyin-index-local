@@ -120,8 +120,9 @@ class CookieSignals:
 
     Re-setting an identical HttpOnly session cookie emits two cookieRemoved
     signals (old and identical new cookie), with no cookieAdded. Coalesce only
-    identical pairs within one GUI event batch. A lone deletion stays deleted;
-    an ordinary replacement's cookieAdded cancels any pending pair.
+    identical pairs within one GUI event batch. Keep ambiguous removals out of
+    snapshots until the deferred callback commits lone deletions; an ordinary
+    replacement's cookieAdded cancels any pending pair.
     """
 
     def __init__(self, mirror, defer, *, qt612=False):
@@ -143,11 +144,12 @@ class CookieSignals:
             self.mirror.added(cookie)
         else:
             self._removed[key] = cookie
-            self.mirror.removed(cookie)
         if not self._scheduled:
             self._scheduled = True
             self.defer(self._clear)
 
     def _clear(self):
+        for cookie in self._removed.values():
+            self.mirror.removed(cookie)
         self._removed.clear()
         self._scheduled = False
