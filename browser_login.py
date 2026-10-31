@@ -50,11 +50,12 @@ def _cookie_snapshot(cookies, *, now=None, accepted_domains=DOMAINS):
     pairs, expired = [], False
     for cookie in cookies:
         for item in cookie.values():
-            if item.key not in KEY_COOKIES or item['domain'].lstrip('.').lower() not in accepted_domains:
+            domain = item['domain'].lstrip('.').lower()
+            if item.key not in KEY_COOKIES or domain not in accepted_domains:
                 continue
             if not item.value:
                 continue
-            pairs.append((item.key, item.value))
+            pairs.append((item.key, item.value, domain, item['path'] or '/'))
             expiry = _expiry(item['expires'])
             guard_expiry = sid_guard_expiry(item.value) if item.key == 'sid_guard' else None
             # A positive Max-Age alone has no recoverable issue time here.
