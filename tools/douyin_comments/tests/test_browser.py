@@ -1,5 +1,6 @@
 from argparse import Namespace
 import asyncio
+import base64
 import csv
 import json
 import os
@@ -27,6 +28,37 @@ from dyc.runtime import Budget, DailyCounter
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = os.environ.get("DYC_REQUIRE_BROWSER_TESTS") == "1"
+
+
+async def install_redirect_sink(browser, hops, body, content_type="application/json"):
+    """Keep redirect regressions offline even when the production guard breaks.
+
+    Playwright's context route still fulfils the initial fake-origin requests
+    and aborts everything else. Chromium can bypass that route on a redirect,
+    so this independent request-stage interceptor supplies the target from
+    memory (or aborts foreign origins) before any network access is possible.
+    """
+    session = await browser.context.new_cdp_session(browser.page)
+
+    async def paused(event):
+        request_id = event["requestId"]
+        url = event["request"]["url"]
+        redirected = bool(event.get("redirectedRequestId"))
+        if redirected:
+            hops.append(url)
+        if urlsplit(url).netloc != urlsplit(site.FAKE_ORIGIN).netloc:
+            await session.send("Fetch.failRequest", dict(requestId=request_id, errorReason="BlockedByClient"))
+        elif redirected:
+            await session.send("Fetch.fulfillRequest", dict(
+                requestId=request_id, responseCode=200,
+                responseHeaders=[dict(name="content-type", value=content_type)],
+                body=base64.b64encode(body.encode()).decode(),
+            ))
+        else:
+            await session.send("Fetch.continueRequest", dict(requestId=request_id))
+
+    session.on("Fetch.requestPaused", lambda event: browser.spawn(paused(event)))
+    await session.send("Fetch.enable", dict(patterns=[dict(urlPattern="*", requestStage="Request")]))
 
 
 class BrowserTests(unittest.IsolatedAsyncioTestCase):
@@ -153,6 +185,128 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(browser.request_key(Namespace(
                 url=base + "?aweme_id=100&cursor=7", method="GET", frame=browser.page.main_frame))[1:],
                 ("100", "top", None, "7"))
+        self.assertEqual(fake.foreign, [])
+
+    async def check_comment_redirect(self, admission, kind):
+        target_json = json.dumps(fixture_page([fixture_comment(99999)], 999))
+        # Exercise every redirect status, changed cursor/video/path/origin and
+        # a self-redirect. No destination may be requested, even if it could
+        # otherwise return a valid comment page.
+        cases = (
+            (301, site.FAKE_ORIGIN + site.TOP_PATH + "?aweme_id=100&cursor=999"),
+            (302, site.FAKE_ORIGIN + site.REPLY_PATH + "?aweme_id=999&comment_id=99901&cursor=0"),
+            (303, site.FAKE_ORIGIN + "/synthetic-redirect-target"),
+            (307, "https://unexpected.invalid/synthetic-redirect-target"),
+            (308, None),
+        )
+        for status, target in cases:
+            with self.subTest(status=status, target=target):
+                class RedirectSite(FakeSite):
+                    async def deliver(self, route):
+                        request = route.request
+                        replay = REPLAY_HEADER in request.headers
+                        if site.request_kind(request.url) == kind and replay == (admission == "replay"):
+                            params = {key: values[0] for key, values in parse_qs(urlsplit(request.url).query).items()}
+                            self.calls.append((kind, params))
+                            await route.fulfill(status=status, headers={"Location": target or request.url},
+                                                content_type="application/json", body=target_json)
+                        else:
+                            await super().deliver(route)
+
+                hops = []
+                class RedirectBrowser(Browser):
+                    async def __aenter__(self):
+                        await super().__aenter__()
+                        await install_redirect_sink(self, hops, target_json)
+                        return self
+
+                fake = RedirectSite(reply_seed=admission == "seed" and kind == "reply")
+                args = self.args()
+                args.state_dir = self.root / f"state-{status}"
+                args.out = self.root / f"out-{status}"
+                pacer = FastPacer()
+                with patch("dyc.runner.Browser", RedirectBrowser):
+                    code, result = await fetch(args, backend=fake, pacer=pacer)
+                expected_requests = 1 if (admission, kind) == ("seed", "top") else (
+                    3 if (admission, kind) == ("replay", "reply") else 2)
+                self.assertEqual(hops, [], "redirect target reached Chromium's request stage")
+                self.assertEqual((code, result["exit_reason"]), (3, "comment_redirect"), result)
+                self.assertEqual(len(fake.calls), expected_requests)  # no retry
+                self.assertEqual(result["requests"], expected_requests)
+                self.assertEqual(DailyCounter(args.state_dir).usage(), expected_requests)
+                self.assertEqual(pacer.count, expected_requests)
+                self.assertNotIn("/video/200", fake.navigations)
+                self.assertTrue(all(video["status"] == "partial" for video in result["videos"]))
+                with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+                    rows = list(csv.DictReader(stream))
+                self.assertEqual(len(rows), expected_requests - 1)  # retain earlier top pages
+                self.assertNotIn("99999", [row["comment_id"] for row in rows])
+                self.assertEqual(fake.foreign, [])
+
+    async def test_top_seed_redirects_stop_before_following(self):
+        await self.check_comment_redirect("seed", "top")
+
+    async def test_reply_seed_redirects_stop_before_following(self):
+        await self.check_comment_redirect("seed", "reply")
+
+    async def test_top_replay_redirects_stop_before_following(self):
+        await self.check_comment_redirect("replay", "top")
+
+    async def test_reply_replay_redirects_stop_before_following(self):
+        await self.check_comment_redirect("replay", "reply")
+
+    async def test_http_short_link_redirect_remains_allowed(self):
+        class ShortRedirect(FakeSite):
+            async def deliver(self, route):
+                if urlsplit(route.request.url).path.startswith("/short/"):
+                    self.navigations.append("/short/synthetic")
+                    await route.fulfill(status=302, headers={"Location": site.FAKE_ORIGIN + "/video/100"})
+                else:
+                    await super().deliver(route)
+
+        fake, hops = ShortRedirect(), []
+        async with self.browser(fake) as browser:
+            await install_redirect_sink(browser, hops, fake.html("100"), "text/html")
+            await browser.preflight(site.FAKE_ORIGIN)
+            resolved, _, _ = await browser.open_video(site.FAKE_ORIGIN + "/short/synthetic")
+            self.assertEqual(resolved.video_id, "100")
+            self.assertEqual(hops, [site.FAKE_ORIGIN + "/video/100"])
+            video = Video("100", resolved.url)
+            await collect(video, browser)
+            self.assertEqual(video.status, "complete")
+            self.assertEqual(browser.budget.used, 4)
+            self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_redirect_guard_tolerates_already_aborted_request(self):
+        fake = FakeSite()
+        async with self.browser(fake) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            send = browser.response_session.send
+            settled = asyncio.Event()
+
+            async def already_settled(method, params=None):
+                try:
+                    await send(method, params)
+                finally:
+                    settled.set()
+                # Model a cancellation/navigation invalidating the interception
+                # after the route has already aborted this unsolicited request.
+                raise RuntimeError("synthetic settled interception")
+
+            with patch.object(browser.response_session, "send", side_effect=already_settled):
+                result = await browser.page.evaluate("""async path => {
+                    try { await fetch(path + '?aweme_id=100&cursor=77'); return 'admitted'; }
+                    catch (_) { return 'blocked'; }
+                }""", site.TOP_PATH)
+                self.assertEqual(result, "blocked")
+                await asyncio.wait_for(settled.wait(), 1)
+            self.assertFalse(self.control.event.is_set())
+            result = await browser.fetch("100", None, "7")
+            self.assertEqual([c["cid"] for c in site.decode_page(result)[0]], ["10002"])
+            self.assertEqual(browser.budget.used, 2)
+            self.assertEqual(len(fake.calls), 2)
         self.assertEqual(fake.foreign, [])
 
     async def test_sdk_template_signatures_token_and_reply_derivation(self):

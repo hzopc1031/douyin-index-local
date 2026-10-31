@@ -131,6 +131,7 @@ class Browser:
         # Keep the runner's set by reference as it records processed videos.
         self.skip_video_ids = skip_video_ids
         self.context = self.page = self.playwright = None
+        self.response_session = None
         self.driver_pid = None
         self.gate = asyncio.Lock()
         self.tasks = set()
@@ -179,6 +180,16 @@ class Browser:
             self.context.on("requestfailed", self.on_finished)
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             self.page.set_default_timeout(5000)
+            # Playwright routes only the first hop of a redirected request.
+            # Pause comment responses inside Chromium before it can follow a
+            # Location header, for both page seeds and collector replays. Keep
+            # the page's signed XHR and allow ordinary short-link navigation.
+            self.response_session = await self.control.run(self.context.new_cdp_session(self.page))
+            self.response_session.on("Fetch.requestPaused", lambda event: self.spawn(self.guard_comment_response(event)))
+            await self.control.run(self.response_session.send("Fetch.enable", dict(patterns=[
+                dict(urlPattern="*" + path + "*", requestStage="Response")
+                for path in (site.TOP_PATH, site.REPLY_PATH)
+            ])))
             self.watcher = self.spawn(self.watch())
             return self
         except BaseException as error:
@@ -196,6 +207,36 @@ class Browser:
             headers = {key: value for key, value in request.headers.items()
                        if key.lower() in site.REPLAY_HEADERS}
             self.templates[key[2]] = Template(request.url, headers)
+
+    async def guard_comment_response(self, event):
+        request_id = event["requestId"]
+        if event.get("responseErrorReason"):
+            # Aborted/failed requests have no HTTP response or redirect to
+            # inspect. Navigation may already have discarded their CDP id.
+            try:
+                await self.response_session.send("Fetch.failRequest", dict(
+                    requestId=request_id, errorReason=event["responseErrorReason"]))
+            except Exception:
+                pass
+            return
+        try:
+            if 300 <= event.get("responseStatusCode", 0) < 400:
+                # Stop before failing the XHR, so its network-error handler
+                # cannot retry. The original admission still consumes budget
+                # and completes pacing; no redirect hop is ever admitted.
+                self.control.stop(3, "comment_redirect")
+                await self.response_session.send("Fetch.failRequest", dict(
+                    requestId=request_id, errorReason="BlockedByClient"))
+            else:
+                await self.response_session.send("Fetch.continueRequest", dict(requestId=request_id))
+        except Exception:
+            if not self.closing:
+                self.control.stop(3, "comment_redirect_guard_failed")
+            try:
+                await self.response_session.send("Fetch.failRequest", dict(
+                    requestId=request_id, errorReason="BlockedByClient"))
+            except Exception:
+                pass
 
     def request_key(self, request):
         """Only unambiguous GETs for the intended video's main-frame origin."""
