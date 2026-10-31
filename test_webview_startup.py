@@ -181,7 +181,7 @@ class StartupTests(unittest.TestCase):
     def test_unit_limits(self):
         config = configparser.ConfigParser(interpolation=None, strict=False)
         config.read('deploy/systemd/douyin-index-desktop.service')
-        for section, values in {'Unit': {'StartLimitIntervalSec':'900', 'StartLimitBurst':'4'}, 'Service': {'MemoryHigh':'2800M', 'MemoryMax':'3G', 'MemorySwapMax':'0', 'Restart':'on-failure', 'RestartSec':'15', 'RestartSteps':'4', 'RestartMaxDelaySec':'120', 'KillMode':'control-group'}}.items():
+        for section, values in {'Unit': {'StartLimitIntervalSec':'900', 'StartLimitBurst':'4'}, 'Service': {'MemoryHigh':'2800M', 'MemoryMax':'3G', 'MemorySwapMax':'0', 'Restart':'on-failure', 'RestartSec':'15', 'RestartSteps':'4', 'RestartMaxDelaySec':'120', 'KillMode':'mixed', 'TimeoutStopSec':'12'}}.items():
             for key, value in values.items():
                 self.assertEqual(config[section][key], value)
 
