@@ -89,11 +89,13 @@ class Api:
     def __init__(self):
         from browser_login import BrowserLoginState
         from storage import ResultStore
+        from sms_login import LoginCoordinator
         self._browser_login = BrowserLoginState()
         self._fetch_cookie_fingerprint = None
         self._qr_lock = threading.Lock()
         self._page = None
         self._lock = threading.Lock()
+        self._login_coordinator = LoginCoordinator()
         self._result = None
         self._folder = None
         self._attempted = False
@@ -111,7 +113,7 @@ class Api:
         if not hasattr(self, '_qr'):
             with self._qr_lock:
                 if not hasattr(self, '_qr'):
-                    self._qr = QrLoginManager()
+                    self._qr = QrLoginManager(coordinator=self._login_coordinator, fetch_lock=self._lock)
         return self._qr
 
     def _on_auth_failed(self):

@@ -335,8 +335,9 @@ def mount(app, hub):
             raise HubError('browser_unavailable', '浏览器未就绪，请检查远程桌面。', 503) from None
         if not result.get('ok'):
             code = result.get('code', 'browser_unavailable')
-            status = 404 if code == 'qr_not_ready' else 409 if code in ('qr_busy', 'qr_disabled', 'qr_unsafe_debug', 'qr_no_display') else 503
+            status = 404 if code == 'qr_not_ready' else 409 if code in ('qr_busy', 'login_busy', 'busy_fetching', 'qr_disabled', 'qr_unsafe_debug', 'qr_no_display') else 503
             messages = {'qr_no_display': '有头扫码需要桌面显示环境（DISPLAY）', 'qr_busy': '扫码登录正在进行，请先取消或等待结束。', 'qr_disabled': '未启用扫码登录。',
+                        'login_busy': '另一种登录正在进行，请先取消或等待结束。', 'busy_fetching': '正在采集，请等待结束后登录。',
                         'qr_unsafe_debug': '浏览器调试环境变量已开启，已拒绝启动。', 'qr_not_ready': '二维码尚未就绪。'}
             return reply({'error': {'code': code, 'message': messages.get(code, '浏览器未就绪，请检查远程桌面。')}}, status)
         if action == 'image':

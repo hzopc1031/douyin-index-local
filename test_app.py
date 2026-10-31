@@ -95,7 +95,7 @@ class QrManagerConcurrencyTests(unittest.TestCase):
             api = app.Api()
             barrier = threading.Barrier(8)
             results = []
-            def construct():
+            def construct(**kwargs):
                 time.sleep(.03)
                 return object()
             def get_manager():
@@ -108,7 +108,7 @@ class QrManagerConcurrencyTests(unittest.TestCase):
                 for thread in threads:
                     thread.join(3)
                     self.assertFalse(thread.is_alive())
-                constructor.assert_called_once_with()
+                constructor.assert_called_once_with(coordinator=api._login_coordinator, fetch_lock=api._lock)
             self.assertEqual(len(results), 8)
             self.assertTrue(all(result is results[0] for result in results))
 
