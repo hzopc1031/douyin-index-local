@@ -22,3 +22,9 @@ INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 浏览器由 root 装到 `/opt/ms-playwright`（root 所有、`a+rX`），单元模板已设 `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`；Python 依赖装进项目 `.venv`：`.venv/bin/pip install -r requirements-qr.txt`。离线自检（不访问网络、不碰凭证）：`DISPLAY=:N PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright .venv/bin/python qr_browser_check.py headed`，退出码 0 且 `headless_ua=false` 为通过。
 
 云端 Hub 默认持久化浏览器登录资料到服务账号所有的 0700 目录：`INDEX_HUB_PROFILE_DIR`，默认 `INDEX_HUB_STATE_DIR/browser-profiles`。Cookie 以近似明文形式保存在该目录（无系统钥匙串），任何能以 douyin-svc 或 root 身份读盘的人都能拿到登录态；若目录不归 douyin-svc 所有或是符号链接，app.py 会拒绝启动。禁止提交、上传或打印这些资料。`INDEX_HUB_PERSIST_LOGIN=0` 恢复无痕模式；普通桌面启动仍使用无痕模式。远程桌面先由管理员携带 `X-Hub-Request` 调用 `POST /api/v1/desktop/ticket`，取得 60 秒内单次有效的 WebSocket 票据（仅内存保存其 SHA-256）。
+
+Qt 持久 profile 启动保护：pywebview 6.2.1 为每个窗口创建同名持久 QWebEngineProfile，双窗口会卡死并快速耗尽内存。`webview_profile_patch.py` 仅在 Hub 持久模式、版本精确匹配且 Qt WebEngine 可用时，让控制窗口与官方窗口共享同一个 profile 实例；检查失败记录警告并回退无痕。`INDEX_HUB_PERSIST_LOGIN=0` 仍直接使用无痕模式。
+
+Hub 两种模式均有启动 watchdog：`INDEX_HUB_WEBVIEW_START_TIMEOUT` 默认 90 秒（10–300），`INDEX_HUB_WEBVIEW_MAX_RSS_MB` 默认 2500 MB（256–3000，Linux 进程及子进程 RSS 总和）。官方窗口未 loaded 或启动期间超内存即释放 profile 锁，以 75 退出，由 systemd 重启，不在进程内重建 Qt。单元限制 MemoryHigh=2500M、MemoryMax=3G、MemorySwapMax=0，使用 control-group 清理所有子进程。systemd >=254 支持 15–120 秒递增重启间隔；15 分钟内 4 次失败后保持 failed，排查后执行 `sudo systemctl reset-failed douyin-index-desktop.service`，再 `sudo systemctl start douyin-index-desktop.service`。
+
+本地 Qt 回归用 127.0.0.1 合成页面连续启动三次并验证 localStorage 持久化，外部 watchdog 限制 1500 MB / 45 秒；原始缺陷的负对照默认不运行（避免额外内存压力），可用 `INDEX_HUB_QT_NEGATIVE_CONTROL=1` 启用，限制 1500 MB / 20 秒。
