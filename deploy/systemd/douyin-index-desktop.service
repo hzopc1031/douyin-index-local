@@ -22,6 +22,9 @@ Environment=INDEX_HUB_STATE_DIR=/var/lib/douyin-index
 Environment=INDEX_HUB_LOG_DIR=/var/log/douyin-index
 # 短信登录。qr 保留扫码入口，desktop 恢复远程桌面说明；两个单元必须一致。
 Environment=INDEX_HUB_LOGIN_MODE=sms
+# 可选 requirements-solver.txt 仅装在桌面 venv；模型随 wheel 提供，无启动下载。
+# 普通缺口滑块每登录轮次最多自动提交 3 次（两阶段共用）；失败回人工/远程桌面。
+Environment=ORT_DISABLE_TELEMETRY=1
 # 有头 Chromium 复用本单元 tencent-desktop.sh 启动的 Xvfb（DISPLAY=:107），不另开 Xvfb。
 Environment=INDEX_HUB_QR_BROWSER=headed
 # 登录信息落盘在 0700 目录，仅 douyin-svc 可读写；改成 0 回到无痕模式；目录必须在 ReadWritePaths 内

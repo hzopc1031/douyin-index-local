@@ -185,7 +185,9 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 | POST `/pointer` | `{"frame":N,"kind":"tap或drag","points":[[u,v,t],…]}` | 人工回放后快照，最多等待 12 秒 |
 | POST `/text` | `{"text":"A1"}`（合成示例） | 向截图中当前焦点输入，最多 8 位字母或数字 |
 
-快照只允许 state、phone（如 `138****8000`）、resend_in、attempts_left、message、frame_id、frame_width、frame_height、challenge_epoch、verification_mode。验证码从不回显；裁剪原点、缩放元数据、DOM 题目身份摘要和 nonce 不离开 app。`verification_mode` 为 `auto`（自动验证中）、`manual`（人工截图）或 `desktop`（需远程桌面），非验证状态为 null。自动求解行为沿用已有本地普通缺口滑块实现，不新增识别方式。
+快照只允许 state、phone（如 `138****8000`）、resend_in、attempts_left、message、frame_id、frame_width、frame_height、challenge_epoch、verification_mode。验证码从不回显；裁剪原点、缩放元数据、DOM 题目身份摘要和 nonce 不离开 app。`verification_mode` 为 `auto`（自动验证中）、`manual`（人工截图）或 `desktop`（需远程桌面），非验证状态为 null。
+
+可选识别依赖见 `requirements-solver.txt`：本地 MIT 库 captcha-recognizer 1.0.2 及随包 ONNX 模型，只处理普通缺口滑块，不联网、不下载模型、不调用第三方解题服务。每个完整登录轮次最多 **3 次自动提交**，verify_send / verify_login 共用计数；没有依赖/模型、低置信度、异常或未确认通过时转人工截图，人工拖动仍失败则转远程桌面。旋转题直接转远程桌面。人工和自动轨迹共用 Qt 回放器；页面独立确认倒计时或登录成功，模型输出本身不算通过。
 
 `frame_id` 随图片变化增加；`challenge_epoch` 只在题目或布局/缩放变化时增加。GET 图片必须匹配当前 frame_id；人工输入接受同 epoch 内较旧的 frame_id，动画本身不会触发 stale_frame。前端在手势期间固定当前图片；换题后取消手势。轨迹使用 0–1 相对坐标和毫秒原始节奏，采样至少 16ms、最多 200 点、最长 10 秒。Qt 主线程执行截图/输入，派发超时 5 秒；手机号与验证码只通过按键输入。截图编码后最多 300KB。
 
@@ -196,3 +198,5 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 开始前写 `paused={"code":"login_in_progress"}`，worker 在网页关闭后也会检查登录结果；结束转为 `manual_resume_required`，保持暂停直到管理员恢复，不重试失败任务。整个登录持有取数锁，与扫码互斥，成功清空旧 QR holder。桥接返回超时属于不确定结果，保持暂停直至状态明确。
 
 手机号、验证码和截图不进日志、SQLite、结果或页面 storage；仅存在内存中，表单提交立即清空。日志兜底遮盖手机号及 phone/mobile/sms/otp/verify_code 等赋值，SMS 异常不格式化原文。Python 字符串不能保证清零；官方页面仍可能自行把手机号写进已授权的持久 profile。所有选择器集中于 `SMS_SELECTORS`，尚需用户参与真实页面校准；本次未作真实登录或取数验证。
+
+离线验收使用 `test_sms_browser.py` 的 127.0.0.1 假页面和真实 Qt，包含完整成功流程后的日志/临时文件/SQLite/API 响应泄露扫描。命令与 RSS 测量见 [README.md](README.md)；这些结果不等同真实短信或官方验证通过率。

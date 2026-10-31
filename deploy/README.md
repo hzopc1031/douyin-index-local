@@ -7,7 +7,7 @@ INDEX_HUB_LOG_DIR 默认项目下 logs；Python 日志只写轮转文件（INDEX
 INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 启动桌面前，以服务账号运行 x11vnc -storepasswd，将口令保存到状态目录的 vnc.passwd 并 chmod 600；缺失或权限过宽会拒绝启动。
 
-### 实验扫码登录
+### 实验短信与扫码登录
 
 Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`，显示手机号登录卡片并隐藏扫码卡片；设为 `desktop` 沿用远程桌面登录，设为 `qr` 启用接入页扫码卡片与管理员扫码接口。两服务的设置必须一致。直接运行 Python 的默认值仍是 desktop，其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
 
@@ -34,3 +34,9 @@ Cookie 恢复还需要 `webview_cookies.py`：本机 Qt 6.12.0 在 GUI 线程调
 本地 Qt 回归使用生产 profile hook、两窗口和 127.0.0.1 合成页面，两组各连续启动三次，覆盖普通退出及设置 Cookie 约 2 秒后 SIGTERM。每次均检查 HttpOnly 会话 `sessionid`、HttpOnly 持久 `sid_guard`、普通持久 Cookie 的来源及属性，并让生产 `_client()` 创建的 requests.Session 发往 fixture echo，确认全部发送；重启后 `login_state=cookie_present`，空 profile 为 `no_session_cookie`。另验证替换、删除、相同 Cookie 重设及 localStorage。loopback 放行仅通过显式测试参数启用，生产域名和 HTTPS 限制保持固定。本次未验证真实抖音登录或在线取数。外部 watchdog 限制每个进程树 1500 MB / 45 秒（低于 60 秒要求）；原始双 profile 缺陷的负对照默认不运行，可用 `INDEX_HUB_QT_NEGATIVE_CONTROL=1` 启用，限制 1500 MB / 20 秒。
 
 短信登录使用现有官方 Qt 窗口，持有取数锁，成功后清除旧扫码内存会话。所有 `SMS_SELECTORS` 仍未真实校准；本次只验证合成离线流程，不部署、不重启服务、不发真实短信。截图 PNG 经 base64 后最多 300KB，只在内存中中转。`verify_send` / `verify_login` 快照用 `verification_mode=auto|manual|desktop` 区分自动验证、人工截图和远程桌面。换题/布局 epoch 与图片版本分开；动画不会让同题坐标失效。登录结束转为 `manual_resume_required` 暂停，须手动恢复采集。
+
+中枢获准仅在内存中转手机号、短信码，不写日志/SQLite/状态文件；响应只含 `138****8000` 形式，验证码不回显。不设号码白名单，也无需配置手机号哈希/盐。保留 start 10 秒、发码至少 60 秒、每小时 3 次/上海自然日 6 次（只记次数）、pointer 每秒 3 次、text/code 各每轮 5 次、每轮 10 分钟、code_sent 空闲 5 分钟和每次发码最多提交 3 次的保护；nonce/code_consumed 拒绝旧代/重复输入。Python 字符串不能安全擦除；官方页面自己可能把号码写入已授权的持久 profile，此例外不适用于网关或 app。
+
+桌面环境可选安装 `.venv/bin/python -m pip install -r requirements-solver.txt`（网关无需模型）。MIT 的 captcha-recognizer 1.0.2 随 wheel 提供模型，启动后无下载或第三方解题请求，ORT 遥测关闭。仅普通缺口滑块可自动处理；整个登录轮次最多 3 次自动提交，两个验证阶段共用计数。缺依赖/模型、低置信度或失败转人工截图，再失败转远程桌面；旋转题直接转远程桌面。安装不是启动前提，不要在 ExecStart 中下载依赖。
+
+部署前离线验收：`INDEX_HUB_REQUIRE_BROWSER_TESTS=1 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 xvfb-run -a .venv/bin/python -m unittest discover -p 'test_*.py'`，以及仓库全部 `test_*.cjs`。假登录页只监听 127.0.0.1；泄露测试只扫描自建临时目录，不能扫描真实服务资料。内存测量：`INDEX_HUB_REQUIRE_BROWSER_TESTS=1 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 xvfb-run -a .venv/bin/python measure_solver_rss.py --qt`。它完成真实 Qt 合成登录和额外一次模型识别，分别打印主进程峰值及含 Chromium 的进程树 RSS 采样峰值；共享页重复计数，且页面远小于官方页，不能替代部署时的 cgroup 观测。模板保留 MemoryMax=3G、MemoryHigh=2800M、LimitCORE=0 和端口 8443。
