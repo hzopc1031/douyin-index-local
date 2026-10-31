@@ -24,9 +24,20 @@ const qrCtx=vm.createContext({$:qr$,esc:String,clearTimeout(){},setTimeout(){},l
 vm.runInContext('let qrTimer=null;'+html.slice(html.indexOf('function renderQr('),html.indexOf('async function openDesktop(')),qrCtx);
 for(const browser of ['browser_ready','login_required']){
  qrCtx.data={state:'verification_required',browser};vm.runInContext('renderQr(data)',qrCtx);
- assert.equal(qr$('#qrState').innerHTML.includes('已登录 · 官方窗口页面就绪'),browser==='browser_ready');
+ assert.equal(qr$('#qrState').innerHTML.includes('已检测到登录凭据（有效性以最近取数为准）'),browser==='browser_ready');
  assert.equal(qr$('#qrDesktop').hidden,browser==='browser_ready');
  if(browser==='browser_ready'){assert(qr$('#qrRefresh').hidden);assert(!qr$('#qrStart').hidden);assert.equal(qr$('#qrStart').textContent,'重新扫码')}
  else assert(qr$('#qrState').innerHTML.includes('需要安全验证'));
 }
 console.log('QR browser-ready copy checks passed');
+
+vm.runInContext(html.slice(html.indexOf('function browserLoginLabel('),html.indexOf('function renderQr(')),qrCtx);
+for(const [login_state,reason] of Object.entries({no_session_cookie:'未检测到登录凭据',expired:'登录凭据已过期',rejected:'当前凭据已被最近取数拒绝',unknown:'暂时无法读取登录凭据'})){
+ qrCtx.data={browser:'login_required',login_state};const label=vm.runInContext('browserLoginLabel(data)',qrCtx);
+ assert(label.includes('需要重新登录'));assert(label.includes(reason));assert(!label.includes('已登录'));
+}
+qrCtx.data={browser:'browser_ready',login_state:'cookie_present'};
+assert.equal(vm.runInContext('browserLoginLabel(data)',qrCtx),'页面就绪 · 已检测到登录凭据（有效性以最近取数为准）');
+qrCtx.data={browser:'browser_ready',login_state:'qr_session'};assert(vm.runInContext('browserLoginLabel(data)',qrCtx).includes('扫码会话在内存中'));
+assert(html.includes('const label=browserLoginLabel(state)'));assert(html.includes("!ready?label+'。已保存的历史数据仍可读取。'"));
+console.log('login_state badge, notice and credential-presence copy checks passed');

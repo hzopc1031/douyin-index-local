@@ -94,11 +94,18 @@ async function loadSeries(){const platform=platforms.find(p=>p.id===chosenPlatfo
 $('#keywordSelect').onchange=()=>Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message));
 for(const id of ['#showSearch','#showComposite','#chartMode'])$(id).onchange=()=>loadSeries().catch(e=>toast(e.message));
 let qrTimer=null,qrLoading=false,qrEnabled=false,qrInitialized=false;
+function browserLoginLabel(state){
+ const reasons={no_session_cookie:'未检测到登录凭据',expired:'登录凭据已过期',rejected:'当前凭据已被最近取数拒绝',unknown:'暂时无法读取登录凭据'};
+ if(state.browser==='unavailable')return '浏览器状态暂不可确认';
+ if(reasons[state.login_state])return '需要重新登录 · '+reasons[state.login_state];
+ if(state.browser!=='browser_ready')return '需要重新登录 · 官方页面尚未就绪';
+ return state.login_state==='qr_session'?'页面就绪 · 扫码会话在内存中（有效性以最近取数为准）':'页面就绪 · 已检测到登录凭据（有效性以最近取数为准）';
+}
 function renderQr(data){
  $('#qrHeadlessWarning').hidden=!data.session?.headless_ua;$('#qrBrowserMode').hidden=data.browser_mode!=='headless';
  clearTimeout(qrTimer);qrTimer=null;
  const active=['starting','qr_ready'].includes(data.state),ready=data.browser==='browser_ready'&&!active&&!(data.state==='succeeded'&&data.session?.has_session),fallback=['verification_required','failed'].includes(data.state);
- $('#qrState').innerHTML=esc(ready?'已登录 · 官方窗口页面就绪（登录有效性以最近取数结果为准）。如采集已暂停，请在“采集任务”恢复采集。':data.state==='succeeded'&&data.session?.has_session?'已登录 · 会话已在内存中，'+Math.floor((data.session.age_seconds||0)/60)+' 分钟前获得。请在“采集任务”恢复采集。':fallback?'需要安全验证，请改用远程桌面登录':data.message||'尚未开始扫码登录');
+ $('#qrState').innerHTML=esc(ready?'页面就绪 · 已检测到登录凭据（有效性以最近取数为准）。如采集已暂停，请在“采集任务”恢复采集。':data.state==='succeeded'&&data.session?.has_session?'扫码会话已在内存中（有效性以最近取数为准），'+Math.floor((data.session.age_seconds||0)/60)+' 分钟前获得。请在“采集任务”恢复采集。':fallback?'需要安全验证，请改用远程桌面登录':data.message||'尚未开始扫码登录');
  $('#qrCountdown').innerHTML=esc(active?'剩余 '+data.expires_in+' 秒':'');$('#qrDesktop').hidden=!fallback;$('#qrStart').hidden=!['idle','succeeded'].includes(data.state);$('#qrStart').textContent=data.state==='succeeded'?'重新扫码':'开始扫码';$('#qrRefresh').hidden=active||['idle','succeeded'].includes(data.state);$('#qrCancel').hidden=!active;
  if(ready){$('#qrDesktop').hidden=true;$('#qrRefresh').hidden=true;$('#qrStart').hidden=false;$('#qrStart').textContent='重新扫码'}
  const image=$('#qrImage');image.onerror=()=>{image.hidden=true;$('#qrPlaceholder').hidden=false};
@@ -116,9 +123,9 @@ $('#qrStart').onclick=()=>qrAction('start');$('#qrRefresh').onclick=()=>qrAction
 async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h,j]=await Promise.all([api('status'),api('history'),api('jobs')]);datasets=h.datasets;jobs=j.jobs;qrEnabled=state.login_mode==='qr';$('#qrLoginCard').hidden=!qrEnabled;$('#desktopLoginMode').hidden=qrEnabled;if(qrEnabled&&!qrInitialized){qrInitialized=true;loadQr()}if(!qrEnabled){qrInitialized=false;clearTimeout(qrTimer);qrTimer=null;}$('#statPlatforms').textContent=platforms.filter(p=>p.available).length;$('#statKeywords').textContent=state.counts.keywords;$('#statPoints').textContent=state.counts.points;$('#statAttempts').textContent=state.daily_online_attempts+' / '+state.limits.online_attempts_per_day+(state.cooldown_remaining_seconds>0?' · 冷却剩余 '+state.cooldown_remaining_seconds+' 秒':'');
  const paused=state.paused,ready=state.browser==='browser_ready',last=state.last_result;
  const names={bridge_timeout:'浏览器桥接连续超时',authentication_required:'需要重新登录',verification_required:'需要人工验证',rate_limited:'抖音限频',access_denied:'抖音拒绝访问',browser_unavailable:'浏览器连接不可用',request_failed:'最近取数失败'};
- const label=paused?(ready?'页面已就绪 · 采集仍暂停':names[paused.code]||'采集暂停'):state.browser==='login_required'?'需要重新登录':!ready?'浏览器状态暂不可确认':'页面就绪 · 登录有效性以取数结果为准';
+ const label=browserLoginLabel(state)+(paused?' · 采集仍暂停':'');
  $('#browserBadge').className='badge '+(paused||!ready?'warn':'');$('#browserBadge').textContent=label;
- $('#notice').classList.toggle('hidden',!paused&&ready&&!state.worker_error);$('#notice').textContent=paused?(ready?'页面已就绪，但此前因“'+(names[paused.code]||paused.code)+'”暂停。请到“采集任务”点击恢复采集；无需反复扫码。':label+'。请打开“登录与验证”处理后，在“采集任务”恢复采集。'):state.worker_error||(!ready?label+'。已保存的历史数据仍可读取。':'');
+ $('#notice').classList.toggle('hidden',!paused&&ready&&!state.worker_error);$('#notice').textContent=paused?(ready?label+'。此前因“'+(names[paused.code]||paused.code)+'”暂停，请到“采集任务”点击恢复采集。':label+'。请打开“登录与验证”处理后，在“采集任务”恢复采集。'):state.worker_error||(!ready?label+'。已保存的历史数据仍可读取。':'');
  let detail=$('#sessionDetail');if(!detail){detail=document.createElement('div');detail.id='sessionDetail';detail.className='sessiondetail';$('#notice').before(detail)}
  detail.textContent='状态检查：'+new Date().toLocaleTimeString('zh-CN')+'（页面打开时每 15 秒更新） · '+(last?'最近在线取数：'+fmt(last.at)+'，'+(last.ok?'成功':names[last.code]||'失败'):'尚无在线取数验证记录')+'。页面预检不会请求抖音指数，不能提前判断服务端限频。';
  document.title=(paused||!ready?'⚠ '+label+' | ':'')+'指数工作台';

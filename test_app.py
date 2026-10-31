@@ -1,7 +1,10 @@
 """Batch controller and comparison tests; no GUI or network interactions."""
 import copy
 import json
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -40,6 +43,50 @@ class TrackingSession(requests.Session):
     def close(self):
         self.was_closed = True
         super().close()
+
+
+class DesktopImportTests(unittest.TestCase):
+    def test_private_desktop_query_without_sqlite(self):
+        # A fresh process prevents earlier recovery tests from hiding imports.
+        script = textwrap.dedent('''
+            import os
+            import sys
+            import tempfile
+            from http.cookies import SimpleCookie
+            from pathlib import Path
+            from unittest.mock import Mock, patch
+
+            class NoSQLite:
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split('.')[0] in ('sqlite3', '_sqlite3'):
+                        raise AssertionError('SQLite imported on desktop path')
+
+            sys.meta_path.insert(0, NoSQLite())
+            import app
+            from test_client import batch_fixture, response
+
+            with tempfile.TemporaryDirectory() as output, \\
+                    patch.object(app, 'OUTPUT', Path(output)), \\
+                    patch.dict(os.environ, INDEX_HUB_ENABLED='0', INDEX_HUB_LOGIN_MODE='desktop'):
+                assert app._webview_start_kwargs()['private_mode'] is True
+                api = app.Api()
+                cookie = SimpleCookie()
+                cookie['sessionid'] = 'synthetic-only'
+                cookie['sessionid']['domain'] = 'creator.douyin.com'
+                api._page = Mock()
+                api._page.get_current_url.return_value = app.PAGE
+                api._page.get_cookies.return_value = [cookie]
+                api._page.evaluate_js.side_effect = [False, 'Synthetic UA']
+                assert api._login_state() == 'cookie_present'
+                with patch('requests.Session.post', return_value=response(batch_fixture())) as post:
+                    reply = api.fetch_batch('银杏\\n酵素', '2025-01-07')
+                assert reply['ok'], reply
+                post.assert_called_once()
+                assert 'sqlite3' not in sys.modules and '_sqlite3' not in sys.modules
+        ''')
+        result = subprocess.run([sys.executable, '-c', script], cwd=app.ROOT,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class QrManagerConcurrencyTests(unittest.TestCase):
