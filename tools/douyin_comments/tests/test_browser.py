@@ -314,6 +314,52 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/short/synthetic", fake.navigations)
         self.assertEqual(fake.foreign, [])
 
+    async def test_failed_initial_page_still_deduplicates_resolved_video_aliases(self):
+        class FailedSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url) == "top":
+                    params = {key: values[0] for key, values in parse_qs(urlsplit(route.request.url).query).items()}
+                    if params[site.PARAM["video"]] == "100":
+                        self.calls.append(("top", params))
+                        await route.abort("failed")
+                        return
+                await super().deliver(route)
+
+        def browser(*args, **kwargs):
+            return Browser(*args, timeout_ms=100, **kwargs)
+
+        for first in ("/video/100", "/short/synthetic-first"):
+            for reply_seed in (False, True):
+                with self.subTest(first=first, reply_seed=reply_seed):
+                    args = self.args()
+                    suffix = ("direct" if first.startswith("/video") else "short") + str(reply_seed)
+                    args.state_dir = self.root / ("state-" + suffix)
+                    args.out = self.root / ("out-" + suffix)
+                    args.urls = [site.FAKE_ORIGIN + path for path in
+                                 (first, "/short/synthetic-alias", "/video/100", "/video/200")]
+                    fake = FailedSeed(reply_seed=reply_seed)
+                    with patch("dyc.runner.Browser", side_effect=browser):
+                        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+                    self.assertEqual((code, result["exit_reason"]), (2, "partial"), result)
+                    self.assertEqual([v["video_id"] for v in result["videos"]], ["100", "200"])
+                    first_video, second_video = result["videos"]
+                    self.assertEqual((first_video["status"], first_video["reason"]),
+                                     ("partial", "comment_template_missing"))
+                    self.assertEqual(first_video["reply_count"], 20 if reply_seed else 0)
+                    self.assertEqual(second_video["status"], "complete")
+                    expected_requests = 6 if reply_seed else 5
+                    self.assertEqual(result["requests"], expected_requests)
+                    self.assertEqual(len(fake.calls), expected_requests)
+                    self.assertEqual(DailyCounter(args.state_dir).usage(), expected_requests)
+                    self.assertEqual(sum(params[site.PARAM["video"]] == "100"
+                                         for kind, params in fake.calls), 2 if reply_seed else 1)
+                    self.assertIn("/short/synthetic-alias", fake.navigations)
+                    with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+                        rows = list(csv.DictReader(stream))
+                    self.assertEqual(len(rows), 43 if reply_seed else 23)
+                    self.assertEqual(len({(r["video_id"], r["comment_id"]) for r in rows}), len(rows))
+                    self.assertEqual(fake.foreign, [])
+
     async def test_canonical_then_short_links_do_not_consume_request_budget(self):
         for cap in ("normal", "daily", "batch"):
             with self.subTest(cap=cap):

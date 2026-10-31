@@ -85,6 +85,8 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
                 except Stop as error:
                     video.status, video.reason = "partial", error.reason
                     if error.code == 2 and error.reason in ("short_link_unresolved", "comment_template_missing"):
+                        if browser.video_id:
+                            completed.add(browser.video_id)
                         code, reason = 2, "partial"
                         continue
                     raise
@@ -149,7 +151,7 @@ async def login(args, *, backend=None, wait_seconds=180, control=None):
                 deadline = asyncio.get_running_loop().time() + min(wait_seconds, 180)
                 while asyncio.get_running_loop().time() < deadline:
                     control.check()
-                    current = await browser.state()
+                    current = await browser.state(deadline=deadline)
                     if current["risk"]:
                         raise Stop(3, "verification_widget")
                     if current["inside"]:

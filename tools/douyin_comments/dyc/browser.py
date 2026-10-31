@@ -14,6 +14,7 @@ from .paging import ingest_page
 from .runtime import Display, Profile, browser_defaults, check_memory
 
 REPLAY_HEADER = "x-dyc-replay"
+STATE_TIMEOUT_SECONDS = 2
 
 STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
@@ -339,23 +340,40 @@ class Browser:
                 self.active.pop(request, None)
                 self.accepted.pop(request, None)
 
-    async def state(self):
+    async def state(self, *, deadline=None):
+        self.control.check()
         combined = dict(risk=False, out=False, inside=False)
         if not self.page:
             return combined
-        for frame in self.page.frames:
-            try:
-                result = await frame.evaluate(STATE_JS, site.SIGNALS)
-                for key in combined:
-                    combined[key] |= result[key]
-            except Exception:
-                # Navigation can detach a frame; preflight still requires a positive signal.
-                continue
+        end = asyncio.get_running_loop().time() + STATE_TIMEOUT_SECONDS
+        if deadline is not None:
+            end = min(end, deadline)
+        try:
+            # One deadline for the entire scan, including child frames. A
+            # stalled renderer must not bypass risk checks or hold up shutdown.
+            async with asyncio.timeout_at(end):
+                for frame in self.page.frames:
+                    try:
+                        result = await self.control.run(frame.evaluate(STATE_JS, site.SIGNALS))
+                        for key in combined:
+                            combined[key] |= result[key]
+                    except Stop:
+                        raise
+                    except Exception:
+                        # Navigation can detach a frame; preflight still requires a positive signal.
+                        continue
+        except asyncio.TimeoutError:
+            self.control.stop(3, "state_check_timeout")
+            self.control.check()
         return combined
 
     async def watch(self):
         while not self.closing:
-            state = await self.state()
+            try:
+                state = await self.state()
+            except Stop:
+                await self.abort()
+                return
             if state["risk"]:
                 self.control.stop(3, "verification_widget")
             if self.armed and state["out"]:
@@ -378,7 +396,7 @@ class Browser:
         end = asyncio.get_running_loop().time() + wait_seconds
         while True:
             self.control.check()
-            state = await self.state()
+            state = await self.state(deadline=end)
             if state["risk"]:
                 raise Stop(3, "verification_widget")
             if state["out"]:

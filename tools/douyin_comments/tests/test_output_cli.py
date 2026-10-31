@@ -126,6 +126,36 @@ class OutputTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def check_path_interpreter_fallback(self, *, no_scope):
+        with tempfile.TemporaryDirectory(prefix="dyc-wrapper-path-") as temp:
+            root = Path(temp)
+            binaries = root / "bin"
+            binaries.mkdir()
+            # A basename found only via PATH, pointing at the prepared venv.
+            (binaries / "synthetic-python").symlink_to(sys.executable)
+            for name in ("systemctl", "systemd-run"):
+                executable = binaries / name
+                executable.write_text("#!/bin/sh\nexit 1\n")
+                executable.chmod(0o700)
+            env = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+                   "DYC_PYTHON": "synthetic-python"}
+            env.pop("DYC_IN_SCOPE", None)
+            env.pop("DYC_NO_SCOPE", None)
+            if no_scope:
+                env["DYC_NO_SCOPE"] = "1"
+            result = subprocess.run([str(ROOT / "bin/dyc"), "--help"], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usage:", result.stdout)
+            if not no_scope:
+                self.assertIn("user systemd scope unavailable", result.stderr)
+
+    def test_wrapper_path_interpreter_with_scope_disabled(self):
+        self.check_path_interpreter_fallback(no_scope=True)
+
+    def test_wrapper_path_interpreter_without_user_manager(self):
+        self.check_path_interpreter_fallback(no_scope=False)
+
     def check_synthetic_browser_cache(self, *, selected=False, executable=True):
         from playwright.sync_api import sync_playwright
 
