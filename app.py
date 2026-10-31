@@ -266,7 +266,10 @@ def _webview_start_kwargs():
     from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy
     kwargs = dict(private_mode=True, debug=False, http_server=False)
     if os.environ.get('INDEX_HUB_ENABLED') == '1' and persist_enabled():
+        from webview_profile_patch import install_shared_profile
         directory = prepare_profile(ROOT, 'webview')
+        if not install_shared_profile(directory):
+            return kwargs
         try:
             _profile_lock = ProfileLock(directory).acquire()
         except ProfileBusy:
@@ -296,7 +299,17 @@ def main():
         from hub_bridge import start_bridge
         start_bridge(api)
     try:
-        webview.start(**_webview_start_kwargs())
+        kwargs = _webview_start_kwargs()
+        if os.environ.get('INDEX_HUB_ENABLED') == '1':
+            from webview_watchdog import watch_startup, bounded_env
+            def release_profile():
+                if _profile_lock is not None:
+                    _profile_lock.release()
+            threading.Thread(target=watch_startup, args=(api._page.events.loaded, release_profile),
+                             kwargs=dict(timeout=bounded_env('INDEX_HUB_WEBVIEW_START_TIMEOUT', 90, 10, 300),
+                                         max_rss_mb=bounded_env('INDEX_HUB_WEBVIEW_MAX_RSS_MB', 2500, 256, 3000)),
+                             daemon=True, name='webview-startup-watchdog').start()
+        webview.start(**kwargs)
     finally:
         if _profile_lock is not None:
             _profile_lock.release()
