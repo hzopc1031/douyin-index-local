@@ -73,6 +73,10 @@ function success() {
   el('form').hidden = el('tabs').hidden = el('options').hidden = true;
   el('success').hidden = false; history.replaceState(null, '', '/success');
 }
+function loginResult() {
+  if (config.get('post_code_error') === '1') el('error').textContent = '验证码已过期';
+  else success();
+}
 el('send').onclick = () => {
   el('error').textContent = '';
   if (!/^1[3-9][0-9]{9}$/.test(el('phone').value)) return;
@@ -84,7 +88,7 @@ el('submit').onclick = () => {
   const correct = el('code').value === '246810'; el('code').value = '';
   if (!correct) {el('error').textContent = '验证码错误'; return;}
   if (el('second').checked) challenge('login', Number(config.get('login_challenges') || 1));
-  else success();
+  else loginResult();
 };
 handle.addEventListener('pointerdown', e => {
   drag = [{x:e.clientX,y:e.clientY,t:performance.now(),trusted:e.isTrusted}];
@@ -110,7 +114,7 @@ handle.addEventListener('pointerup', e => {
   // Leave the old geometry stable until the queued release/capture completes.
   setTimeout(() => {
     if (--remaining > 0) challenge(phase, remaining);
-    else {el('captcha_container').hidden = true; phase === 'send' ? sent() : success();}
+    else {el('captcha_container').hidden = true; phase === 'send' ? sent() : loginResult();}
   }, 100);
 });
 </script>'''

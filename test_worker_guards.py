@@ -259,7 +259,7 @@ class BridgeParameterGuards(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             from pathlib import Path
             with patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), patch.object(
-                    hub_bridge.socketserver, 'UnixStreamServer', side_effect=capture_server), patch.object(
+                    hub_bridge.socketserver, 'ThreadingUnixStreamServer', side_effect=capture_server), patch.object(
                     hub_bridge.os, 'chmod'), patch.object(hub_bridge.threading, 'Thread'):
                 hub_bridge.start_bridge(Mock())
         handler = object.__new__(handlers[0])

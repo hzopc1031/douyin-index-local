@@ -11,6 +11,19 @@ import math
 import random
 import threading
 import time
+from urllib.parse import urlsplit
+
+
+def is_official_origin(url):
+    """Fail closed on malformed URLs as well as nonofficial origins."""
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme == 'https' and parsed.hostname == 'creator.douyin.com'
+                and parsed.port in (None, 443) and parsed.username is None and parsed.password is None)
+    except ValueError:
+        return False
 
 
 class DriverError(ValueError):
@@ -245,6 +258,37 @@ class QtLoginDriver:
         # Callback must read the memory mirror only, never make a network call.
         self._session_present = session_present or (lambda: False)
         self.dispatcher = dispatcher or QtDispatcher()
+        self._navigation_epoch = 0
+        self._navigation_watched = False
+        self._loading = False
+
+    def _trusted_origin(self, url):
+        return is_official_origin(url)
+
+    def _check_input_origin(self, epoch=None):
+        # Runs on Qt's thread immediately before each input event. A worker-side
+        # DOM probe alone races redirects and navigation between typed digits.
+        if not self._navigation_watched:
+            def started():
+                self._navigation_epoch += 1
+                self._loading = True
+            def finished(_ok):
+                self._loading = False
+            def changed(_url):
+                self._navigation_epoch += 1
+            self._view.loadStarted.connect(started)
+            self._view.loadFinished.connect(finished)
+            self._view.urlChanged.connect(changed)
+            self._loading = self._view.page().isLoading()
+            self._navigation_watched = True
+        if not self._trusted_origin(self._view.url().toString()):
+            raise DriverError('untrusted_origin')
+        if self._loading or (epoch is not None and epoch != self._navigation_epoch):
+            raise DriverError('navigation_changed')
+        return self._navigation_epoch
+
+    def require_official_origin(self):
+        return self.dispatcher.call(self._check_input_origin)
 
     def probe(self):
         value = self._read_json(self._script, 'probe_failed')
@@ -395,15 +439,19 @@ class QtLoginDriver:
             self._wait(.01, cancel)
 
     def click(self, x, y, *, cancel=None, frame=None):
+        epoch = self.require_official_origin()
         self.dispatcher.call(lambda: self._point(x, y, frame), cancel=cancel)
         self._prepare_input(cancel=cancel)
         def click():
             point = self._point(x, y, frame)
+            self._check_input_origin(epoch)
             self._mouse('press', point)
+            self._check_input_origin(epoch)
             self._mouse('release', point)
         self.dispatcher.call(click, cancel=cancel)
 
     def drag(self, points, *, cancel=None, frame=None):
+        epoch = self.require_official_origin()
         # Validate the entire path before pressing; interpolation is in Qt pixels.
         if (not isinstance(points, (list, tuple)) or not 2 <= len(points) <= 200
                 or any(not isinstance(p, (list, tuple)) or len(p) != 3 or not all(_number(v) for v in p) for p in points)
@@ -429,6 +477,7 @@ class QtLoginDriver:
             replay['error'] = error
             done.set()
         def start():
+            self._check_input_origin(epoch)
             # Rendering/activation may have taken time after convert(). Reject
             # a changed transform or bounds before pressing, not on the first
             # timer tick after the press has already reached the page.
@@ -446,6 +495,7 @@ class QtLoginDriver:
                     if cancel is not None and cancel.is_set():
                         stop(DriverError('cancelled'))
                         return
+                    self._check_input_origin(epoch)
                     if self._view.zoomFactor() != zoom or self._view.devicePixelRatioF() != dpr:
                         stop(DriverError('stale_frame'))
                         return
@@ -461,6 +511,8 @@ class QtLoginDriver:
                         stop()
                     else:
                         timer.start(max(1, min(50, math.ceil(path[replay['index']][2]-elapsed))))
+                except DriverError as exc:
+                    stop(exc)
                 except Exception:
                     stop(DriverError('driver_failed'))
             timer.timeout.connect(tick)
@@ -495,8 +547,10 @@ class QtLoginDriver:
         def key(keycode, value='', modifiers=Qt.NoModifier):
             target = self._view.focusProxy() or self._view
             for kind in (QEvent.KeyPress, QEvent.KeyRelease):
+                self._check_input_origin(epoch)
                 QApplication.sendEvent(target, QKeyEvent(kind, keycode, modifiers, value))
         try:
+            epoch = self.require_official_origin()
             self._prepare_input(cancel=cancel)
             if clear:
                 self.dispatcher.call(lambda: key(Qt.Key_A, modifiers=Qt.ControlModifier), cancel=cancel)
@@ -527,6 +581,10 @@ class FakeDriver:
 
     def element_rect(self, key):
         return self.current.get('rects', {}).get(key)
+
+    def require_official_origin(self):
+        if not is_official_origin(self.current.get('url')):
+            raise DriverError('untrusted_origin')
 
     def grab(self, rect=None):
         self.actions.append(('grab', rect))

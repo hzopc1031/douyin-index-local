@@ -175,7 +175,10 @@ def start_bridge(api):
             except (OSError, ValueError) as exc:
                 logging.getLogger('index_hub.bridge').warning('command=%s write %s', command, exc_summary(exc))
 
-    server = socketserver.UnixStreamServer(str(socket_path), Handler)
+    # A pointer request waits for Qt replay for up to 12s. Keep status and
+    # cancellation responsive; managers and Api still own browser locks.
+    server = socketserver.ThreadingUnixStreamServer(str(socket_path), Handler)
+    server.daemon_threads = True
     os.chmod(socket_path, 0o600)
     thread = threading.Thread(target=server.serve_forever, name='hub-browser', daemon=True)
     thread.start()

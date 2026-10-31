@@ -62,6 +62,7 @@ SMS_ERRORS = {
     'code_consumed': (409, '此验证码已提交或失效，请等待结果或重新发码。'),
     'stale_frame': (409, '画面已更新，请重新操作。'),
     'not_in_verification': (409, '当前不需要截图验证。'),
+    'cancelled': (409, '登录操作已取消。'),
     'verification_busy': (409, '自动验证中，请稍候。'),
     'remote_desktop_required': (409, '请改用远程桌面完成验证。'),
     'frame_not_ready': (409, '截图尚未就绪，请稍后刷新。'),

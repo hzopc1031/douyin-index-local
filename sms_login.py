@@ -15,10 +15,9 @@ import secrets
 import threading
 import time
 from typing import Protocol
-from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from login_driver import DriverError, DriverTimeout, validate_points
+from login_driver import DriverError, DriverTimeout, is_official_origin, validate_points
 
 # UNCALIBRATED: all DOM selectors and text detection belong in this table.
 # Calibration must change this table only, never add page-specific driver logic.
@@ -558,9 +557,7 @@ class SmsLoginManager:
 
     @staticmethod
     def _success(probe):
-        parsed = urlsplit(probe.get('url', ''))
-        return (parsed.scheme == 'https' and parsed.hostname == 'creator.douyin.com'
-                and parsed.port in (None, 443) and not (parsed.username or parsed.password)
+        return (is_official_origin(probe.get('url'))
                 and not probe.get('login_page', True) and not probe.get('login_form', True)
                 and probe.get('session_present') is True)
 
@@ -568,6 +565,9 @@ class SmsLoginManager:
         try_solver = False
         with self._lock:
             if session.state in TERMINAL:
+                return
+            if not is_official_origin(probe.get('url')):
+                self._finish(session, 'failed')
                 return
             state = session.state
             if self._success(probe):
@@ -620,7 +620,7 @@ class SmsLoginManager:
                               and self._clock()-session.challenge_since >= .7)
             elif probe.get('error'):
                 self._finish(session, 'failed')
-            elif probe.get('code_invalid') and state == 'submitting':
+            elif probe.get('code_invalid') and state in ('submitting', 'verify_login'):
                 if session.submissions >= 3:
                     self._finish(session, 'failed')
                 else:
@@ -690,10 +690,13 @@ class SmsLoginManager:
             with self._lock:
                 session.auto_pending = self._clock()+3
             self._capture(session)
-        except Exception:
+        except Exception as exc:
             # Model/driver payloads may contain input: never format/log them.
             with self._lock:
-                if session.state in VERIFY and session.verification_mode != 'desktop':
+                if (session.state not in TERMINAL and isinstance(exc, DriverError)
+                        and exc.code in ('untrusted_origin', 'navigation_changed')):
+                    self._finish(session, 'failed')
+                elif session.state in VERIFY and session.verification_mode != 'desktop':
                     self._manual(session)
 
     def _replay(self, session, kind, points, meta):
@@ -704,6 +707,7 @@ class SmsLoginManager:
             self.driver.drag(mapped, cancel=session.cancelled, frame=meta)
 
     def _click_element(self, session, key):
+        self.driver.require_official_origin()
         rect = self.driver.element_rect(key)
         if rect is None:
             raise DriverError('selector_missing')
@@ -713,8 +717,10 @@ class SmsLoginManager:
         try:
             if session.cancelled.is_set():
                 raise DriverError('cancelled')
+            self.driver.require_official_origin()
             if action.kind == 'send':
                 self._click_element(session, 'phone')
+                self.driver.require_official_origin()
                 self.driver.type_text(session.phone, cancel=session.cancelled)
                 self._click_element(session, 'send')
             elif action.kind == 'tab':
@@ -723,6 +729,7 @@ class SmsLoginManager:
                 if action.nonce != session.nonce:
                     raise DriverError('code_consumed')
                 self._click_element(session, 'code')
+                self.driver.require_official_origin()
                 self.driver.type_text(action.value, cancel=session.cancelled)
                 self._click_element(session, 'submit')
             elif action.kind == 'text':
@@ -752,7 +759,9 @@ class SmsLoginManager:
             action.error = exc.code if isinstance(exc, DriverError) else 'driver_failed'
             with self._lock:
                 if session.state not in TERMINAL and action.error not in ('stale_frame', 'not_in_verification', 'out_of_bounds'):
-                    if action.kind == 'pointer' and session.state in VERIFY:
+                    if action.error in ('untrusted_origin', 'navigation_changed'):
+                        self._finish(session, 'failed')
+                    elif action.kind == 'pointer' and session.state in VERIFY:
                         session.desktop_requested = True
                         session.verification_mode = 'desktop'
                         session.frame = session.frame_hash = None

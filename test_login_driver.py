@@ -12,6 +12,24 @@ from login_driver import (Capture, DriverError, DriverTimeout, FakeDriver, Frame
 from sms_login import SMS_SELECTORS
 
 
+def widget_driver(view, **kwargs):
+    """Give native-widget event fixtures the browser's URL/navigation interface."""
+    from PySide6.QtCore import QObject, QUrl, Signal
+    from login_driver import QtLoginDriver
+    class Navigation(QObject):
+        loadStarted = Signal()
+        loadFinished = Signal(bool)
+        urlChanged = Signal(QUrl)
+    navigation = Navigation(view)
+    view.loadStarted, view.loadFinished, view.urlChanged = (
+        navigation.loadStarted, navigation.loadFinished, navigation.urlChanged)
+    view.url = lambda: QUrl('https://creator.douyin.com/login')
+    page = view.page() if hasattr(view, 'page') else SimpleNamespace()
+    page.isLoading = lambda: False
+    view.page = lambda: page
+    return QtLoginDriver(view, **kwargs)
+
+
 class GeometryTests(unittest.TestCase):
     def test_crop_zoom_and_device_ratio(self):
         for zoom in (.5, 1, 1.25, 2):
@@ -214,7 +232,7 @@ class DispatcherTests(unittest.TestCase):
         target.setFocus()
         self.app.processEvents()
         self.addCleanup(view.close)
-        driver = QtLoginDriver(view)
+        driver = widget_driver(view)
         captures, errors = [], []
         def work():
             try:
@@ -256,7 +274,7 @@ class DispatcherTests(unittest.TestCase):
         view.resize(400, 200)
         view.show()
         self.addCleanup(view.close)
-        driver = QtLoginDriver(view)
+        driver = widget_driver(view)
         def work():
             try:
                 driver.drag([(20, 50, 0), (200, 50, 900)], cancel=cancel)
@@ -327,7 +345,7 @@ class DispatcherTests(unittest.TestCase):
                     view.resize(400, 200)
                     view.show()
                     self.addCleanup(view.close)
-                    driver = QtLoginDriver(view, dispatcher=QtDispatcher(timeout=.3))
+                    driver = widget_driver(view, dispatcher=QtDispatcher(timeout=.3))
                     args = {'click': (20, 20), 'drag': ([(20, 50, 0), (80, 50, 80)],),
                             'type_text': ('246810',)}[operation]
 
@@ -399,7 +417,10 @@ class QtInputTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(.005)
         self.assertEqual(loaded, [True])
-        self.driver = QtLoginDriver(self.view)
+        class FixtureDriver(QtLoginDriver):
+            def _trusted_origin(self, url):
+                return url.startswith('http://127.0.0.1/')
+        self.driver = FixtureDriver(self.view)
         self.addCleanup(self.close_view)
 
     def close_view(self):
@@ -480,6 +501,31 @@ class QtInputTests(unittest.TestCase):
             with self.assertRaisesRegex(DriverError, 'out_of_bounds'):
                 self.driver.click(10000, 20)
         self.work(rejected)
+
+    def test_real_nonofficial_page_rejects_all_production_input(self):
+        from login_driver import QtLoginDriver
+        driver = QtLoginDriver(self.view)  # No fixture origin override.
+        def rejected():
+            for operation in (lambda: driver.click(80, 55),
+                              lambda: driver.type_text('13800138000'),
+                              lambda: driver.type_text('246810'),
+                              lambda: driver.drag([(50, 170, 0), (180, 170, 500)])):
+                with self.assertRaisesRegex(DriverError, 'untrusted_origin'):
+                    operation()
+        self.work(rejected)
+        self.assertEqual(self.js('window.events'), [])
+        self.assertTrue(self.js("document.querySelector('input').value === ''"))
+
+    def test_real_navigation_between_characters_aborts_remaining_input(self):
+        self.work(lambda: self.driver.click(80, 55))
+        self.js("""(() => {document.querySelector('input').addEventListener('input',
+            () => history.replaceState(null, '', '/changed'), {once:true}); return true;})()""")
+        def rejected():
+            with self.assertRaisesRegex(DriverError, 'navigation_changed'):
+                self.driver.type_text('13800138000')
+        self.work(rejected)
+        self.assertTrue(self.js("document.querySelector('input').value.length === 1"))
+        self.assertEqual(sum(e['type'] == 'input' for e in self.js('window.events')), 1)
 
     def test_real_probe_identity_ignores_animation_but_detects_new_challenge(self):
         before = self.work(self.driver.probe)

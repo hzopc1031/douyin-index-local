@@ -114,6 +114,74 @@ class StateTests(unittest.TestCase):
             observation.update(changes)
             self.assertFalse(self.manager._success(observation))
 
+    def test_untrusted_origin_never_admits_send_or_success(self):
+        urls = ('http://creator.douyin.com/login', 'http://127.0.0.1/login',
+                'https://creator.douyin.com.evil.invalid/login',
+                'https://creator.douyin.com:444/login', 'https://fixture@creator.douyin.com/login',
+                'https://creator.douyin.com:invalid/login', 'https://[invalid', '', None)
+        for url in urls:
+            with self.subTest(url=url):
+                self.start()
+                self.step(page(url=url))
+                self.state('failed')
+                self.assertEqual(self.driver.actions, [])
+                self.assertEqual(len(self.manager._send_times), 0)
+                self.assertIsNone(self.manager._session.phone)
+                self.assertFalse(self.manager._success(dict(url=url, login_page=False,
+                                                          login_form=False, session_present=True)))
+                self.cleanup()
+                self.now += 10
+
+    def test_navigation_after_queuing_phone_code_or_text_aborts_input(self):
+        for kind in ('send', 'code', 'text'):
+            with self.subTest(kind=kind):
+                if kind == 'send':
+                    self.start()
+                    self.step(page())
+                else:
+                    self.sent()
+                    if kind == 'code':
+                        self.manager.submit(CODE)
+                    else:
+                        self.submitted()
+                        self.step(page(verification=True))
+                        self.manager.type_into_focused(CODE)
+                before = list(self.driver.actions)
+                self.driver.current = page(url='http://127.0.0.1/login')
+                self.step()
+                self.state('failed')
+                self.assertEqual(self.driver.actions, before)
+                self.assertIsNone(self.manager._session.phone)
+                self.assertEqual(list(self.manager._session.actions), [])
+                self.cleanup()
+                self.now += 61
+
+    def test_navigation_between_focus_type_and_submit_aborts(self):
+        for stage in ('focus', 'type'):
+            with self.subTest(stage=stage):
+                self.start()
+                self.step(page())
+                method = 'click' if stage == 'focus' else 'type_text'
+                original = getattr(self.driver, method)
+                def navigate(*args, **kwargs):
+                    original(*args, **kwargs)
+                    self.driver.current = page(url='http://127.0.0.1/login')
+                with patch.object(self.driver, method, side_effect=navigate):
+                    before = len(self.driver.actions)
+                    self.step()
+                self.state('failed')
+                self.assertEqual([a[0] for a in self.driver.actions[before:]],
+                                 ['click'] if stage == 'focus' else ['click', 'type_text'])
+                self.cleanup()
+                self.now += 61
+
+    def test_navigation_away_while_waiting_for_code_aborts_round(self):
+        self.sent()
+        self.step(page(url='http://127.0.0.1/login', countdown=60))
+        self.state('failed')
+        self.assertIsNone(self.manager._session.phone)
+        self.error('login_not_active', self.manager.submit, CODE)
+
     def test_tab_preparation_and_missing_selectors(self):
         self.start()
         self.step(page(found={'tab': True}))
@@ -214,6 +282,48 @@ class StateTests(unittest.TestCase):
         self.manager.resend()
         self.state('sending')
         self.assertEqual(self.manager.status()['attempts_left'], 3)
+
+    def test_post_verification_code_rejection_preserves_submission_budget(self):
+        for attempt in (1, 2, 3):
+            with self.subTest(attempt=attempt):
+                self.sent()
+                session = self.manager._session
+                session.submissions = attempt-1  # Prior attempts within this send.
+                self.submitted()
+                self.step(page(verification=True))
+                self.state('verify_login')
+                self.step(page(code_invalid=True))
+                self.state('code_invalid' if attempt < 3 else 'failed')
+                self.assertEqual(self.manager.status()['attempts_left'], 3-attempt)
+                self.assertIsNone(session.frame)
+                self.assertIsNone(session.manual_pending)
+                if attempt < 3:
+                    self.assertFalse(session.code_consumed)
+                    self.error('code_consumed', self.manager.submit, CODE)
+                    self.error('resend_too_early', self.manager.resend)
+                else:
+                    self.assertTrue(session.cancelled.is_set())
+                    self.assertIsNone(session.phone)
+                self.cleanup()
+                self.now += 61
+
+    def test_post_verification_code_rejection_allows_resend_and_submit(self):
+        self.sent()
+        old_nonce = self.manager._session.nonce
+        self.submitted()
+        self.step(page(verification=True))
+        self.step(page(code_invalid=True))
+        self.state('code_invalid')
+        self.now += 61
+        self.manager.resend()
+        self.step()
+        self.step(page(countdown=60))
+        self.state('code_sent')
+        self.assertNotEqual(old_nonce, self.manager._session.nonce)
+        self.error('code_consumed', self.manager.submit, CODE, nonce=old_nonce)
+        self.submitted()
+        self.step(success())
+        self.state('succeeded')
 
     def test_countdown_minimum_and_official_longer_countdown(self):
         self.start()

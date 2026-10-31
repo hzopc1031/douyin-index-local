@@ -38,6 +38,19 @@ test('auto/manual/remote-desktop display and countdown',async()=>{
  await f.render({state:'code_sent',resend_in:60,attempts_left:3});assert(f.$('#smsResend').disabled);assert.equal(f.$('#smsResend').textContent,'60 秒后重发');
  await f.render({resend_in:0});assert(!f.$('#smsResend').disabled);
 });
+test('post-CAPTCHA code rejection restores code entry and resend countdown',async()=>{
+ const f=fixture();f.run('smsEnabled=true');
+ await f.render({state:'verify_login',verification_mode:'manual',attempts_left:2,resend_in:30});
+ assert(f.$('#smsCodeForm').hidden);assert(!f.$('#smsVerification').hidden);
+ await f.render({state:'code_invalid',verification_mode:null,frame_id:0});
+ assert(!f.$('#smsCodeForm').hidden);assert(f.$('#smsVerification').hidden);
+ assert(f.$('#smsResend').disabled);
+ await f.render({resend_in:0});assert(!f.$('#smsResend').disabled);
+ f.$('#smsCode').value='246810';
+ await f.$('#smsCodeForm').onsubmit({preventDefault(){}});
+ assert(f.calls.some(c=>c.path==='login/sms/code'&&c.body.code==='246810'));
+ assert.equal(f.$('#smsCode').value,'');
+});
 test('submitted sensitive inputs clear immediately even on failure',async()=>{
  const f=fixture();f.run('smsEnabled=true');
  for(const [form,input,path,key,value] of [['smsPhoneForm','smsPhone','start','phone','13800138000'],['smsCodeForm','smsCode','code','code','246810'],['smsTextForm','smsText','text','text','A1']]){

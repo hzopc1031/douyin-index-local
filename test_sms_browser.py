@@ -2,7 +2,7 @@
 
 Opt in under Xvfb with INDEX_HUB_REQUIRE_BROWSER_TESTS=1. The test adapter
 maps only this fixture's exact origin to the official origin for the strict
-success predicate; production URL/domain checks and selectors stay unchanged.
+state/input guards; production URL/domain checks and selectors stay unchanged.
 """
 import asyncio
 import base64
@@ -115,6 +115,9 @@ class SmsBrowserTests(unittest.TestCase):
         self.profile.cookieStore().cookieAdded.connect(cookie_added)
         origin = self.origin
         class FixtureDriver(QtLoginDriver):
+            def _trusted_origin(self, url):
+                return url.startswith(origin+'/')
+
             def probe(self):
                 value = super().probe()
                 # Test-only origin adapter, never enabled by an env var in production.
@@ -227,6 +230,9 @@ class SmsBrowserTests(unittest.TestCase):
             self.view.loadFinished.disconnect(loaded.append)
 
     def request(self, method, path='', body=None, expected=200):
+        return self.await_future(self.begin_request(method, path, body, expected))
+
+    def begin_request(self, method, path='', body=None, expected=200):
         async def run():
             async with self.http.request(method, self.gateway+'/api/v1/'+path, json=body) as response:
                 raw = await response.read()
@@ -235,7 +241,7 @@ class SmsBrowserTests(unittest.TestCase):
                 self.assertEqual(response.headers['Cache-Control'], 'no-store')
                 self.assert_private(raw)
                 return raw if response.content_type == 'image/png' else json.loads(raw)
-        return self.await_future(asyncio.run_coroutine_threadsafe(run(), self.loop))
+        return asyncio.run_coroutine_threadsafe(run(), self.loop)
 
     def post(self, action, body, expected=200):
         return self.request('POST', 'login/sms/'+action, body, expected)
@@ -329,6 +335,78 @@ class SmsBrowserTests(unittest.TestCase):
         self.assert_private(dump)
         self.scan_artifacts()
         self.assertTrue(any(b'138****8000' in response for response in self.responses))
+
+    def test_production_manager_rejects_matching_nonofficial_page(self):
+        self.load()
+        self.js("(() => {document.getElementById('sms-tab').click(); return true;})()")
+        self.manager.driver = QtLoginDriver(self.view)
+        self.post('start', {'phone': PHONE})
+        self.wait_state('failed')
+        audit = self.js('window.audit')
+        self.assertEqual(audit['inputTrusted'], [])
+        self.assertEqual((audit['sends'], audit['codeSubmits']), (0, 0))
+        self.assertTrue(self.js("document.getElementById('phone').value === ''"))
+        self.assertIsNone(self.manager._session.phone)
+
+    def test_navigation_during_phone_input_aborts_round(self):
+        self.load()
+        self.js("""(() => {document.getElementById('phone').addEventListener('input',
+            () => { location.href = 'about:blank'; }, {once:true}); return true;})()""")
+        self.post('start', {'phone': PHONE})
+        self.wait_state('failed')
+        self.assertIsNone(self.manager._session.phone)
+        self.assertTrue(self.manager._session.cancelled.is_set())
+        self.assertEqual(self.view.url().toString(), 'about:blank')
+
+    def test_post_captcha_expired_code_restores_code_entry(self):
+        self.start('?second=1&post_code_error=1', manual=True)
+        self.wait_state('verify_send', 'manual')
+        self.manual_drag()
+        self.wait_state('code_sent')
+        self.post('code', {'code': CODE})
+        self.wait_state('verify_login', 'manual')
+        self.manual_drag()
+        status = self.wait_state('code_invalid')
+        self.assertEqual(status['attempts_left'], 2)
+        self.assertEqual(status['frame_id'], 0)
+        self.assertIsNone(status['verification_mode'])
+        self.assertFalse(self.manager._session.code_consumed)
+        self.post('code', {'code': CODE}, 409)
+        self.post('resend', {}, 429)
+        self.assert_trusted(2)
+
+    def test_long_drag_keeps_status_cancel_and_worker_responsive(self):
+        self.start(manual=True)
+        self.wait_state('verify_send', 'manual')
+        self.pump_until(lambda: self.manager.status()['frame_id'] > 0)
+        handle = self.work(lambda: self.driver.element_rect('slider_handle'))
+        meta = self.manager._session.frame.metadata
+        x, y = handle['x']+handle['width']/2, handle['y']+handle['height']/2
+        points = [[(x+190*i/40-meta.x0)*meta.x_scale/meta.width,
+                   (y-meta.y0)*meta.y_scale/meta.height, i*200] for i in range(41)]
+        pending = self.begin_request('POST', 'login/sms/pointer',
+                                    {'frame': self.manager.status()['frame_id'], 'kind': 'drag', 'points': points}, 409)
+        self.pump_until(lambda: self.manager._session.pointer_pending)
+        async def start_worker():
+            self.hub.worker_task = asyncio.create_task(self.hub.worker())
+        self.await_future(asyncio.run_coroutine_threadsafe(start_worker(), self.loop))
+        # Observe several real worker polling cycles during an eight-second drag.
+        until = time.monotonic()+3.2
+        self.pump_until(lambda: time.monotonic() >= until)
+        self.assertFalse(pending.done())
+        self.assertTrue(self.manager._fetch_lock.locked())
+        started = time.monotonic()
+        self.assertEqual(self.status()['state'], 'verify_send')
+        self.assertLess(time.monotonic()-started, 2)
+        self.assertIsNone(self.request('GET', 'status')['worker_error'])
+        started = time.monotonic()
+        self.assertEqual(self.post('cancel', {})['state'], 'cancelled')
+        self.assertLess(time.monotonic()-started, 2)
+        result = self.await_future(pending, 2)
+        self.assertEqual(result['error']['code'], 'cancelled')
+        self.stop_manager()
+        self.assertFalse(self.manager._fetch_lock.locked())
+        self.assertIsNone(self.request('GET', 'status')['worker_error'])
 
     def test_manual_drag_wrong_code_then_success(self):
         self.start(manual=True)

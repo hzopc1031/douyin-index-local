@@ -19,7 +19,7 @@ import test_hub
 from hub_logging import RedactingFilter, RedactingFormatter, redact
 from hub_store import HubError
 from hub_web import SMS_ERRORS
-from login_driver import Capture, FakeDriver, FrameMetadata
+from login_driver import Capture, DriverError, FakeDriver, FrameMetadata
 from sms_login import (FRAME_BASE64_LIMIT, FRAME_PNG_LIMIT, LoginCoordinator,
                        SmsLoginManager, public_sms_status)
 from test_sms_login import PHONE, CODE, page, success
@@ -130,12 +130,60 @@ class BridgeTests(unittest.TestCase):
                 server.server_close()
             self.assertIsNone(self.manager._session.lease)
 
+    def test_unix_pointer_wait_keeps_controls_and_browser_locks_available(self):
+        entered = threading.Event()
+        def drag(points, *, cancel, **kwargs):
+            entered.set()
+            cancel.wait(8)  # A supported long replay, interrupted by real cancel.
+            if cancel.is_set():
+                raise DriverError('cancelled')
+        self.driver.drag = drag
+        self.driver.current = page(verification=True)
+        with tempfile.TemporaryDirectory(dir='/tmp') as root, \
+                patch.object(hub_bridge, '_socket_path', return_value=Path(root)/'browser.sock'):
+            server = hub_bridge.start_bridge(self.api)
+            results = []
+            pointer = None
+            try:
+                self.manager.start(PHONE)
+                deadline = time.monotonic()+2
+                while not self.manager.status()['frame_id'] and time.monotonic() < deadline:
+                    time.sleep(.01)
+                frame_id = self.manager.status()['frame_id']
+                self.assertGreater(frame_id, 0)
+                body = {'frame': frame_id, 'kind': 'drag', 'points': [[.1, .5, 0], [.8, .5, 8000]]}
+                pointer = threading.Thread(target=lambda: results.append(
+                    hub_bridge.call_bridge('sms_pointer', body, 12)))
+                pointer.start()
+                self.assertTrue(entered.wait(2))
+                status = hub_bridge.call_bridge('sms_status', {}, 2)
+                self.assertEqual(status['state'], 'verify_send')
+                self.assertTrue(self.manager._fetch_lock.locked())
+                self.assertEqual(hub_bridge.call_bridge('sms_start', {'phone': PHONE}, 2)['code'], 'login_busy')
+                self.assertEqual(hub_bridge.call_bridge('sms_pointer', body, 2)['code'], 'sms_rate_limited')
+                cancelled = hub_bridge.call_bridge('sms_cancel', {}, 2)
+                self.assertEqual(cancelled['state'], 'cancelled')
+                pointer.join(2)
+                self.assertFalse(pointer.is_alive())
+                self.assertEqual(results, [{'ok': False, 'code': 'cancelled'}])
+                self.manager._session.thread.join(2)
+                self.assertIsNone(self.manager._session.lease)
+                self.assertFalse(self.manager._fetch_lock.locked())
+            finally:
+                self.manager.cancel()
+                if pointer is not None:
+                    pointer.join(3)
+                if self.manager._session:
+                    self.manager._session.thread.join(3)
+                server.shutdown()
+                server.server_close()
+
     def test_exception_logs_never_format_payload(self):
         class Server:
             def __init__(self, address, handler): self.handler = handler
             def serve_forever(self): pass
         with tempfile.TemporaryDirectory() as root, patch.object(hub_bridge, '_socket_path', return_value=Path(root)/'browser.sock'), \
-                patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), patch.object(hub_bridge.os, 'chmod'):
+                patch.object(hub_bridge.socketserver, 'ThreadingUnixStreamServer', Server), patch.object(hub_bridge.os, 'chmod'):
             server = hub_bridge.start_bridge(self.api)
         for error in (RuntimeError(PHONE+' '+CODE), HubError(CODE, PHONE)):
             self.api._sms_manager.side_effect = error

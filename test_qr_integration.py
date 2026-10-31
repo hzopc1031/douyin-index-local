@@ -208,7 +208,7 @@ class HandlerTests(unittest.TestCase):
                 pass
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'INDEX_HUB_LOGIN_MODE': 'qr'}), \
                 patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), \
-                patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
+                patch.object(hub_bridge.socketserver, 'ThreadingUnixStreamServer', Server), \
                 patch.object(hub_bridge.os, 'chmod'):
             api = Mock()
             manager = api._qr_manager.return_value
