@@ -375,6 +375,60 @@ class SmsBrowserTests(unittest.TestCase):
         self.post('resend', {}, 429)
         self.assert_trusted(2)
 
+    def test_cancelled_verification_restarts_on_clean_page_and_code_is_usable(self):
+        self.start(manual=True)
+        self.wait_state('verify_send', 'manual')
+        old_nonce = self.manager._session.nonce
+        self.assertTrue(old_nonce)
+        self.assertEqual(self.js('window.audit.sends'), 0)
+        self.js('window.previousRound = true')
+        self.post('cancel', {})
+        self.stop_manager()
+        # Advance the manager's monotonic clock past both guards, retaining
+        # the actual browser/page and all send accounting from the first round.
+        self.manager._clock = lambda: time.monotonic()+61
+        self.post('start', {'phone': PHONE})
+        self.wait_state('verify_send', 'manual')
+        self.assertTrue(self.js('window.previousRound !== true'))
+        self.assertTrue(self.manager._session.nonce)
+        self.assertNotEqual(self.manager._session.nonce, old_nonce)
+        self.assertEqual(self.manager._day_count, 2)
+        self.assertEqual(len(self.manager._send_times), 2)
+        self.manual_drag()
+        sent = self.wait_state('code_sent')
+        self.assertEqual(sent['attempts_left'], 3)
+        self.assertGreater(sent['resend_in'], 50)
+        self.post('code', {'code': CODE})
+        self.wait_state('succeeded')
+        audit = self.assert_trusted(1)
+        self.assertEqual((audit['tabs'], audit['sends'], audit['codeSubmits']), (1, 1, 1))
+
+    def test_successive_manual_puzzles_remain_operable_in_both_phases(self):
+        self.start('?second=1&send_challenges=2&login_challenges=2', manual=True)
+        for phase in ('verify_send', 'verify_login'):
+            with self.subTest(phase=phase):
+                self.wait_state(phase, 'manual')
+                session = self.manager._session
+                identity = session.challenge['identity']
+                self.manual_drag()
+                until = time.monotonic()+3.2
+                self.pump_until(lambda: session.challenge['identity'] != identity)
+                self.pump_until(lambda: time.monotonic() >= until)
+                status = self.status()
+                self.assertEqual(status['state'], phase)
+                self.assertEqual(status['verification_mode'], 'manual')
+                self.assertGreater(status['frame_id'], 0)
+                self.assertIsNone(session.manual_pending)
+                self.assertFalse(session.desktop_requested)
+                self.manual_drag()
+                if phase == 'verify_send':
+                    self.wait_state('code_sent')
+                    self.post('code', {'code': CODE})
+                else:
+                    self.wait_state('succeeded')
+        self.assert_trusted(4)
+        self.assertEqual(self.manager._session.auto_submissions, 0)
+
     def test_long_drag_keeps_status_cancel_and_worker_responsive(self):
         self.start(manual=True)
         self.wait_state('verify_send', 'manual')

@@ -138,7 +138,7 @@ class BridgeTests(unittest.TestCase):
             if cancel.is_set():
                 raise DriverError('cancelled')
         self.driver.drag = drag
-        self.driver.current = page(verification=True)
+        self.driver.probes.extend([page(), page(verification=True)])
         with tempfile.TemporaryDirectory(dir='/tmp') as root, \
                 patch.object(hub_bridge, '_socket_path', return_value=Path(root)/'browser.sock'):
             server = hub_bridge.start_bridge(self.api)

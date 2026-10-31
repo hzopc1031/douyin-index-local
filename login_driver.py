@@ -1,8 +1,9 @@
-"""Qt login input/capture adapter. No navigation, credential JS or disk output.
+"""Qt login input/capture adapter. No credential JS or disk output.
 
 Construct with the existing QWebEngineView and a fast, memory-only
 session_present callback (e.g. the existing cookie mirror). All Qt access is
 queued to its GUI thread. Public operations are called from a worker thread.
+A new SMS round may reload the current trusted page to clear old verification.
 """
 from collections import deque
 from dataclasses import dataclass, field
@@ -289,6 +290,46 @@ class QtLoginDriver:
 
     def require_official_origin(self):
         return self.dispatcher.call(self._check_input_origin)
+
+    def reset_login(self, *, cancel=None):
+        """Reopen the current trusted page with GET, bounded by the dispatcher.
+
+        No remembered send is replayed. The manager must observe a clean login
+        form and admit a new send. Cancellation/timeout stops this navigation
+        before releasing the browser lease.
+        """
+        handler = None
+        completed = False
+
+        def reset(finish):
+            nonlocal handler, completed
+            self._check_input_origin()
+
+            def loaded(ok):
+                nonlocal completed
+                completed = True
+                try:
+                    self._check_input_origin()
+                    if not ok:
+                        raise DriverError('reset_failed')
+                    finish()
+                except DriverError as exc:
+                    finish(error=exc)
+
+            handler = loaded
+            self._view.loadFinished.connect(handler)
+            self._view.load(self._view.url())
+
+        def cleanup():
+            if handler is not None:
+                self._view.loadFinished.disconnect(handler)
+                if not completed:
+                    self._view.stop()
+
+        try:
+            self.dispatcher.call_async(reset, cancel=cancel)
+        finally:
+            self.dispatcher.call(cleanup)
 
     def probe(self):
         value = self._read_json(self._script, 'probe_failed')
@@ -585,6 +626,12 @@ class FakeDriver:
     def require_official_origin(self):
         if not is_official_origin(self.current.get('url')):
             raise DriverError('untrusted_origin')
+
+    def reset_login(self, *, cancel=None):
+        self.require_official_origin()
+        if cancel is not None and cancel.is_set():
+            raise DriverError('cancelled')
+        self.actions.append(('reset_login',))
 
     def grab(self, rect=None):
         self.actions.append(('grab', rect))

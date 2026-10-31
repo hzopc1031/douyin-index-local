@@ -197,6 +197,7 @@ class SmsLoginSession:
         self.probe_timeouts = 0
         self.next_probe = self.next_frame = now
         self.tab_clicked = False
+        self.opening_reset = False
         self.frame = None
         self.frame_id = 0
         self.frame_hash = None
@@ -583,6 +584,17 @@ class SmsLoginManager:
                 self._finish(session, 'failed')
                 return
             if probe.get('verification'):
+                if state == 'opening':
+                    # A cancelled round can leave its CAPTCHA on the page.
+                    # It cannot belong to this round: no send/nonce exists yet.
+                    # Reset once, then require normal send admission on a fresh
+                    # page. Never solve/adopt the old send's challenge or code.
+                    if session.opening_reset:
+                        self._finish(session, 'failed')
+                    else:
+                        session.opening_reset = True
+                        session.actions.append(_Action('reset'))
+                    return
                 phase = 'verify_login' if state in ('submitting', 'verify_login', 'code_invalid') else 'verify_send'
                 self._set(session, phase)
                 kind = probe.get('challenge_kind', 'unknown')
@@ -595,8 +607,13 @@ class SmsLoginManager:
                     session.challenge_since = self._clock()
                     session.frame = session.frame_hash = None
                     session.next_frame = 0
+                    identity = (phase, probe.get('challenge_key'))
+                    if identity != session.challenge.get('identity'):
+                        # Progress to another puzzle ends the old drag's wait.
+                        # Layout/animation changes alone must not extend it.
+                        session.manual_pending = None
                     session.challenge = dict(kind=kind, rects=rects, phase=phase,
-                                             identity=(phase, probe.get('challenge_key')))
+                                             identity=identity)
                     session.auto_pending = None
                     session.verification_mode = ('auto' if kind == 'gap_slider' and self.solver is not None
                                                  and not session.auto_disabled and session.auto_submissions < 3
@@ -718,7 +735,11 @@ class SmsLoginManager:
             if session.cancelled.is_set():
                 raise DriverError('cancelled')
             self.driver.require_official_origin()
-            if action.kind == 'send':
+            if action.kind == 'reset':
+                self.driver.reset_login(cancel=session.cancelled)
+                session.tab_clicked = False
+                session.next_probe = 0
+            elif action.kind == 'send':
                 self._click_element(session, 'phone')
                 self.driver.require_official_origin()
                 self.driver.type_text(session.phone, cancel=session.cancelled)

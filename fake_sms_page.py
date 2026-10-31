@@ -81,7 +81,7 @@ el('send').onclick = () => {
   el('error').textContent = '';
   if (!/^1[3-9][0-9]{9}$/.test(el('phone').value)) return;
   if (el('frequent').checked) {el('error').textContent = '发送频繁'; return;}
-  challenge('send', 1);
+  challenge('send', Number(config.get('send_challenges') || 1));
 };
 el('submit').onclick = () => {
   audit.codeSubmits++; el('error').textContent = '';

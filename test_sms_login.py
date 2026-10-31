@@ -71,11 +71,14 @@ class StateTests(unittest.TestCase):
             self.driver.probes.append(observation)
         self.manager._step(self.manager._session)
 
-    def sent(self, verify=False):
+    def sending(self):
         self.start()
         self.step(page())
         self.state('sending')
         self.step()  # Send action, no blocking in start().
+
+    def sent(self, verify=False):
+        self.sending()
         if verify:
             self.step(page(verification=True))
             self.state('verify_send')
@@ -360,7 +363,7 @@ class StateTests(unittest.TestCase):
             self.state('failed' if count == 3 else 'opening')
 
     def test_verification_probe_timeouts_do_not_capture_or_fail_early(self):
-        self.start()
+        self.sending()
         self.step(page(verification=True))
         captures = len(self.driver.actions)
         for index in range(3):
@@ -369,7 +372,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(len(self.driver.actions), captures)
 
     def test_probe_and_capture_cadences(self):
-        self.start()
+        self.sending()
         self.step(page(verification=True), advance=0)
         probe, grab = Mock(wraps=self.driver.probe), Mock(wraps=self.driver.grab)
         with patch.object(self.driver, 'probe', probe), patch.object(self.driver, 'grab', grab):
@@ -392,6 +395,77 @@ class StateTests(unittest.TestCase):
         self.start()
         self.step(page())
         self.state('sending')
+
+    def test_cancelled_send_verification_restarts_with_a_fresh_send_nonce(self):
+        self.manager.solver = None
+        self.start()
+        self.step(page())
+        self.step()
+        self.step(self.gap('synthetic-old'))
+        old_nonce = self.manager._session.nonce
+        self.cleanup()
+        self.now += 10
+        self.error('resend_too_early', self.manager.start, PHONE)
+        self.now += 61
+        self.start()
+        session = self.manager._session
+        with patch.object(self.driver, 'reset_login') as reset:
+            self.step(self.gap('synthetic-old'))
+            self.state('opening')
+            self.assertFalse(session.nonce)
+            self.assertIsNone(session.frame)
+            self.assertEqual(len(self.manager._send_times), 1)
+            self.error('code_consumed', self.manager.submit, CODE)
+            self.step()  # Reset is worker-owned, before any new send/input.
+            reset.assert_called_once_with(cancel=session.cancelled)
+        self.step(page())
+        self.state('sending')
+        self.assertTrue(session.nonce)
+        self.assertNotEqual(session.nonce, old_nonce)
+        self.assertEqual(len(self.manager._send_times), 2)
+        self.assertEqual(self.manager._day_count, 2)
+        self.step()
+        self.step(self.gap('synthetic-new'))
+        self.step(page(countdown=60))
+        self.state('code_sent')
+        self.error('code_consumed', self.manager.submit, CODE, nonce=old_nonce)
+        self.manager.submit(CODE, nonce=session.nonce)
+        self.error('code_consumed', self.manager.submit, CODE)
+        self.step()
+        self.step(success())
+        self.state('succeeded')
+
+    def test_opening_reset_never_adopts_persistent_verification_or_old_countdown(self):
+        for observation, expected in ((self.gap(), 'failed'), (page(countdown=60), 'rate_limited')):
+            with self.subTest(expected=expected):
+                self.start()
+                with patch.object(self.driver, 'reset_login') as reset:
+                    self.step(self.gap())
+                    self.state('opening')
+                    self.step()
+                    self.step(observation)
+                    self.state(expected)
+                    reset.assert_called_once()
+                self.assertFalse(self.manager._session.nonce)
+                self.assertEqual(len(self.manager._send_times), 0)
+                self.assertEqual(self.driver.actions, [])
+                self.error('login_not_active', self.manager.submit, CODE)
+                self.cleanup()
+                self.now += 61
+
+    def test_opening_reset_failure_stops_without_sending(self):
+        for error in (DriverTimeout(), DriverError('navigation_changed')):
+            with self.subTest(error=type(error).__name__):
+                self.start()
+                with patch.object(self.driver, 'reset_login', side_effect=error):
+                    self.step(self.gap())
+                    self.step()
+                self.state('failed')
+                self.assertEqual(len(self.manager._send_times), 0)
+                self.assertEqual(self.driver.actions, [])
+                self.assertIsNone(self.manager._session.phone)
+                self.cleanup()
+                self.now += 10
 
     def test_deadline_callback_is_generation_guarded_and_cancels_inflight_work(self):
         self.start()
@@ -617,8 +691,71 @@ class StateTests(unittest.TestCase):
         self.assertEqual(session.verification_mode, 'manual')
         self.state('verify_login')
 
-    def test_animation_updates_picture_without_invalidating_manual_input(self):
+    def test_manual_result_timeout_does_not_follow_a_new_puzzle_in_either_phase(self):
+        from sms_login import _Action
+        self.manager.solver = None
         self.start()
+        self.step(page())
+        self.step()
+        for phase in ('verify_send', 'verify_login'):
+            with self.subTest(phase=phase):
+                self.step(self.gap('synthetic-first'))
+                self.state(phase)
+                session = self.manager._session
+                old_frame = session.frame_id
+                action = _Action('pointer', (old_frame, 'drag', [[.1, .8, 0], [.7, .8, 800]]))
+                self.manager._action(session, action)
+                self.assertFalse(action.error)
+                deadline = session.manual_pending
+                self.assertIsNotNone(deadline)
+                # The first observation of the next puzzle can arrive after
+                # the old result deadline; it is still a new manual challenge.
+                self.step(self.gap('synthetic-second'), advance=4)
+                self.assertGreater(self.now, deadline)
+                self.assertIsNone(session.manual_pending)
+                self.assertEqual(session.verification_mode, 'manual')
+                self.assertFalse(session.desktop_requested)
+                self.assertIsNotNone(self.manager.frame()['png'])
+                self.error('stale_frame', self.manager.pointer, old_frame, 'tap', [[.5, .5, 0]])
+                self.step(self.gap('synthetic-second'), advance=4)
+                self.assertEqual(session.verification_mode, 'manual')
+                action = _Action('pointer', (session.frame_id, 'drag', [[.1, .8, 0], [.7, .8, 800]]))
+                self.manager._action(session, action)
+                self.assertFalse(action.error)
+                self.assertGreater(session.manual_pending, deadline)
+                if phase == 'verify_send':
+                    self.step(page(countdown=60))
+                    self.state('code_sent')
+                    self.submitted()
+                else:
+                    self.step(success())
+                    self.state('succeeded')
+
+    def test_manual_result_timeout_survives_animation_and_layout_changes(self):
+        from sms_login import _Action
+        self.manager.solver = None
+        self.start()
+        self.step(page())
+        self.step()
+        self.step(self.gap())
+        session = self.manager._session
+        action = _Action('pointer', (session.frame_id, 'drag', [[.1, .8, 0], [.7, .8, 800]]))
+        self.manager._action(session, action)
+        self.assertFalse(action.error)
+        deadline = session.manual_pending
+        self.driver.capture = Capture(b'animated-synthetic-png', self.driver.capture.metadata)
+        self.step(self.gap())
+        self.assertEqual(session.manual_pending, deadline)
+        moved = self.gap()
+        moved['rects']['slider_handle'] = dict(x=120, y=30, width=40, height=40)
+        self.step(moved)
+        self.assertEqual(session.manual_pending, deadline)
+        self.step(moved)
+        self.assertEqual(session.verification_mode, 'desktop')
+        self.assertIsNone(session.frame)
+
+    def test_animation_updates_picture_without_invalidating_manual_input(self):
+        self.sending()
         self.step(page(verification=True, challenge_key='synthetic-one'))
         session = self.manager._session
         old = session.frame_id
@@ -642,7 +779,7 @@ class StateTests(unittest.TestCase):
         solver = Mock()
         solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
         self.manager.solver = solver
-        self.start()
+        self.sending()
         self.enter_gap()
         session = self.manager._session
         self.assertEqual(session.verification_mode, 'auto')
@@ -659,9 +796,9 @@ class StateTests(unittest.TestCase):
         self.step(success())  # Remote desktop continues in the same official page.
         self.state('succeeded')
         self.cleanup()
-        self.now += 10
+        self.now += 61
         solver.reset_mock()
-        self.start()
+        self.sending()
         before = len(self.driver.actions)
         self.step(page(verification=True, challenge_kind='rotation'))
         self.assertEqual(self.manager._session.verification_mode, 'desktop')
@@ -671,7 +808,7 @@ class StateTests(unittest.TestCase):
     def test_unknown_challenges_use_manual_and_stop_signals_prevent_solver(self):
         solver = Mock()
         self.manager.solver = solver
-        self.start()
+        self.sending()
         self.step(page(verification=True, challenge_kind='click'))
         self.assertEqual(self.manager._session.verification_mode, 'manual')
         solver.solve.assert_not_called()
@@ -683,7 +820,7 @@ class StateTests(unittest.TestCase):
         solver = Mock()
         solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
         self.manager.solver = solver
-        self.start()
+        self.sending()
         with patch.object(self.driver, 'drag', side_effect=DriverError('driver_failed')):
             self.enter_gap()
         session = self.manager._session
@@ -697,7 +834,7 @@ class StateTests(unittest.TestCase):
         solver = Mock()
         solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
         self.manager.solver = solver
-        self.start()
+        self.sending()
         self.enter_gap()
         self.error('verification_busy', self.manager.type_into_focused, 'A1')
         self.error('verification_busy', self.manager.pointer, self.manager.status()['frame_id'], 'tap', [[.5, .5, 0]])
@@ -709,7 +846,7 @@ class StateTests(unittest.TestCase):
         solver = Mock()
         solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
         self.manager.solver = solver
-        self.start()
+        self.sending()
         self.enter_gap()
         changed = self.gap()
         changed['rects']['slider_piece'] = dict(x=120, y=30, width=40, height=40)
@@ -720,7 +857,7 @@ class StateTests(unittest.TestCase):
 
     def test_page_changed_or_cancelled_during_inference_never_drags(self):
         for changed in (self.gap('synthetic-new'), page(rate_limited=True), success(), 'cancel'):
-            self.start()
+            self.sending()
             solver = Mock()
             def solve(*args):
                 if changed == 'cancel':
@@ -734,7 +871,7 @@ class StateTests(unittest.TestCase):
             self.enter_gap()
             self.assertEqual(sum(a[0] == 'drag' for a in self.driver.actions), before)
             self.cleanup()
-            self.now += 10
+            self.now += 3600
 
     def test_queued_code_scrubbed_on_cancel_and_stale_nonce_never_types(self):
         self.sent()
@@ -812,11 +949,13 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn(CODE, output.getvalue())
 
     def test_manual_pointer_mapping_refresh_rate_limit_and_text(self):
-        driver = FakeDriver([page(verification=True)])
+        driver = FakeDriver([page(), page(verification=True)])
         driver.capture = Capture(b'synthetic-png', FrameMetadata(10, 20, 200, 100, 2, 2))
         manager = self.make_manager(driver)
         manager.start(PHONE)
         self.wait_state(manager, 'verify_send')
+        self.assertEqual(driver.actions[:3], [('click', 70, 50), ('type_text', 11), ('click', 70, 50)])
+        del driver.actions[:3]  # Subsequent assertions cover verification input only.
         deadline = time.monotonic()+1
         while not manager.status()['frame_id'] and time.monotonic() < deadline:
             time.sleep(.01)
@@ -841,7 +980,7 @@ class WorkerTests(unittest.TestCase):
         from qr_login import QrLoginManager
         from hub_bridge import qr_command
         entered, release = threading.Event(), threading.Event()
-        manager = self.make_manager(FakeDriver([page(verification=True)]))
+        manager = self.make_manager(FakeDriver([page(), page(verification=True)]))
         qr = QrLoginManager(browser_mode='headless', coordinator=manager.coordinator,
                             fetch_lock=manager._fetch_lock)
         def qr_run(session):

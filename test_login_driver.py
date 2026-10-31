@@ -197,6 +197,73 @@ class DispatcherTests(unittest.TestCase):
         with self.assertRaisesRegex(DriverError, 'worker_thread_required'):
             dispatcher.call(lambda: None)
 
+    def test_login_reset_checks_origin_and_load_result(self):
+        from PySide6.QtCore import QTimer, QUrl
+        from PySide6.QtWidgets import QWidget
+        for outcome, expected in (('success', []), ('failed', ['reset_failed']),
+                                  ('redirect', ['untrusted_origin']), ('untrusted', ['untrusted_origin'])):
+            with self.subTest(outcome=outcome):
+                view = QWidget()
+                driver = widget_driver(view)
+                loads, stops, errors = [], [], []
+                def load(url):
+                    loads.append(url.toString())
+                    view.loadStarted.emit()
+                    def finish():
+                        if outcome == 'redirect':
+                            view.url = lambda: QUrl('http://127.0.0.1/fixture')
+                        view.loadFinished.emit(outcome != 'failed')
+                    QTimer.singleShot(5, finish)
+                view.load = load  # Synthetic signals only; no browser/network.
+                view.stop = lambda: stops.append(True)
+                if outcome == 'untrusted':
+                    view.url = lambda: QUrl('http://127.0.0.1/fixture')
+                def work():
+                    try:
+                        driver.reset_login()
+                    except DriverError as exc:
+                        errors.append(exc.code)
+                thread = threading.Thread(target=work)
+                thread.start()
+                self.pump(thread)
+                self.assertEqual(errors, expected)
+                self.assertEqual(loads, [] if outcome == 'untrusted' else ['https://creator.douyin.com/login'])
+                self.assertEqual(stops, [])
+                view.close()
+
+    def test_login_reset_cancellation_and_timeout_stop_pending_navigation(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QWidget
+        for outcome, expected in (('cancel', DriverError), ('timeout', DriverTimeout)):
+            with self.subTest(outcome=outcome):
+                view = QWidget()
+                driver = widget_driver(view, dispatcher=QtDispatcher(timeout=.1))
+                cancel = threading.Event()
+                loads, stops, errors = [], [], []
+                def load(url):
+                    loads.append(url.toString())
+                    view.loadStarted.emit()
+                    if outcome == 'cancel':
+                        QTimer.singleShot(5, cancel.set)
+                view.load = load
+                def stop():
+                    stops.append(True)
+                    view.loadFinished.emit(False)
+                view.stop = stop
+                def work():
+                    try:
+                        driver.reset_login(cancel=cancel)
+                    except (DriverError, DriverTimeout) as exc:
+                        errors.append(type(exc))
+                thread = threading.Thread(target=work)
+                thread.start()
+                self.pump(thread)
+                self.assertEqual(errors, [expected])
+                self.assertEqual(len(loads), 1)
+                self.assertEqual(stops, [True])
+                self.assertFalse(driver._loading)
+                view.close()
+
     def test_real_qt_widget_input_and_capture_without_browser_process(self):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QImage
