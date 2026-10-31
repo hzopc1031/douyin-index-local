@@ -40,8 +40,9 @@ ProtectHome=true
 ReadWritePaths=/var/lib/douyin-index /var/log/douyin-index /srv/work-ecs-projects/douyin-index-local/.cloud-home /srv/work-ecs-projects/douyin-index-local/results
 LimitCORE=0
 TasksMax=1024
-# TERM only the supervisor, preserving Xvfb/D-Bus until Qt finishes shutdown.
-# The wrapper allows 6s for Qt, then 2s for helpers; KILL the cgroup as a fallback.
+# Bash owns a private session dbus-daemon; do not wrap ExecStart in dbus-run-session.
+# TERM only Bash: 6s for Qt, 2s for child groups, then 1s for D-Bus (stopped last).
+# The socket lives in PrivateTmp and is removed by Bash; KILL the cgroup as fallback.
 KillMode=mixed
 TimeoutStopSec=12
 [Install]
