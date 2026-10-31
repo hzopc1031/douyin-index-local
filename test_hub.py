@@ -463,7 +463,7 @@ class DiagnosticTests(unittest.TestCase):
                     patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
                     patch.object(hub_bridge.os, 'chmod'):
                 api = unittest.mock.Mock()
-                api._page.get_current_url.side_effect = RuntimeError('cookie=' + SECRET)
+                api._login_state.side_effect = RuntimeError('cookie=' + SECRET)
                 server = hub_bridge.start_bridge(api)
             handler = object.__new__(server.handler)
             handler.request = unittest.mock.Mock()

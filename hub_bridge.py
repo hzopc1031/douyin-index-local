@@ -61,6 +61,28 @@ def qr_command(api, command):
     return {'ok': True, **manager.status(), 'session': manager.holder_info()}
 
 
+def browser_status(api):
+    """Read local page/cookies only; no platform request or quota consumption."""
+    from urllib.parse import urlsplit
+    login_state = api._login_state()
+    # A transferred QR session is already in memory and independent of the
+    # official window's navigation (preserve the existing QR path).
+    page_ready = login_state == 'qr_session'
+    if not page_ready and api._page is not None:
+        try:
+            page = api._page
+            url = urlsplit(page.get_current_url() or '')
+            official = (url.scheme == 'https' and url.hostname == 'creator.douyin.com'
+                        and not url.username and not url.password and url.port in (None, 443))
+            page_ready = official and page.evaluate_js("Boolean(document.querySelector('input[type=tel]')) && document.body.innerText.includes('扫码登录')") is False
+        except Exception:
+            page_ready = False
+    return {'ok': True,
+            'state': 'browser_ready' if page_ready and login_state in ('cookie_present', 'qr_session') else 'login_required',
+            'login_state': login_state,
+            'note': '本地登录凭据检查不等于认证已验证；以最近实际取数结果为准。'}
+
+
 def start_bridge(api):
     socket_path = _socket_path()
     socket_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -78,19 +100,10 @@ def start_bridge(api):
                 message = json.loads(raw)
                 command = message.get('command')
                 command = command if command in ('status', 'insight', 'query', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel') else 'unknown'
-                from qr_login import login_mode
                 if command.startswith('qr_'):
                     answer = qr_command(api, command)
-                elif command == 'status' and login_mode() == 'qr' and api._qr_manager().holder.has_session():
-                    answer = {'ok': True, 'state': 'browser_ready'}
                 elif message.get('command') == 'status':
-                    from urllib.parse import urlsplit
-                    page = api._page
-                    url = urlsplit(page.get_current_url() or '')
-                    official = url.scheme == 'https' and url.hostname == 'creator.douyin.com'
-                    needs_login = bool(page.evaluate_js("Boolean(document.querySelector('input[type=tel]')) && document.body.innerText.includes('扫码登录')")) if official else True
-                    answer = {'ok': True, 'state': 'login_required' if needs_login else 'browser_ready',
-                              'note': '浏览器就绪不等于账号认证已验证；以最近实际取数结果为准。'}
+                    answer = browser_status(api)
                 elif message.get('command') == 'insight':
                     from hub_insights import collect
                     answer = collect(api, message.get('payload'))
