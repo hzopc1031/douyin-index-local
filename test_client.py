@@ -6,6 +6,7 @@ import datetime as dt
 import io
 import json
 import unittest
+from unittest.mock import patch
 
 import requests
 from cryptography.hazmat.primitives import padding
@@ -73,6 +74,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(url, TREND_URL)
         self.assertEqual(arguments["json"], {"keyword_list": ["银杏"], "start_date": "20250101",
                                              "end_date": "20250107", "app_name": "aweme"})
+        self.assertEqual(arguments["timeout"], (10, 20))
         self.assertFalse(arguments["allow_redirects"])
         self.assertTrue(arguments["verify"])
         self.assertFalse(session.trust_env)
@@ -83,6 +85,36 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(result["metadata"]["timezone"], "Asia/Shanghai")
         self.assertNotIn("synthetic-only", json.dumps(result))
         self.assertNotIn("Cookie", arguments["headers"])
+
+    def test_slow_stream_exceeds_total_deadline_without_retry(self):
+        from client import REQUEST_TOTAL_DEADLINE
+        clock = [100.0]
+        reply = response(fixture())
+
+        def slow_chunks(chunk_size):
+            for _ in range(4):
+                clock[0] += REQUEST_TOTAL_DEADLINE / 3
+                yield b' '
+
+        session = FixtureSession(reply)
+        with patch('client.time.monotonic', side_effect=lambda: clock[0]), \
+                patch.object(reply, 'iter_content', slow_chunks), \
+                patch.object(reply, 'close', wraps=reply.close) as close:
+            with self.assertRaises(SanitizedClientError) as caught:
+                DouyinIndexClient(session)._post(TREND_URL, {})
+            close.assert_called_once_with()
+        self.assertEqual(caught.exception.code, 'network_error')
+        self.assertEqual(str(caught.exception), '平台响应超过总时限，本次请求已停止；未自动重试。')
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][1]['timeout'], (10, 20))
+
+    def test_explicit_timeout_is_positive_finite_read_timeout(self):
+        session = FixtureSession(response(fixture()))
+        DouyinIndexClient(session, timeout=7.5)._post(TREND_URL, {})
+        self.assertEqual(session.calls[0][1]['timeout'], (10, 7.5))
+        for invalid in (0, -1, float('inf'), float('nan')):
+            with self.subTest(timeout=invalid), self.assertRaises(ValueError):
+                DouyinIndexClient(session, timeout=invalid)
 
     def test_missing_search_is_not_zero(self):
         value = fixture()
@@ -100,6 +132,11 @@ class ClientTests(unittest.TestCase):
         result, _ = self.run_query(value)
         self.assertEqual(len(result["rows"]), 6)
         self.assertEqual(result["metadata"]["missing_dates"], ["2025-01-02"])
+
+    def test_null_trend_data_is_response_schema(self):
+        with self.assertRaises(SanitizedClientError) as caught:
+            self.run_query({"status": 0, "data": None})
+        self.assertEqual(caught.exception.code, "response_schema")
 
     def test_empty_data_is_incomplete_not_zero(self):
         result, _ = self.run_query({"status": 0, "data": {"hot_list": []}})

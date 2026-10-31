@@ -22,3 +22,17 @@ class KeywordNormalizationTests(unittest.TestCase):
             with self.assertRaises(SanitizedClientError) as caught:
                 self.parse(returned,requested)
             self.assertEqual(caught.exception.code,code)
+
+    def test_query_many_normalizes_platform_keyword_whitespace(self):
+        from client import DouyinIndexClient
+        from test_client import FixtureSession, fixture, response
+        for returned in ('杭  州', '杭\u3000州'):
+            with self.subTest(returned=returned):
+                payload = fixture()
+                payload['data']['hot_list'][0]['keyword'] = returned
+                session = FixtureSession(response(payload))
+                result = DouyinIndexClient(session).query_many(['杭州'], '2025-01-01', '2025-01-07')
+                self.assertTrue(result['metadata']['complete'])
+                self.assertEqual(len(result['rows']), 7)
+                self.assertTrue(all(row['keyword'] == '杭州' for row in result['rows']))
+                self.assertEqual(len(session.calls), 1)

@@ -5,11 +5,17 @@ import csv
 import datetime as dt
 import io
 import json
+import math
+import logging
+import socket
 import time
 from pathlib import Path
 
 from aiohttp import web
-from hub_store import HubError, PLATFORMS, Store, TZ, public_result, validate_query
+import hub_bridge
+from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
+
+logger = logging.getLogger('index_hub')
 
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
@@ -18,6 +24,7 @@ SAFE_ERRORS = {
     'verification_required': '平台要求人工验证，请通过远程桌面处理后手动恢复。',
     'rate_limited': '平台返回限频信号，采集已暂停，未自动重试。',
     'access_denied': '平台拒绝访问，采集已暂停，请检查官方页面。',
+    'bridge_timeout': f'浏览器桥接 {hub_bridge.BRIDGE_TIMEOUT} 秒内未返回；平台请求可能仍在进行，未自动重试。',
     'browser_unavailable': '浏览器未就绪，请检查远程桌面。',
     'network_error': '上游网络请求失败，未自动重试。',
     'response_schema': '平台响应格式变化，未自动重试。',
@@ -26,7 +33,9 @@ SAFE_ERRORS = {
     'unexpected_keyword': '返回关键词与请求不一致，已阻止存入错误数据；请在官方页面核实准确词条。',
     'duplicate_keyword': '平台重复返回关键词，未保存不可靠结果。',
     'response_format': '平台返回格式异常，请检查官方页面。',
-    'cooldown': '采集进程仍处于请求冷却期，未自动重试。',
+    'cooldown': '采集进程仍处于请求冷却期，任务已回到队列。',
+    'busy': '采集进程正忙，任务已回到队列。',
+    'skipped_trend_no_data': '该词趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
     'no_data': '平台未返回该关键词在此日期范围的有效指数；可能未收录或该范围无数据，不代表指数为零。',
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
     'request_failed': '本次取数未完成，未自动重试。',
@@ -49,8 +58,17 @@ class Hub:
             result = await asyncio.to_thread(self.bridge, 'status', None, 2)
             state = result.get('state') if result.get('ok') else 'unavailable'
             return state if state in ('browser_ready', 'login_required') else 'unavailable'
-        except Exception:
+        except Exception as exc:
+            logger.warning('command=status %s', exc_summary(exc))
             return 'unavailable'
+
+    def _requeue_unattempted(self, job_id, attempt_day):
+        """Refund only the reserved attempt from the current Shanghai day."""
+        self.store.update_job(job_id, 'queued', error=None)
+        today = dt.datetime.now(TZ).date().isoformat()
+        counter = self.store.get('daily')
+        if today == attempt_day and counter and counter['date'] == attempt_day:
+            self.store.set('daily', {'date': attempt_day, 'count': max(0, counter['count'] - 1)})
 
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
@@ -63,6 +81,10 @@ class Hub:
             self.store.update_job(row['id'], 'succeeded', result=cached)
             with self.store.db:
                 self.store.db.execute('UPDATE jobs SET cache_hit=1 WHERE id=?', (row['id'],))
+            return True
+        if query.get('kind') and self.store.trend_no_data(query['keywords'][0]):
+            code = 'skipped_trend_no_data'
+            self.store.update_job(row['id'], 'no_data', error={'code': code, 'message': SAFE_ERRORS[code]})
             return True
         now = time.time()
         if now - self.store.get('last_attempt_at', 0) < 15:
@@ -85,10 +107,18 @@ class Hub:
         self.store.update_job(row['id'], 'running')
         self.store.set('last_attempt_at', now)
         self.store.set('daily', {'date': today, 'count': counter['count'] + 1})
+        started = time.monotonic()
         try:
-            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, 45)
+            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, hub_bridge.BRIDGE_TIMEOUT)
             if response.get('ok') is not True:
                 code = response.get('code', '')
+                if code in {'cooldown', 'busy'}:
+                    self._requeue_unattempted(row['id'], today)
+                    return True
+                if code == 'no_data' and query.get('kind'):
+                    self.store.update_job(row['id'], 'no_data', error={'code':code,'message':SAFE_ERRORS[code]})
+                    self.store.set('last_result', {'ok': True, 'at': time.time()})
+                    return True
                 if code not in SAFE_ERRORS:
                     code = 'authentication_required' if '登录' in str(response.get('message', '')) else 'request_failed'
                 details={'code':code,'message':SAFE_ERRORS[code]}
@@ -118,9 +148,18 @@ class Hub:
         except asyncio.CancelledError:
             # Restart handling marks any interrupted job failed; never automatically replay it.
             raise
-        except Exception:
-            self.store.update_job(row['id'], 'failed', error={'code': 'request_failed', 'message': SAFE_ERRORS['request_failed']})
-            self.store.set('last_result', {'ok': False, 'code': 'request_failed', 'at': time.time()})
+        except Exception as exc:
+            if isinstance(exc, (socket.timeout, TimeoutError)):
+                code = 'bridge_timeout'
+            elif isinstance(exc, (ConnectionRefusedError, FileNotFoundError)):
+                code = 'browser_unavailable'
+            else:
+                code = 'request_failed'
+            log = logger.error if code == 'request_failed' else logger.warning
+            log('job=%s kind=%s elapsed=%.3fs %s', row['id'],
+                query.get('kind', 'query'), time.monotonic() - started, exc_summary(exc))
+            self.store.update_job(row['id'], 'failed', error={'code': code, 'message': SAFE_ERRORS[code]})
+            self.store.set('last_result', {'ok': False, 'code': code, 'at': time.time()})
         return True
 
     async def worker(self):
@@ -129,7 +168,8 @@ class Hub:
                 await self.run_one()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.error('worker %s', exc_summary(exc))
                 self.store.set('worker_error', '任务处理暂不可用，请检查服务。')
             await asyncio.sleep(1)
 
@@ -241,9 +281,13 @@ def mount(app, hub):
         daily = s.get('daily', {'date': day, 'count': 0})
         if daily['date'] != day:
             daily = {'date': day, 'count': 0}
-        return reply({'version': '1.0.0', 'browser': await hub.browser_status(), 'paused': s.get('paused'),
+        browser = await hub.browser_status()
+        next_attempt = s.get('last_attempt_at', 0) + 15
+        remaining = max(0, math.ceil(next_attempt - time.time()))
+        return reply({'version': '1.0.0', 'browser': browser, 'paused': s.get('paused'),
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
-                      'next_online_attempt_at': s.get('last_attempt_at', 0) + 15,
+                      'next_online_attempt_at': next_attempt,
+                      'cooldown_remaining_seconds': remaining,
                       'daily_online_attempts': daily['count'],
                       'limits': {'keywords': 5, 'days': 731, 'online_interval_seconds': 15,
                                  'online_attempts_per_day': 50, 'cache_hours': 24,

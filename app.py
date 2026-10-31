@@ -1,6 +1,7 @@
 """Single-account local verification UI. Credentials remain in memory only."""
 from __future__ import annotations
 
+import logging
 import json
 import os
 import re
@@ -18,6 +19,10 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "results"
 PAGE = "https://creator.douyin.com/creator-micro/creator-count/arithmetic-index"
 TZ = ZoneInfo("Asia/Shanghai")
+
+
+class LoginRequired(ValueError):
+    code = "authentication_required"
 
 
 def write_json(path, obj):
@@ -88,7 +93,6 @@ class Api:
         self._result = None
         self._folder = None
         self._attempted = False
-        self._cloud_last_attempt = 0.0
         self._store = ResultStore(OUTPUT)
 
     def show_official_page(self):
@@ -99,13 +103,13 @@ class Api:
     def _client(self):
         from client import DouyinIndexClient
         if self._page is None:
-            raise ValueError("请先打开官方登录窗口。")
+            raise LoginRequired("请先打开官方登录窗口。")
         current = urlsplit(self._page.get_current_url() or "")
         if current.scheme != "https" or current.hostname != "creator.douyin.com" or current.username or current.password or current.port not in (None, 443):
-            raise ValueError("请先在 HTTPS 官方窗口完成登录，并进入抖音指数页。")
+            raise LoginRequired("请先在 HTTPS 官方窗口完成登录，并进入抖音指数页。")
         visible_login = self._page.evaluate_js("Boolean(document.querySelector('input[type=tel]')) && document.body.innerText.includes('扫码登录')")
         if visible_login:
-            raise ValueError("官方窗口仍显示登录表单，请先扫码登录。")
+            raise LoginRequired("官方窗口仍显示登录表单，请先扫码登录。")
         session = requests.Session()
         session.trust_env = False
         try:
@@ -117,7 +121,7 @@ class Api:
                     session.cookies.set(item.key, item.value, domain=item["domain"],
                                         path=item["path"] or "/", secure=bool(item["secure"]))
             if not session.cookies:
-                raise ValueError("尚未取得当前窗口的登录会话，请完成扫码登录。")
+                raise LoginRequired("尚未取得当前窗口的登录会话，请完成扫码登录。")
             ua = self._page.evaluate_js("navigator.userAgent")
             if not isinstance(ua, str) or not ua:
                 raise ValueError("暂时无法识别官方窗口，请等待页面加载完成。")
@@ -149,7 +153,7 @@ class Api:
 
     def fetch_batch(self, keywords_text, end_date, cloud=False, start_date=None):
         if not self._lock.acquire(blocking=False):
-            return {"ok": False, "message": "取数或核对正在进行，请等待。"}
+            return {"ok": False, "code": "busy", "message": "取数或核对正在进行，请等待。"}
         try:
             if not isinstance(keywords_text, str):
                 raise ValueError("请每行输入一个关键词。")
@@ -178,15 +182,8 @@ class Api:
                 return self._response(result, folder, cache_hit=True, comparison=comparison)
             if self._attempted and not cloud:
                 return {"ok": False, "code": "session_request_used", "message": "本次会话已发出过一次线上请求。可以查看已有缓存；新的线上批次请重新启动工具。"}
-            if cloud:
-                import time
-                if time.time() - self._cloud_last_attempt < 15:
-                    return {"ok": False, "code": "cooldown", "message": "云端请求间隔至少 15 秒，请稍后提交。"}
             client = self._client()
             self._attempted = True
-            if cloud:
-                import time
-                self._cloud_last_attempt = time.time()
             try:
                 result = client.query_many(words, start.isoformat(), end_date)
             finally:
@@ -201,6 +198,8 @@ class Api:
             from client import SanitizedClientError
             if isinstance(exc, SanitizedClientError):
                 safe = {"ok": False, **exc.as_dict()}
+            elif isinstance(exc, LoginRequired):
+                safe = {"ok": False, "code": "authentication_required", "message": str(exc)}
             elif isinstance(exc, ValueError):
                 safe = {"ok": False, "message": str(exc)}
             else:
@@ -246,6 +245,7 @@ def main():
     webview.settings["REMOTE_DEBUGGING_PORT"] = None
     # Explicit cloud deployment opts in; ordinary desktop launches are unchanged.
     if os.environ.get("INDEX_HUB_ENABLED") == "1":
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
         from hub_bridge import start_bridge
         start_bridge(api)
     webview.start(private_mode=True, debug=False, http_server=False)

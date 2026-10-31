@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient, TestServer
 from desktop_gateway import HUB_KEY, create_app
@@ -116,8 +117,20 @@ class StoreTests(unittest.TestCase):
 
     def test_queue_pause_and_interrupted_jobs_not_replayed(self):
         job, _ = self.s.submit(QUERY, 'fixture', 'one')
-        self.s.interrupt_pending()
-        self.assertEqual(self.s.job(job['id'])['error']['code'], 'service_restarted')
+        running, _ = self.s.submit(QUERY, 'fixture', 'running')
+        self.s.update_job(running['id'], 'running')
+        self.assertEqual(self.s.interrupt_pending(), {'requeued': 1, 'interrupted': 1})
+        self.assertEqual(self.s.job(job['id']), job)
+        self.assertIsNone(self.s.job(job['id'])['error'])
+        interrupted = self.s.job(running['id'])
+        self.assertEqual(interrupted['status'], 'failed')
+        self.assertEqual(interrupted['error'], {
+            'code': 'service_restarted',
+            'message': '服务重启时任务正在执行，可能已向平台发出请求；未自动重试，请确认后重新提交。',
+            'recoverable': True,
+        })
+        self.assertEqual(self.s.interrupt_pending(), {'requeued': 1, 'interrupted': 0})
+        self.assertEqual(self.s.job(running['id']), interrupted)
         self.s.set('paused', {'code': 'rate_limited'})
         with self.assertRaises(HubError):
             self.s.submit(QUERY, 'fixture', 'two')
@@ -221,6 +234,32 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('search_index', await csv_response.text())
         self.assertEqual(self.calls, [])
 
+    async def test_worker_executes_queued_jobs_after_restart(self):
+        store = self.hub.store
+        running, _ = store.submit(QUERY, 'fixture', 'restart-running')
+        store.update_job(running['id'], 'running')
+        first, _ = store.submit(QUERY, 'fixture', 'restart-first')
+        second, _ = store.submit(QUERY, 'fixture', 'restart-second')
+        store.close()
+        self.hub.store = Store(self.root / '.cloud-state' / 'index-hub.sqlite3')
+        await self.hub.start(None)
+        self.hub.worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.hub.worker_task
+        store = self.hub.store
+        self.assertEqual(store.job(first['id']), first)
+        self.assertEqual(store.job(second['id']), second)
+        self.assertEqual(store.job(running['id'])['status'], 'failed')
+        self.assertTrue(await self.hub.run_one())
+        self.assertEqual(store.job(first['id'])['status'], 'succeeded')
+        self.assertEqual(store.job(second['id'])['status'], 'queued')
+        self.assertEqual(self.calls, [QUERY])
+        self.assertTrue(await self.hub.run_one())
+        self.assertEqual(store.job(second['id'])['status'], 'succeeded')
+        self.assertEqual(store.job(running['id'])['status'], 'failed')
+        self.assertFalse(await self.hub.run_one())
+        self.assertEqual(self.calls, [QUERY])
+
     async def test_single_attempt_cooldown_and_platform_stop(self):
         job, _ = self.hub.store.submit(QUERY, 'fixture', 'one')
         self.response = {'ok': False, 'code': 'rate_limited', 'message': SECRET}
@@ -235,6 +274,53 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.hub.store.submit(QUERY, 'fixture', 'two')
         self.assertFalse(await self.hub.run_one())
         self.assertEqual(len(self.calls), 1)
+
+    async def test_unattempted_bridge_response_requeues_and_refunds(self):
+        day = dt.datetime.now(TZ).date().isoformat()
+        previous_result = {'ok': True, 'at': 1}
+        for code in ('cooldown', 'busy'):
+            with self.subTest(code=code):
+                self.hub.store.set('last_attempt_at', 0)
+                self.hub.store.set('daily', {'date': day, 'count': 7})
+                self.hub.store.set('last_result', previous_result)
+                self.response = {'ok': False, 'code': code}
+                job, _ = self.hub.store.submit(QUERY, 'fixture', 'requeue-' + code)
+                before = time.time()
+                self.assertTrue(await self.hub.run_one())
+                saved = self.hub.store.job(job['id'])
+                self.assertEqual(saved['status'], 'queued')
+                self.assertIsNone(saved['error'])
+                self.assertEqual(self.hub.store.get('daily'), {'date': day, 'count': 7})
+                self.assertIsNone(self.hub.store.get('paused'))
+                self.assertEqual(self.hub.store.get('last_result'), previous_result)
+                self.assertGreaterEqual(self.hub.store.get('last_attempt_at'), before)
+                self.assertFalse(await self.hub.run_one())
+                self.hub.store.update_job(job['id'], 'failed')
+
+    async def test_refund_is_same_day_only_and_never_negative(self):
+        today = dt.datetime.now(TZ).date()
+        day = today.isoformat()
+        old_day = (today - dt.timedelta(days=1)).isoformat()
+        job, _ = self.hub.store.submit(QUERY, 'fixture', 'refund-boundaries')
+        for attempt_day, counter, expected in (
+            (day, {'date': day, 'count': 0}, {'date': day, 'count': 0}),
+            (old_day, {'date': old_day, 'count': 1}, {'date': old_day, 'count': 1}),
+            (old_day, {'date': day, 'count': 3}, {'date': day, 'count': 3}),
+            (day, {'date': old_day, 'count': 1}, {'date': old_day, 'count': 1}),
+        ):
+            self.hub.store.set('daily', counter)
+            self.hub._requeue_unattempted(job['id'], attempt_day)
+            self.assertEqual(self.hub.store.get('daily'), expected)
+
+    async def test_status_cooldown_remaining_seconds(self):
+        for last_attempt, expected in ((1000, 15), (985.1, 1), (985, 0), (900, 0)):
+            self.hub.store.set('last_attempt_at', last_attempt)
+            with patch('hub_web.time.time', return_value=1000):
+                response = await self.client.get('/api/v1/status', headers=self.bearer)
+                state = await response.json()
+            self.assertEqual(state['next_online_attempt_at'], last_attempt + 15)
+            self.assertEqual(state['cooldown_remaining_seconds'], expected)
+            self.assertIs(type(state['cooldown_remaining_seconds']), int)
 
     async def test_daily_limit_before_touching_upstream(self):
         self.hub.store.set('daily', {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 50})
@@ -271,6 +357,143 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/v1/collection/resume', headers=self.admin, json={})
         self.assertEqual(response.status, 200)
         self.assertIsNone(self.hub.store.get('paused'))
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_redacts_cookie_headers_and_short_credentials(self):
+        from hub_store import exc_summary, redact
+        samples = (
+            ('Cookie: sessionid=abc; sid_guard=short|1700; odin_tt=xyz',
+             ('abc', 'short', '1700', 'xyz')),
+            ('set-cookie: uid_tt=uidv; Path=/; ttwid=ttw1', ('uidv', 'Path=/', 'ttw1')),
+            ('params msToken=tok1&a_bogus=bogus1&verifyFp=verify_abc',
+             ('tok1', 'bogus1', 'verify_abc')),
+            ("{'Cookie': 'sid_tt=s1; s_v_web_id=web_id_1', 'x-csrf-token': 'csrfv'}",
+             ('s1', 'web_id_1', 'csrfv')),
+            ('{"cookie": "passport_csrf_token=pc1; odin_tt=o2"}', ('pc1', 'o2')),
+        )
+        for message, values in samples:
+            with self.subTest(message=message):
+                summary = exc_summary(RuntimeError(message))
+                self.assertTrue(summary.startswith('RuntimeError: '))
+                for output in (redact(message), summary):
+                    self.assertIn('***', output)
+                    for value in values:
+                        self.assertNotIn(value, output)
+
+    def test_redaction_boundaries_and_plain_diagnostics(self):
+        from hub_store import exc_summary, redact
+        self.assertEqual(redact('ConnectionResetError: peer closed'),
+                         'ConnectionResetError: peer closed')
+        self.assertEqual(exc_summary(ConnectionResetError('peer closed')),
+                         'ConnectionResetError errno=None: peer closed')
+        for key in ('cookie', 'token', 'session', 'sessionid', 'sid_', 'sid', 'uid_tt',
+                    'odin_tt', 'ttwid', 'mstoken', 'a_bogus', 'verifyfp', 's_v_web_id',
+                    'csrf', 'passport', 'passwd', 'password', 'secret', 'auth', 'key'):
+            for template in ('prefix_{}=sensitive', '{}: sensitive', '"{}": "sensitive"'):
+                with self.subTest(key=key, template=template):
+                    self.assertNotIn('sensitive', redact(template.format(key.upper())))
+        self.assertEqual(redact('Cookie: a=short; b=tiny\npeer closed'),
+                         'Cookie: ***\npeer closed')
+        self.assertEqual(redact('errno=2, status: failed; peer closed'),
+                         'errno=2, status: failed; peer closed')
+        self.assertEqual(redact('A' * 24), '***')
+
+    def test_summary_redacts_before_truncation(self):
+        from hub_store import exc_summary
+        for key in ('cookie', 'access_token', 'session', 'sessionid', 'passwd',
+                    'password', 'secret', 'authorization', 'api_key'):
+            for separator in ('=', ': '):
+                for value in ('short', '"two words"', "'two words'", SECRET):
+                    summary = exc_summary(RuntimeError(key + separator + value))
+                    self.assertIn('***', summary)
+                    self.assertNotIn(value, summary)
+        self.assertNotIn('A' * 24, exc_summary(ValueError('A' * 24)))
+        self.assertIn('errno=2', exc_summary(FileNotFoundError(2, 'missing')))
+        self.assertEqual(exc_summary(ValueError('错' * 200)), 'ValueError: ' + '错' * 160)
+
+    def test_handler_logs_sanitized_exception(self):
+        import io
+        import hub_bridge
+        class Server:
+            def __init__(self, address, handler):
+                self.handler = handler
+            def serve_forever(self):
+                pass
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), \
+                    patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
+                    patch.object(hub_bridge.os, 'chmod'):
+                api = unittest.mock.Mock()
+                api._page.get_current_url.side_effect = RuntimeError('cookie=' + SECRET)
+                server = hub_bridge.start_bridge(api)
+            handler = object.__new__(server.handler)
+            handler.request = unittest.mock.Mock()
+            handler.rfile = io.BytesIO(b'{"command":"status"}\n')
+            handler.wfile = io.BytesIO()
+            with self.assertLogs('index_hub.bridge', 'WARNING') as logs:
+                handler.handle()
+            handler.request.settimeout.assert_called_once_with(hub_bridge.BRIDGE_TIMEOUT)
+            self.assertIn('command=status', logs.output[0])
+            self.assertIn('RuntimeError', logs.output[0])
+            self.assertNotIn(SECRET, str(logs.output))
+            self.assertEqual(json.loads(handler.wfile.getvalue())['code'], 'browser_unavailable')
+
+
+class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_timeout_covers_browser_task(self):
+        import client
+        import hub_bridge
+        from hub_web import SAFE_ERRORS
+        self.assertEqual(hub_bridge.BRIDGE_TIMEOUT, 75)
+        self.assertEqual(hub_bridge.JS_MARGIN, 20)
+        self.assertGreaterEqual(hub_bridge.BRIDGE_TIMEOUT,
+                                client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT
+                                + hub_bridge.JS_MARGIN)
+        # Connection setup must also fit inside the total request deadline.
+        self.assertLess(client.REQUEST_CONNECT_TIMEOUT, client.REQUEST_TOTAL_DEADLINE)
+        self.assertEqual(hub_bridge.call_bridge.__defaults__[-1], hub_bridge.BRIDGE_TIMEOUT)
+        self.assertIn(f'{hub_bridge.BRIDGE_TIMEOUT} 秒', SAFE_ERRORS['bridge_timeout'])
+
+
+    async def test_bridge_exceptions_are_logged_without_retry(self):
+        from hub_web import Hub
+        for exc, code, level in (
+            (TimeoutError('token=' + SECRET), 'bridge_timeout', 'WARNING'),
+            (RuntimeError('cookie=' + SECRET), 'request_failed', 'ERROR'),
+            (ConnectionRefusedError(111, 'refused'), 'browser_unavailable', 'WARNING'),
+            (FileNotFoundError(2, 'missing'), 'browser_unavailable', 'WARNING'),
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as root:
+                calls = []
+                def bridge(command, payload, timeout):
+                    if command == 'status':
+                        return {'ok': True, 'state': 'browser_ready'}
+                    from hub_bridge import BRIDGE_TIMEOUT
+                    self.assertEqual(timeout, BRIDGE_TIMEOUT)
+                    calls.append(command)
+                    raise exc
+                hub = Hub(root, bridge)
+                try:
+                    job, _ = hub.store.submit(QUERY, 'fixture', 'diagnostic')
+                    async def local_thread_call(func, *args):
+                        return func(*args)
+                    with patch('hub_web.asyncio.to_thread', local_thread_call), self.assertLogs('index_hub', level) as logs:
+                        self.assertTrue(await hub.run_one())
+                    saved = hub.store.job(job['id'])
+                    self.assertEqual(saved['status'], 'failed')
+                    self.assertEqual(saved['error']['code'], code)
+                    self.assertEqual(hub.store.get('daily')['count'], 1)
+                    self.assertIsNone(hub.store.get('paused'))
+                    self.assertEqual(hub.store.get('last_result')['code'], code)
+                    self.assertFalse(hub.store.get('last_result')['ok'])
+                    self.assertNotIn(SECRET, str(logs.output))
+                    self.assertIn(type(exc).__name__, str(logs.output))
+                    self.assertIn(job['id'], str(logs.output))
+                    self.assertFalse(await hub.run_one())
+                    self.assertEqual(len(calls), 1)
+                finally:
+                    hub.store.close()
 
 
 if __name__ == '__main__':
