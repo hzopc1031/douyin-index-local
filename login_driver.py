@@ -14,6 +14,8 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+CREATOR_PAGE = 'https://creator.douyin.com/creator-micro/creator-count/arithmetic-index'
+
 
 def is_official_origin(url):
     """Fail closed on malformed URLs as well as nonofficial origins."""
@@ -25,6 +27,11 @@ def is_official_origin(url):
                 and parsed.port in (None, 443) and parsed.username is None and parsed.password is None)
     except ValueError:
         return False
+
+
+def is_creator_origin(url):
+    """Collection readiness is narrower than the origins allowed for SMS input."""
+    return is_official_origin(url) and urlsplit(url).hostname == 'creator.douyin.com'
 
 
 class DriverError(ValueError):
@@ -265,6 +272,7 @@ def probe_script(selectors):
       let hash = 2166136261;
       for (let i=0; i<identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 16777619);
       return {url:location.origin + location.pathname, found, rects, enabled:usable,
+        navigation_ready:document.readyState === 'complete',
         login_page:s.login_paths.some(p => location.pathname.toLowerCase().includes(p)),
         login_form:found.login_form, verification:found.verification || has('verification_text'),
         rate_limited:has('rate_text'), code_invalid:has('code_error_text'), error:has('error_text'),
@@ -293,9 +301,8 @@ class QtLoginDriver:
     def _trusted_origin(self, url):
         return is_official_origin(url)
 
-    def _check_input_origin(self, epoch=None):
-        # Runs on Qt's thread immediately before each input event. A worker-side
-        # DOM probe alone races redirects and navigation between typed digits.
+    def _watch_navigation(self):
+        # Install on Qt's thread before the first probe as well as before input.
         if not self._navigation_watched:
             def started():
                 self._navigation_epoch += 1
@@ -309,6 +316,11 @@ class QtLoginDriver:
             self._view.urlChanged.connect(changed)
             self._loading = self._view.page().isLoading()
             self._navigation_watched = True
+
+    def _check_input_origin(self, epoch=None):
+        # Runs on Qt's thread immediately before each input event. A worker-side
+        # DOM probe alone races redirects and navigation between typed digits.
+        self._watch_navigation()
         if not self._trusted_origin(self._view.url().toString()):
             raise DriverError('untrusted_origin')
         if self._loading or (epoch is not None and epoch != self._navigation_epoch):
@@ -325,6 +337,14 @@ class QtLoginDriver:
         form and admit a new send. Cancellation/timeout stops this navigation
         before releasing the browser lease.
         """
+        self._navigate(cancel=cancel)
+
+    def return_to_creator(self, *, cancel=None):
+        """One bounded GET back to the collection page; never transfer cookies."""
+        self._navigate(CREATOR_PAGE, cancel=cancel)
+
+    def _navigate(self, target=None, *, cancel=None):
+        from PySide6.QtCore import QUrl
         handler = None
         completed = False
 
@@ -338,14 +358,14 @@ class QtLoginDriver:
                 try:
                     self._check_input_origin()
                     if not ok:
-                        raise DriverError('reset_failed')
+                        raise DriverError('navigation_failed' if target else 'reset_failed')
                     finish()
                 except DriverError as exc:
                     finish(error=exc)
 
             handler = loaded
             self._view.loadFinished.connect(handler)
-            self._view.load(self._view.url())
+            self._view.load(QUrl(target) if target else self._view.url())
 
         def cleanup():
             if handler is not None:
@@ -359,7 +379,7 @@ class QtLoginDriver:
             self.dispatcher.call(cleanup)
 
     def probe(self):
-        value = self._read_json(self._script, 'probe_failed')
+        value = self._read_json(self._script, 'probe_failed', navigation=True)
         if not isinstance(value, dict):
             raise DriverError('probe_failed')
         try:
@@ -368,15 +388,25 @@ class QtLoginDriver:
             raise DriverError('probe_failed') from None
         return value
 
-    def _read_json(self, script, error, transform=None):
+    def _read_json(self, script, error, transform=None, *, navigation=False):
         # PySide's runJavaScript callback conversion is not a portable transport
         # for JS objects/arrays (some bindings deliver an empty string). Use a
         # JSON string across the Qt boundary, including nested geometry arrays.
         # Only our read-only summaries enter this path, never field values.
         def run(finish):
+            if navigation:
+                self._watch_navigation()
+                epoch = self._navigation_epoch
+                ready = not self._loading and not self._view.page().isLoading()
             def receive(value):
                 try:
                     decoded = json.loads(value)
+                    if navigation and isinstance(decoded, dict):
+                        # A visible form can precede loadFinished. Also discard a
+                        # DOM result overtaken by navigation while JS was running.
+                        decoded['navigation_ready'] = (decoded.get('navigation_ready') is True
+                            and ready and not self._loading and not self._view.page().isLoading()
+                            and epoch == self._navigation_epoch)
                     finish(transform(decoded) if transform else decoded)
                 except Exception:
                     finish(error=DriverError(error))
@@ -632,7 +662,8 @@ class FakeDriver:
     def __init__(self, probes=()):
         self.probes = deque(probes)
         self.current = dict(url='https://creator.douyin.com/login', login_page=True,
-                            login_form=True, session_present=False, found={}, rects={}, countdown=None)
+                            login_form=True, session_present=False, navigation_ready=True,
+                            found={}, rects={}, countdown=None)
         self.actions = []
         self.capture = Capture(b'synthetic-png', FrameMetadata(0, 0, 300, 150))
 
@@ -656,6 +687,12 @@ class FakeDriver:
         if cancel is not None and cancel.is_set():
             raise DriverError('cancelled')
         self.actions.append(('reset_login',))
+
+    def return_to_creator(self, *, cancel=None):
+        self.require_official_origin()
+        if cancel is not None and cancel.is_set():
+            raise DriverError('cancelled')
+        self.actions.append(('return_to_creator',))
 
     def grab(self, rect=None):
         self.actions.append(('grab', rect))

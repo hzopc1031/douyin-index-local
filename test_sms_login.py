@@ -18,7 +18,7 @@ RECT = dict(x=20, y=30, width=100, height=40)
 
 def page(**changes):
     result = dict(url='https://creator.douyin.com/login', login_page=True,
-                  login_form=True, session_present=False, countdown=None,
+                  login_form=True, session_present=False, navigation_ready=True, countdown=None,
                   found={'phone': True, 'send': True},
                   rects={key: RECT.copy() for key in ('open', 'tab', 'phone', 'send', 'code', 'submit', 'verification')})
     result.update(changes)
@@ -117,6 +117,66 @@ class StateTests(unittest.TestCase):
             observation.update(changes)
             self.assertFalse(self.manager._success(observation))
 
+    def test_public_authentication_returns_once_before_success_and_callback(self):
+        callback = self.manager._on_success = Mock()
+        self.sent()
+        self.submitted()
+        authenticated = {**success(), 'url': 'https://www.douyin.com/jingxuan'}
+        self.assertFalse(self.manager._success(authenticated))
+        self.step(authenticated)
+        self.state('submitting')
+        callback.assert_not_called()
+        self.assertTrue(self.fetch.locked())
+        self.step()
+        self.assertEqual(self.driver.actions[-1], ('return_to_creator',))
+        # A cookie and a complete creator load alone do not prove readiness.
+        for observation in (page(session_present=True), success(navigation_ready=False),
+                            {**success(), 'session_present': False}):
+            self.step(observation)
+            self.state('submitting')
+            callback.assert_not_called()
+        self.step(success())
+        self.state('succeeded')
+        callback.assert_called_once_with()
+        self.assertEqual(self.driver.actions.count(('return_to_creator',)), 1)
+        self.assertEqual(len(self.manager._send_times), 1)
+
+    def test_public_existing_session_requires_creator_readiness_without_sending(self):
+        self.start()
+        self.step({**success(), 'url': 'https://www.douyin.com/jingxuan'})
+        self.state('opening')
+        self.step()
+        self.step(success())
+        self.state('already_logged_in')
+        self.assertEqual(self.driver.actions, [('return_to_creator',)])
+        self.assertEqual(len(self.manager._send_times), 0)
+
+    def test_creator_return_failure_cancel_timeout_and_unready_page_never_succeed(self):
+        callback = self.manager._on_success = Mock()
+        for outcome in ('load_failure', 'timeout', 'cancel', 'login', 'public', 'untrusted'):
+            with self.subTest(outcome=outcome):
+                self.start()
+                public = {**success(), 'url': 'https://www.douyin.com/jingxuan'}
+                self.step(public)
+                if outcome in ('load_failure', 'timeout'):
+                    error = DriverError('navigation_failed') if outcome == 'load_failure' else DriverTimeout()
+                    with patch.object(self.driver, 'return_to_creator', side_effect=error):
+                        self.step()
+                elif outcome == 'cancel':
+                    self.manager.cancel()
+                    self.step()
+                else:
+                    self.step()
+                    observation = {'login': page(session_present=True), 'public': public,
+                                   'untrusted': {**success(), 'url': 'http://127.0.0.1/'}}[outcome]
+                    self.step(observation, advance=16)
+                self.state('cancelled' if outcome == 'cancel' else 'failed')
+                callback.assert_not_called()
+                self.assertIsNone(self.manager._session.phone)
+                self.assertEqual(len(self.manager._send_times), 0)
+                self.cleanup()
+                self.now += 10
+
     def test_untrusted_origin_never_admits_send_or_success(self):
         urls = ('http://creator.douyin.com/login', 'http://127.0.0.1/login',
                 'http://www.douyin.com/jingxuan', 'https://www.douyin.com.evil.invalid/jingxuan',
@@ -209,6 +269,46 @@ class StateTests(unittest.TestCase):
         self.step(page(url='https://www.douyin.com/jingxuan', found={'phone': True, 'send': True, 'tab': True}))
         self.state('sending')
         self.assertFalse(self.manager._session.tab_clicked)
+
+    def test_visible_form_during_header_navigation_cannot_consume_send_allowance(self):
+        self.start()
+        self.step(page(url='https://www.douyin.com/', login_page=False, login_form=False,
+                       found={'open': True}))
+        self.step()
+        incomplete = page(url='https://www.douyin.com/jingxuan', navigation_ready=False)
+        for _ in range(3):
+            self.step(incomplete)
+            self.state('opening')
+            self.assertEqual(len(self.manager._send_times), 0)
+            self.assertEqual(self.manager._day_count, 0)
+            self.assertFalse(self.manager._session.nonce)
+            self.assertEqual(list(self.manager._session.actions), [])
+        self.assertEqual(self.driver.actions, [('click', 70, 50)])
+        self.step({**incomplete, 'navigation_ready': True})
+        self.state('sending')
+        self.step()
+        self.assertEqual(len(self.manager._send_times), 1)
+        self.assertEqual(self.driver.actions[1:], [('click', 70, 50), ('type_text', 11), ('click', 70, 50)])
+
+    def test_incomplete_navigation_keeps_cancel_and_deadline_guards(self):
+        for outcome in ('cancel', 'opening_deadline', 'round_deadline', 'untrusted'):
+            with self.subTest(outcome=outcome):
+                self.start()
+                self.step(page(navigation_ready=False))
+                if outcome == 'cancel':
+                    self.manager.cancel()
+                    self.step()
+                elif outcome == 'untrusted':
+                    self.step(page(navigation_ready=False, url='http://127.0.0.1/'))
+                else:
+                    self.step(page(navigation_ready=False), advance=16 if outcome == 'opening_deadline' else 600)
+                self.state({'cancel': 'cancelled', 'round_deadline': 'timeout'}.get(outcome, 'failed'))
+                self.assertEqual(self.driver.actions, [])
+                self.assertEqual(len(self.manager._send_times), 0)
+                self.assertIsNone(self.manager._session.phone)
+                self.cleanup()
+                self.driver.probes.clear()  # Round deadline terminates before reading the queued fixture.
+                self.now += 10
 
     def test_active_sms_pane_never_clicks_tab(self):
         self.start()

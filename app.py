@@ -14,10 +14,11 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
+from login_driver import CREATOR_PAGE
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "results"
-PAGE = "https://creator.douyin.com/creator-micro/creator-count/arithmetic-index"
+PAGE = CREATOR_PAGE
 TZ = ZoneInfo("Asia/Shanghai")
 
 

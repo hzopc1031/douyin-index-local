@@ -113,8 +113,10 @@ class GeometryTests(unittest.TestCase):
                     result.append(value)
                 function(finish)
                 return result[0]
-        page = SimpleNamespace(runJavaScript=js)
-        driver = QtLoginDriver(SimpleNamespace(page=lambda: page), dispatcher=Immediate())
+        page = SimpleNamespace(runJavaScript=js, isLoading=lambda: False)
+        signal = SimpleNamespace(connect=lambda callback: None)
+        driver = QtLoginDriver(SimpleNamespace(page=lambda: page, loadStarted=signal,
+                                loadFinished=signal, urlChanged=signal), dispatcher=Immediate())
         self.assertEqual(driver.probe()['rects']['phone']['width'], 30)
         self.assertIsNone(driver.element_rect('verification'))
         self.assertEqual(driver._read_json('[]', 'capture_failed')[0]['width'], 3)
@@ -262,6 +264,77 @@ class DispatcherTests(unittest.TestCase):
                 self.assertEqual(len(loads), 1)
                 self.assertEqual(stops, [True])
                 self.assertFalse(driver._loading)
+                view.close()
+
+    def test_creator_return_uses_fixed_page_and_stops_on_failure_cancel_or_timeout(self):
+        from PySide6.QtCore import QTimer, QUrl
+        from PySide6.QtWidgets import QWidget
+        from login_driver import CREATOR_PAGE
+        for outcome in ('ready', 'failed', 'untrusted', 'cancel', 'timeout'):
+            with self.subTest(outcome=outcome):
+                view = QWidget()
+                driver = widget_driver(view, dispatcher=QtDispatcher(timeout=.15))
+                view.url = lambda: QUrl('https://www.douyin.com/jingxuan')
+                cancel = threading.Event()
+                loads, stops, errors = [], [], []
+                def load(url):
+                    loads.append(url.toString())
+                    view.loadStarted.emit()
+                    if outcome == 'cancel':
+                        QTimer.singleShot(5, cancel.set)
+                    elif outcome != 'timeout':
+                        def finish():
+                            view.url = lambda: QUrl('http://127.0.0.1/' if outcome == 'untrusted' else CREATOR_PAGE)
+                            view.urlChanged.emit(view.url())
+                            view.loadFinished.emit(outcome != 'failed')
+                        QTimer.singleShot(5, finish)
+                view.load = load
+                def stop():
+                    stops.append(True)
+                    view.loadFinished.emit(False)
+                view.stop = stop
+                def work():
+                    try:
+                        driver.return_to_creator(cancel=cancel)
+                    except (DriverError, DriverTimeout) as exc:
+                        errors.append(str(exc))
+                worker = threading.Thread(target=work)
+                worker.start()
+                self.pump(worker)
+                expected = {'failed': 'navigation_failed', 'untrusted': 'untrusted_origin',
+                            'cancel': 'cancelled', 'timeout': 'driver_timeout'}.get(outcome)
+                self.assertEqual(errors, [expected] if expected else [])
+                self.assertEqual(loads, [CREATOR_PAGE])
+                self.assertEqual(stops, [True] if outcome in ('cancel', 'timeout') else [])
+                self.assertFalse(driver._loading)
+                view.close()
+
+    def test_probe_readiness_requires_finished_navigation_and_same_document(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWidgets import QWidget
+        for outcome in ('ready', 'loading', 'started_during_probe', 'changed_during_probe',
+                        'finished_during_probe', 'dom_loading'):
+            with self.subTest(outcome=outcome):
+                view = QWidget()
+                driver = widget_driver(view)
+                driver._watch_navigation()
+                if outcome in ('loading', 'finished_during_probe'):
+                    view.loadStarted.emit()
+                def js(script, finish):
+                    if outcome == 'started_during_probe':
+                        view.loadStarted.emit()
+                    elif outcome == 'changed_during_probe':
+                        view.urlChanged.emit(QUrl('https://www.douyin.com/jingxuan'))
+                    elif outcome == 'finished_during_probe':
+                        view.loadFinished.emit(True)
+                    finish(json.dumps({'navigation_ready': outcome != 'dom_loading'}))
+                view.page().runJavaScript = js
+                observations = []
+                worker = threading.Thread(target=lambda: observations.append(driver.probe()))
+                worker.start()
+                self.pump(worker)
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0]['navigation_ready'], outcome == 'ready')
                 view.close()
 
     def test_real_qt_widget_input_and_capture_without_browser_process(self):

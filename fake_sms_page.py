@@ -74,6 +74,10 @@ document.querySelector('header button').onclick = () => {
   else openDialog();
 };
 if (location.pathname === '/jingxuan') openDialog();
+if (location.pathname === '/jingxuan' && config.get('slow_load') === '1') {
+  const pending = document.createElement('img'); pending.src = '/pending-load';
+  pending.hidden = true; document.body.append(pending);
+}
 function controls() {
   el('submit').classList.toggle('disabled', !el('phone').value || !el('code').value);
 }
@@ -102,7 +106,8 @@ function success() {
   document.cookie = 'sessionid=synthetic-sms-session; Path=/; SameSite=Strict';
   el('phone').value = ''; el('code').value = '';
   el('dialog').hidden = el('options').hidden = true;
-  el('success').hidden = false; history.replaceState(null, '', '/success');
+  el('success').hidden = false;
+  if (config.get('stay_public') !== '1') history.replaceState(null, '', '/success');
 }
 function loginResult() {
   if (config.get('post_code_error') === '1') el('error').textContent = '验证码已过期';
@@ -153,7 +158,7 @@ handle.addEventListener('pointerup', e => {
 </script>'''
 
 
-def create_fake_app():
+def create_fake_app(*, navigation_gate=None, creator_gate=None):
     from solver_fixture import gap_fixture
     capture, _ = gap_fixture()
 
@@ -163,8 +168,22 @@ def create_fake_app():
     async def puzzle(request):
         return web.Response(body=capture.png, content_type='image/png', headers={'Cache-Control': 'no-store'})
 
+    async def pending_load(request):
+        if navigation_gate is not None:
+            await navigation_gate.wait()
+        return web.Response(body=capture.png, content_type='image/png')
+
+    async def creator(request):
+        if creator_gate is not None:
+            await creator_gate.wait()
+        authenticated = request.cookies.get('sessionid') == 'synthetic-sms-session'
+        return web.Response(text='<html><body>已登录</body></html>' if authenticated else PAGE,
+                            content_type='text/html', headers={'Cache-Control': 'no-store'})
+
     app = web.Application()
     app.router.add_get('/login', page)
     app.router.add_get('/jingxuan', page)
     app.router.add_get('/puzzle.png', puzzle)
+    app.router.add_get('/pending-load', pending_load)
+    app.router.add_get('/creator', creator)
     return app

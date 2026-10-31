@@ -17,7 +17,7 @@ import time
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from login_driver import DriverError, DriverTimeout, is_official_origin, validate_points
+from login_driver import DriverError, DriverTimeout, is_creator_origin, is_official_origin, validate_points
 
 # Login DOM calibrated from the public page on 2026-10-31, without sending SMS.
 # Slider geometry/identity selectors remain unverified live. Keep DOM rules here.
@@ -218,6 +218,8 @@ class SmsLoginSession:
         self.tab_clicked = False
         self.dialog_clicked = False
         self.opening_reset = False
+        self.creator_return_started = None
+        self.navigation_started = None
         self.frame = None
         self.frame_id = 0
         self.frame_hash = None
@@ -524,7 +526,9 @@ class SmsLoginManager:
                 self._step(session)
                 with self._lock:
                     due = min(session.next_probe, session.next_frame if session.state in VERIFY
-                              and session.verification_mode != 'desktop' else math.inf,
+                              and session.verification_mode != 'desktop'
+                              and session.navigation_started is None
+                              and session.creator_return_started is None else math.inf,
                               session.started+600,
                               session.entered+300 if session.state == 'code_sent' else math.inf)
                     delay = 0 if session.actions else max(0, due-self._clock())
@@ -580,15 +584,21 @@ class SmsLoginManager:
             session.next_probe = self._clock()+1
         with self._lock:
             capture = (session.state in VERIFY and session.verification_mode != 'desktop'
+                       and session.navigation_started is None and session.creator_return_started is None
                        and self._clock() >= session.next_frame)
         if capture:
             self._capture(session)
 
     @staticmethod
-    def _success(probe):
+    def _authenticated(probe):
         return (is_official_origin(probe.get('url'))
+                and probe.get('navigation_ready') is True
                 and not probe.get('login_page', True) and not probe.get('login_form', True)
                 and probe.get('session_present') is True)
+
+    @classmethod
+    def _success(cls, probe):
+        return is_creator_origin(probe.get('url')) and cls._authenticated(probe)
 
     def _observe(self, session, probe, *, generation):
         try_solver = False
@@ -601,6 +611,14 @@ class SmsLoginManager:
                 self._finish(session, 'failed')
                 return
             state = session.state
+            if probe.get('navigation_ready') is not True:
+                if session.navigation_started is None:
+                    session.navigation_started = self._clock()
+                if (self._clock()-session.navigation_started >= 15
+                        or state == 'opening' and self._clock()-session.entered >= 15):
+                    self._finish(session, 'failed')
+                return
+            session.navigation_started = None
             if self._success(probe):
                 # Callback only clears the old QR holder; never resumes collection.
                 if self._on_success:
@@ -612,6 +630,18 @@ class SmsLoginManager:
                 return
             if probe.get('blocked'):
                 self._finish(session, 'failed')
+                return
+            if session.creator_return_started is not None:
+                # Never send again or loop between origins if creator still
+                # shows login/verification, or sends us back to the public page.
+                if probe.get('error') or self._clock()-session.creator_return_started >= 15:
+                    self._finish(session, 'failed')
+                return
+            if self._authenticated(probe):
+                session.creator_return_started = self._clock()
+                if state != 'opening':
+                    self._set(session, 'submitting')  # Hide stale challenges/input while returning.
+                session.actions.append(_Action('return_to_creator'))
                 return
             if probe.get('verification'):
                 if state == 'opening':
@@ -732,6 +762,7 @@ class SmsLoginManager:
             self._observe(session, self.driver.probe(), generation=generation)
             with self._lock:
                 if (session.state not in VERIFY or session.cancelled.is_set()
+                        or session.navigation_started is not None or session.creator_return_started is not None
                         or session.challenge_epoch != epoch or session.verification_mode != 'auto'
                         or session.auto_submissions >= 3):
                     raise DriverError('stale_frame')
@@ -782,6 +813,9 @@ class SmsLoginManager:
                 session.tab_clicked = False
                 session.dialog_clicked = False
                 session.next_probe = 0
+            elif action.kind == 'return_to_creator':
+                self.driver.return_to_creator(cancel=session.cancelled)
+                session.next_probe = 0  # A fresh creator DOM/cookie observation is mandatory.
             elif action.kind == 'send':
                 self._click_element(session, 'phone')
                 self.driver.require_official_origin()
@@ -807,6 +841,8 @@ class SmsLoginManager:
                 with self._lock:
                     generation = session.state_generation
                 self._observe(session, self.driver.probe(), generation=generation)
+                if session.navigation_started is not None or session.creator_return_started is not None:
+                    raise DriverError('not_in_verification')
                 if session.state in VERIFY and session.verification_mode == 'manual':
                     self._capture(session)
                 with self._lock:

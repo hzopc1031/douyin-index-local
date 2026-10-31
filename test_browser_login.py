@@ -201,9 +201,12 @@ class DesktopLoginTests(unittest.TestCase):
         self.assertEqual(browser_status(self.api)['state'], 'login_required')
         self.page.get_cookies.return_value = [cookie()]
         for url in ('http://creator.douyin.com/', 'https://creator.douyin.com.invalid/',
-                    'https://user@creator.douyin.com/', 'https://creator.douyin.com:444/'):
+                    'https://user@creator.douyin.com/', 'https://creator.douyin.com:444/',
+                    'https://www.douyin.com/jingxuan'):
             self.page.get_current_url.return_value = url
             self.assertEqual(browser_status(self.api)['state'], 'login_required')
+            with self.assertRaises(app.LoginRequired):
+                self.api._client()
         self.page.get_current_url.return_value = 'https://creator.douyin.com/'
         for value in (True, None):
             self.page.evaluate_js.side_effect = None

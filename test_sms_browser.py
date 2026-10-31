@@ -22,7 +22,7 @@ from unittest.mock import patch
 from aiohttp import ClientSession, web
 
 import hub_bridge
-from login_driver import QtLoginDriver
+from login_driver import CREATOR_PAGE, QtLoginDriver
 from sms_login import LoginCoordinator, SmsLoginManager
 
 PHONE, CODE, WRONG_CODE = '13800138000', '246810', '135790'
@@ -114,6 +114,15 @@ class SmsBrowserTests(unittest.TestCase):
                 self.session_cookie.set()  # No value leaves the browser's memory.
         self.profile.cookieStore().cookieAdded.connect(cookie_added)
         origin = self.origin
+        self.public_login = False
+        self.creator_navigations = 0
+        fixture = self
+        def mapped_url(url):
+            if url.startswith(origin+'/'):
+                host = ('www.douyin.com' if fixture.public_login and not url.startswith(origin+'/creator')
+                        else 'creator.douyin.com')
+                return 'https://'+host+url[len(origin):]
+            return url
         class FixtureDriver(QtLoginDriver):
             def _trusted_origin(self, url):
                 return url.startswith(origin+'/')
@@ -121,13 +130,24 @@ class SmsBrowserTests(unittest.TestCase):
             def probe(self):
                 value = super().probe()
                 # Test-only origin adapter, never enabled by an env var in production.
-                if value['url'].startswith(origin+'/'):
-                    value['url'] = 'https://creator.douyin.com'+value['url'][len(origin):]
+                value['url'] = mapped_url(value['url'])
                 return value
+
+            def _navigate(self, target=None, *, cancel=None):
+                if target == CREATOR_PAGE:
+                    fixture.creator_navigations += 1
+                    target = origin+'/creator'
+                return super()._navigate(target, cancel=cancel)
         self.driver = FixtureDriver(self.view, session_present=self.session_cookie.is_set)
         self.manager = SmsLoginManager(self.driver, threading.Lock(), coordinator=LoginCoordinator(), solver=self.solver)
         self.addCleanup(self.stop_manager)
-        api = SimpleNamespace(_sms_manager=lambda: self.manager)
+        # Run the production collection-status guard over a narrowly mapped
+        # fixture page, including its creator-only origin requirement.
+        page_adapter = SimpleNamespace(
+            get_current_url=lambda: self.driver.dispatcher.call(lambda: mapped_url(self.view.url().toString())),
+            evaluate_js=lambda script: self.driver._read_json(script, 'fixture_js_failed'))
+        api = SimpleNamespace(_sms_manager=lambda: self.manager, _page=page_adapter,
+            _login_state=lambda: 'cookie_present' if self.session_cookie.is_set() else 'no_session_cookie')
         self.bridge = hub_bridge.start_bridge(api)
         self.addCleanup(self.close_bridge)
 
@@ -141,12 +161,11 @@ class SmsBrowserTests(unittest.TestCase):
             site = web.TCPSite(runner, '127.0.0.1', 0)
             await site.start()
             return 'http://127.0.0.1:'+str(site._server.sockets[0].getsockname()[1])
-        self.origin = await serve(create_fake_app())
+        self.navigation_gate, self.creator_gate = asyncio.Event(), asyncio.Event()
+        self.navigation_gate.set()
+        self.creator_gate.set()
+        self.origin = await serve(create_fake_app(navigation_gate=self.navigation_gate, creator_gate=self.creator_gate))
         def bridge(command, payload, timeout):
-            if command == 'status':
-                present = self.session_cookie.is_set()
-                return dict(ok=True, state='browser_ready' if present else 'login_required',
-                            login_state='cookie_present' if present else 'no_session_cookie')
             return hub_bridge.call_bridge(command, payload, timeout)
         # Supply synthetic admin credentials in memory; never open a password file.
         original_read = Path.read_text
@@ -166,6 +185,8 @@ class SmsBrowserTests(unittest.TestCase):
 
     def close_server(self):
         async def close():
+            self.navigation_gate.set()
+            self.creator_gate.set()
             if self.http:
                 await self.http.close()
             for runner in reversed(self.runners):
@@ -336,6 +357,65 @@ class SmsBrowserTests(unittest.TestCase):
         self.assert_private(dump)
         self.scan_artifacts()
         self.assertTrue(any(b'138****8000' in response for response in self.responses))
+
+    def test_public_login_returns_to_creator_before_success_and_manual_resume(self):
+        self.public_login = True
+        self.loop.call_soon_threadsafe(self.creator_gate.clear)
+        self.start('?stay_public=1', manual=True)
+        self.wait_state('verify_send', 'manual')
+        self.manual_drag()
+        self.wait_state('code_sent')
+        self.post('code', {'code': CODE})
+        self.pump_until(lambda: self.creator_navigations == 1)
+        self.assertTrue(self.session_cookie.is_set())
+        # The return navigation is deliberately held open. No success callback,
+        # released browser lease, or resumable collection is allowed yet.
+        self.assertEqual(self.status()['state'], 'submitting')
+        self.assertTrue(self.manager._fetch_lock.locked())
+        self.assertEqual(self.request('POST', 'collection/resume', {}, expected=409)['error']['code'], 'login_in_progress')
+        self.loop.call_soon_threadsafe(self.creator_gate.set)
+        self.wait_state('succeeded')
+        self.stop_manager()
+        self.assertEqual(self.view.url().toString(), self.origin+'/creator')
+        status = self.work(lambda: hub_bridge.call_bridge('status'))
+        self.assertEqual(status['state'], 'browser_ready')
+        self.assertEqual(self.request('GET', 'status')['paused'], {'code': 'manual_resume_required'})
+        self.assertTrue(self.request('POST', 'collection/resume', {})['ok'])
+        self.assertIsNone(self.request('GET', 'status')['paused'])
+        self.assertEqual(self.creator_navigations, 1)
+        self.assertEqual(len(self.manager._send_times), 1)
+        self.scan_artifacts()
+
+    def test_header_navigation_visible_form_waits_for_load_finished_before_send(self):
+        self.loop.call_soon_threadsafe(self.navigation_gate.clear)
+        self.start('?slow_load=1', manual=True)
+        self.pump_until(lambda: self.view.url().path() == '/jingxuan')
+        self.pump_until(lambda: self.js('Boolean(window.audit && !el("dialog").hidden)'))
+        probe = self.work(self.driver.probe)
+        self.assertTrue(probe['found']['phone'])
+        self.assertTrue(probe['found']['send'])
+        self.assertFalse(probe['navigation_ready'])
+        self.assertTrue(self.driver._loading)
+        self.assertTrue(self.page.isLoading())
+        # Wait for the real worker to consume an incomplete-form observation.
+        self.pump_until(lambda: self.manager._session.navigation_started is not None)
+        self.assertEqual(self.status()['state'], 'opening')
+        self.assertEqual(len(self.manager._send_times), 0)
+        self.assertEqual(self.manager._day_count, 0)
+        self.assertFalse(self.manager._session.nonce)
+        audit = self.js('window.audit')
+        self.assertEqual((audit['inputTrusted'], audit['sends'], audit['opens']), ([], 0, 1))
+        self.loop.call_soon_threadsafe(self.navigation_gate.set)
+        self.wait_state('verify_send', 'manual')
+        self.assertFalse(self.driver._loading)
+        self.assertEqual(len(self.manager._send_times), 1)
+        self.assertTrue(all(self.js('window.audit.inputTrusted')))
+        self.manual_drag()
+        self.wait_state('code_sent')
+        self.post('code', {'code': CODE})
+        self.wait_state('succeeded')
+        audit = self.assert_trusted(1)
+        self.assertEqual((audit['opens'], audit['sends'], audit['codeSubmits']), (1, 1, 1))
 
     def test_calibrated_dialog_controls_and_ordered_fallbacks(self):
         from qr_login import SELECTORS
