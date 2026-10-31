@@ -40,7 +40,10 @@ verification, access-denied or rate-limit errors, and does not automatically
 retry failed/interrupted tasks. These are engineering limits, not official
 Douyin quotas. User expanded cloud dates to past two calendar years (maximum 731 inclusive days) on 2026-10-28. Default remains seven days. Added related/audience modules, one keyword and one online attempt per module; same daily and interval guards. Official static frontend confirmed endpoints/shapes; live responses remain pending validation.
 Ordinary desktop launches keep their original single-online-attempt behavior.
-Cookies remain solely inside the browser process and its per-query Session;
+2026-10-31 user-authorized scope change: in cloud hub mode browser profiles
+(cookies) persist under a 0700 service-owned profile directory; never commit,
+upload or print them. INDEX_HUB_PERSIST_LOGIN=0 restores memory-only behavior.
+Otherwise cookies remain solely inside the browser process and its per-query Session;
 the HTTP API never receives or returns cookies. API keys are separate random
 secrets, returned once and stored only as SHA-256 hashes. Do not commit keys,
 SQLite state, TLS private keys, real data or browser profiles.
@@ -48,7 +51,7 @@ SQLite state, TLS private keys, real data or browser profiles.
 - Search index is `search_hot_list[].index`; composite index is a separate metric. Never label either as actual search counts.
 - Current scope: 1–5 unique keywords, past two calendar years (maximum 731 inclusive days) for cloud (desktop default 7), nationwide, aweme. Latest available day must come from the official page.
 - Keep TLS validation, the fixed endpoint, no redirects, no automatic retries, and the per-launch single online attempt. Change these only as part of an explicit scope change with an explained design.
-- Keep credentials in memory. Do not write, print, commit, upload, or pass real cookies to tests, except for the direct encrypted transfer to the user's verified EC2 endpoint described above. Clear and close the HTTP session after use. The cloud PoC does not persist sessions, refresh login, run a daemon, or validate offline-device operation; those require a separate implementation and validation.
+- Keep credentials in memory except for the authorized cloud hub browser profiles above. Do not write, print, commit, upload, or pass real cookies to tests, except for the direct encrypted transfer to the user's verified EC2 endpoint described above. Clear and close the HTTP session after use. The cloud PoC does not persist sessions, refresh login, run a daemon, or validate offline-device operation; those require a separate implementation and validation.
 - Missing data must remain missing, never become zero. Reject duplicate/unexpected keys and dates. Only complete results may be cached.
 - A verification pass requires independent official-page observations for every keyword/date. Never copy API values into page observations to claim a match.
 - Live login/CAPTCHA steps require the user where appropriate. Do not request extra live data just to run routine tests.
