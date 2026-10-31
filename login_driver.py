@@ -21,7 +21,7 @@ def is_official_origin(url):
         return False
     try:
         parsed = urlsplit(url)
-        return (parsed.scheme == 'https' and parsed.hostname == 'creator.douyin.com'
+        return (parsed.scheme == 'https' and parsed.hostname in ('creator.douyin.com', 'www.douyin.com')
                 and parsed.port in (None, 443) and parsed.username is None and parsed.password is None)
     except ValueError:
         return False
@@ -213,19 +213,46 @@ class QtDispatcher:
         return self.call_async(lambda finish: finish(function()), cancel=cancel)
 
 
-def probe_script(selectors):
-    # Only the selector table enters JS. Never input values, cookies, or raw text.
-    return '''(() => {
-      const s = %s;
+# Shared read-only lookup for probes and clicks; ordered CSS fallbacks prefer
+# stable IDs. Disabled div/span controls must not yield clickable rectangles.
+_DOM_LOOKUP = r'''
       const visible = e => { const r = e.getBoundingClientRect(), c = getComputedStyle(e);
-        return r.width > 0 && r.height > 0 && c.display !== 'none' && c.visibility !== 'hidden'; };
+        if (r.width <= 0 || r.height <= 0 || c.visibility !== 'visible') return false;
+        for (let p=e; p; p=p.parentElement) {
+          const style = getComputedStyle(p);
+          if (p.hidden || p.getAttribute('aria-hidden') === 'true' || style.display === 'none'
+              || Number(style.opacity) === 0) return false;
+        }
+        return true; };
       const find = key => { const rule = s[key];
-        return Array.from(document.querySelectorAll(rule.css)).find(e =>
-          visible(e) && (!rule.text || rule.text.some(t => e.textContent.includes(t)))); };
+        for (const css of Array.isArray(rule.css) ? rule.css : [rule.css]) {
+          const e = Array.from(document.querySelectorAll(css)).find(e =>
+            visible(e) && (!rule.text || rule.text.some(t => rule.exact
+              ? e.textContent.trim() === t : e.textContent.includes(t))));
+          if (e) return e;
+        }
+        return null; };
+      const enabled = (e, key) => {
+        if (!e || e.matches(':disabled')) return false;
+        for (let p=e; p; p=p.parentElement) {
+          if (p.hasAttribute('disabled') || p.getAttribute('aria-disabled') === 'true'
+              || p.getAttribute('data-disabled') === 'true' || getComputedStyle(p).pointerEvents === 'none'
+              || Array.from(p.classList).some(c => /(^|[-_])disabled($|[-_])/i.test(c))) return false;
+        }
+        // Placeholder/validity state avoids reading or returning field contents.
+        return (s[key].filled || []).every(k => { const field = find(k);
+          return field && !field.matches(':disabled, :placeholder-shown') && field.validity.valid; }); };
       const rect = e => { if (!e) return null; const r = e.getBoundingClientRect();
         return {x:r.x, y:r.y, width:r.width, height:r.height}; };
-      const found = {}, rects = {};
-      for (const key of s.elements) { const e = find(key); found[key] = !!e; rects[key] = rect(e); }
+'''
+
+
+def probe_script(selectors):
+    # Only the selector table enters JS. Never input values, cookies, or raw text.
+    return '(() => { const s = %s; %s' % (json.dumps(selectors, ensure_ascii=True), _DOM_LOOKUP) + '''
+      const found = {}, rects = {}, usable = {};
+      for (const key of s.elements) { const e = find(key); found[key] = !!e;
+        usable[key] = enabled(e, key); rects[key] = rect(e); }
       const text = document.body ? document.body.innerText : '';
       const has = key => s[key].some(t => text.includes(t));
       const countdown = find('countdown');
@@ -237,7 +264,7 @@ def probe_script(selectors):
       const identity = assets.map(e => s.challenge_attributes.map(a => e.getAttribute(a) || '').join('|')).join(';');
       let hash = 2166136261;
       for (let i=0; i<identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 16777619);
-      return {url:location.origin + location.pathname, found, rects,
+      return {url:location.origin + location.pathname, found, rects, enabled:usable,
         login_page:s.login_paths.some(p => location.pathname.toLowerCase().includes(p)),
         login_form:found.login_form, verification:found.verification || has('verification_text'),
         rate_limited:has('rate_text'), code_invalid:has('code_error_text'), error:has('error_text'),
@@ -245,7 +272,7 @@ def probe_script(selectors):
         challenge_key:String(hash >>> 0),
         challenge_kind:has('rotation_text') ? 'rotation' : has('gap_text') ? 'gap_slider' : 'unknown',
         countdown:match ? Number(match[1]) : null};
-    })()''' % json.dumps(selectors, ensure_ascii=True)
+    })()'''
 
 
 class QtLoginDriver:
@@ -359,13 +386,10 @@ class QtLoginDriver:
     def element_rect(self, key):
         if key not in self._selectors['elements']:
             raise DriverError('invalid_element')
-        script = '''(() => { const rule = %s;
-          const e = Array.from(document.querySelectorAll(rule.css)).find(e => {
-            const r = e.getBoundingClientRect(), c = getComputedStyle(e);
-            return r.width > 0 && r.height > 0 && c.visibility !== 'hidden' && c.display !== 'none'
-              && (!rule.text || rule.text.some(t => e.textContent.includes(t))); });
-          if (!e) return null; const r = e.getBoundingClientRect();
-          return {x:r.x,y:r.y,width:r.width,height:r.height}; })()''' % json.dumps(self._selectors[key])
+        script = '''(() => { const s = %s; %s
+          const key = %s, e = find(key);
+          return rect(s[key].enabled && !enabled(e, key) ? null : e); })()''' % (
+              json.dumps(self._selectors), _DOM_LOOKUP, json.dumps(key))
         return self._read_json(script, 'probe_failed')
 
     def grab(self, rect=None):

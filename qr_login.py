@@ -62,9 +62,11 @@ def _timeout(value):
 
 
 QR_TIMEOUT_SECONDS = _timeout(os.environ.get('INDEX_HUB_QR_TIMEOUT'))
-# 上线后需按真实页面校准。
+# QR DOM calibrated from the public page on 2026-10-31; live login still pending.
 SELECTORS = {
-    'qr_image': 'img[class*=qrcode], img[src^="data:image"]',
+    'qr_image': 'div#animate_qrcode_container img[aria-label="二维码"], '
+                'div#douyin_login_comp_scan_code img[aria-label="二维码"], '
+                'img[class*=qrcode], img[src^="data:image"]',
     'expired': ('二维码已失效', '二维码已过期', '已过期'),
     'verification': 'iframe[src*=captcha], #captcha_container, .captcha_verify_container',
     'verification_text': ('安全验证', '滑块'),

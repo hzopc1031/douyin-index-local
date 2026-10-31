@@ -64,8 +64,16 @@ No paid/third-party solving services or solver network calls. Tests use only
 synthetic offline images. Missing dependency/model, low confidence or failure
 falls back to manual screenshot input, then remote desktop; rotation goes
 directly to remote desktop. Automatic/manual drags share the Qt replayer.
-All SMS selectors remain uncalibrated in SMS_SELECTORS until user-assisted
-real-page calibration. Screenshot animation alone must not invalidate input.
+SMS login/QR DOM selectors are calibrated from the public page captured on
+2026-10-31 (no phone entered or SMS sent): header 登录 opens a top-level dialog,
+possibly after /jingxuan navigation; SMS is active by default, +86 is unchanged,
+get-code is a span and submit a div, with implicit agreement and no checkbox.
+Prefer stable IDs/name/placeholder/aria/text and the login-full-panel- prefix.
+Ignore hidden verifycenter helpers; detect visible verifycenter overlays/iframes
+alongside existing CAPTCHA selectors. Slider geometry/identity selectors have
+not been seen live; solver logic is unchanged. Screenshot animation alone must
+not invalidate input. SMS input trusts only HTTPS creator.douyin.com and
+www.douyin.com on the default TLS port; collection's origin guard is unchanged.
 `fake_sms_page.py` / `test_sms_browser.py` exercise the real Qt/HTTP/Unix bridge
 flow only on 127.0.0.1, with synthetic inputs and an off-record browser. Browser
 tests require INDEX_HUB_REQUIRE_BROWSER_TESTS=1 under Xvfb; missing optional

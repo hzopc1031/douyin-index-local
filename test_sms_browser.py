@@ -217,12 +217,12 @@ class SmsBrowserTests(unittest.TestCase):
     def js(self, script):
         return self.work(lambda: self.driver._read_json(script, 'fixture_js_failed'))
 
-    def load(self, query=''):
+    def load(self, query='', path='/login'):
         from PySide6.QtCore import QUrl
         loaded = []
         self.view.loadFinished.connect(loaded.append)
         try:
-            self.view.load(QUrl(self.origin+'/login'+query))
+            self.view.load(QUrl(self.origin+path+query))
             self.pump_until(lambda: bool(loaded))
             self.assertEqual(loaded, [True])
             self.pump_until(lambda: not self.page.contentsSize().isEmpty())
@@ -262,7 +262,7 @@ class SmsBrowserTests(unittest.TestCase):
         if manual:
             self.manager.solver = None
         self.load(query)
-        self.assertTrue(self.js('!document.getElementById("qr").hidden'))
+        self.assertTrue(self.js('document.getElementById("login-full-panel-synthetic").hidden'))
         self.post('start', {'phone': PHONE})
 
     def manual_drag(self, distance=190):
@@ -322,7 +322,8 @@ class SmsBrowserTests(unittest.TestCase):
         self.assertTrue(self.session_cookie.is_set())
         self.assertEqual(self.manager._session.auto_submissions, 2)
         audit = self.assert_trusted(2)
-        self.assertEqual((audit['tabs'], audit['sends'], audit['codeSubmits']), (1, 1, 1))
+        self.assertEqual((audit['opens'], audit['tabs'], audit['sends'], audit['codeSubmits']), (1, 0, 1, 1))
+        self.assertTrue(self.js('document.querySelector("input[name=web-login-area-code-input]").value === "+86"'))
         self.assertEqual(self.js('localStorage.length + sessionStorage.length'), 0)
         self.stop_manager()
         self.assertFalse(self.manager._session.actions)
@@ -336,6 +337,87 @@ class SmsBrowserTests(unittest.TestCase):
         self.scan_artifacts()
         self.assertTrue(any(b'138****8000' in response for response in self.responses))
 
+    def test_calibrated_dialog_controls_and_ordered_fallbacks(self):
+        from qr_login import SELECTORS
+        self.load(path='/jingxuan')
+        probe = self.work(self.driver.probe)
+        for key in ('phone', 'code', 'send', 'submit', 'login_form', 'sms_pane', 'qr_pane', 'qr_image'):
+            self.assertTrue(probe['found'][key], key)
+        self.assertFalse(probe['verification'])  # Hidden verifycenter helper is not a challenge.
+        self.assertFalse(probe['enabled']['send'])
+        self.assertFalse(probe['enabled']['submit'])
+        self.assertIsNone(self.work(lambda: self.driver.element_rect('submit')))
+        self.assertTrue(self.js('document.querySelector("#login-full-panel-synthetic input[type=checkbox]") === null'))
+        self.js('(document.querySelector("img[aria-label=二维码]").removeAttribute("src"), true)')
+        self.assertTrue(self.js('document.querySelector('+json.dumps(SELECTORS['qr_image'])+') !== null'))
+        # IDs take precedence over earlier placeholder matches; then name and
+        # placeholder remain usable if a later public-page revision removes IDs.
+        self.js('''(() => {const decoy=document.createElement('input');
+          decoy.placeholder='请输入手机号'; document.body.prepend(decoy); return true;})()''')
+        phone = self.work(lambda: self.driver.element_rect('phone'))
+        expected = self.js('''(() => {const r=document.getElementById('normal-input').getBoundingClientRect();
+          return {x:r.x,y:r.y,width:r.width,height:r.height};})()''')
+        self.assertEqual(phone, expected)
+        self.js('(document.body.firstElementChild.remove(), true)')
+        for attribute in ('id', 'name'):
+            self.js('''(() => {for (const e of document.querySelectorAll('input[placeholder]'))
+              e.removeAttribute(%s); return true;})()''' % json.dumps(attribute))
+            current = self.work(self.driver.probe)
+            self.assertTrue(current['found']['phone'])
+            self.assertTrue(current['found']['code'])
+            self.assertNotEqual(current['rects']['phone'], current['rects']['code'])
+        self.js('''(() => {for (const e of document.querySelectorAll('#login-full-panel-synthetic [id]'))
+          e.removeAttribute('id'); return true;})()''')
+        self.assertTrue(self.work(self.driver.probe)['login_form'])
+
+    def test_disabled_span_and_div_controls_never_yield_click_rectangles(self):
+        self.load(path='/jingxuan')
+        for key, text in (('phone', PHONE), ('code', CODE)):
+            rect = self.work(lambda: self.driver.element_rect(key))
+            self.work(lambda: self.driver.click(rect['x']+10, rect['y']+10))
+            self.work(lambda: self.driver.type_text(text))
+        for key, selector in (('send', '#douyin_login_comp_button_input_id'),
+                              ('submit', '#douyin_login_comp_btn_id')):
+            for attribute, value in (('disabled', ''), ('aria-disabled', 'true'), ('data-disabled', 'true'),
+                                     ('class', 'control-disabled-synthetic'), ('style', 'pointer-events:none')):
+                with self.subTest(key=key, attribute=attribute):
+                    self.js('(document.querySelector(%s).setAttribute(%s,%s), true)' % tuple(
+                        json.dumps(v) for v in (selector, attribute, value)))
+                    self.assertFalse(self.work(self.driver.probe)['enabled'][key])
+                    self.assertIsNone(self.work(lambda: self.driver.element_rect(key)))
+                    self.js('(document.querySelector(%s).removeAttribute(%s), true)' % (
+                        json.dumps(selector), json.dumps(attribute)))
+                    self.assertTrue(self.work(self.driver.probe)['enabled'][key])
+                    self.assertIsNotNone(self.work(lambda: self.driver.element_rect(key)))
+        self.assertEqual(self.js('window.audit.codeSubmits + window.audit.sends'), 0)
+
+    def test_visible_verifycenter_overlay_and_iframe_detection(self):
+        self.load(path='/jingxuan')
+        for markup in ('<div class="rc-verifycenter" style="width:320px;height:200px"></div>',
+                       '<iframe src="about:blank#verify" style="width:320px;height:200px"></iframe>'):
+            with self.subTest(markup=markup):
+                self.js('''(() => {const host=document.createElement('div'); host.id='synthetic-verify';
+                  host.hidden=true; host.innerHTML=%s; document.body.append(host); return true;})()''' % json.dumps(markup))
+                self.assertFalse(self.work(self.driver.probe)['verification'])
+                self.js('document.getElementById("synthetic-verify").hidden=false')
+                probe = self.work(self.driver.probe)
+                self.assertTrue(probe['verification'])
+                self.assertIsNotNone(probe['rects']['verification'])
+                self.assertEqual(probe['challenge_kind'], 'unknown')
+                self.js('document.getElementById("synthetic-verify").style.opacity="0"')
+                self.assertFalse(self.work(self.driver.probe)['verification'])
+                self.js('(document.getElementById("synthetic-verify").remove(), true)')
+
+    def test_password_pane_switches_to_sms_once(self):
+        self.start('?password=1', manual=True)
+        self.wait_state('verify_send', 'manual')
+        self.assertEqual(self.js('window.audit.tabs'), 1)
+        self.manual_drag()
+        self.wait_state('code_sent')
+        self.post('code', {'code': CODE})
+        self.wait_state('succeeded')
+        self.assertEqual(self.js('window.audit.tabs'), 1)
+
     def test_production_manager_rejects_matching_nonofficial_page(self):
         self.load()
         self.js("(() => {document.getElementById('sms-tab').click(); return true;})()")
@@ -345,12 +427,12 @@ class SmsBrowserTests(unittest.TestCase):
         audit = self.js('window.audit')
         self.assertEqual(audit['inputTrusted'], [])
         self.assertEqual((audit['sends'], audit['codeSubmits']), (0, 0))
-        self.assertTrue(self.js("document.getElementById('phone').value === ''"))
+        self.assertTrue(self.js("document.getElementById('normal-input').value === ''"))
         self.assertIsNone(self.manager._session.phone)
 
     def test_navigation_during_phone_input_aborts_round(self):
-        self.load()
-        self.js("""(() => {document.getElementById('phone').addEventListener('input',
+        self.load(path='/jingxuan')
+        self.js("""(() => {document.getElementById('normal-input').addEventListener('input',
             () => { location.href = 'about:blank'; }, {once:true}); return true;})()""")
         self.post('start', {'phone': PHONE})
         self.wait_state('failed')
@@ -401,7 +483,7 @@ class SmsBrowserTests(unittest.TestCase):
         self.post('code', {'code': CODE})
         self.wait_state('succeeded')
         audit = self.assert_trusted(1)
-        self.assertEqual((audit['tabs'], audit['sends'], audit['codeSubmits']), (1, 1, 1))
+        self.assertEqual((audit['tabs'], audit['sends'], audit['codeSubmits']), (0, 1, 1))
 
     def test_successive_manual_puzzles_remain_operable_in_both_phases(self):
         self.start('?second=1&send_challenges=2&login_challenges=2', manual=True)

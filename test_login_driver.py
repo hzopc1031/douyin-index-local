@@ -474,7 +474,7 @@ class QtInputTests(unittest.TestCase):
         self.view.setHtml('''<html><head><style>
           body { margin:0; background:#eef; } input {position:absolute;left:40px;top:40px;width:180px;height:30px;}
           #captcha_container {position:absolute;left:40px;top:140px;width:240px;height:80px;background:#89a;}
-          </style></head><body><input type="tel"><div id="captcha_container"></div>
+          </style></head><body><input type="tel" placeholder="请输入手机号"><div id="captcha_container"></div>
           <script>window.events=[];
           for (const type of ['pointerdown','pointermove','pointerup','keydown','keyup','input'])
             document.addEventListener(type, e => events.push({type, trusted:e.isTrusted,x:e.clientX,y:e.clientY,t:performance.now()}));

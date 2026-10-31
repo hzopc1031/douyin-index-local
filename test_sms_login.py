@@ -20,7 +20,7 @@ def page(**changes):
     result = dict(url='https://creator.douyin.com/login', login_page=True,
                   login_form=True, session_present=False, countdown=None,
                   found={'phone': True, 'send': True},
-                  rects={key: RECT.copy() for key in ('tab', 'phone', 'send', 'code', 'submit', 'verification')})
+                  rects={key: RECT.copy() for key in ('open', 'tab', 'phone', 'send', 'code', 'submit', 'verification')})
     result.update(changes)
     return result
 
@@ -119,6 +119,8 @@ class StateTests(unittest.TestCase):
 
     def test_untrusted_origin_never_admits_send_or_success(self):
         urls = ('http://creator.douyin.com/login', 'http://127.0.0.1/login',
+                'http://www.douyin.com/jingxuan', 'https://www.douyin.com.evil.invalid/jingxuan',
+                'https://www.douyin.com:444/jingxuan', 'https://fixture@www.douyin.com/jingxuan',
                 'https://creator.douyin.com.evil.invalid/login',
                 'https://creator.douyin.com:444/login', 'https://fixture@creator.douyin.com/login',
                 'https://creator.douyin.com:invalid/login', 'https://[invalid', '', None)
@@ -194,14 +196,52 @@ class StateTests(unittest.TestCase):
         self.step(page())
         self.state('sending')
 
+    def test_header_opens_once_and_waits_for_redirected_dialog(self):
+        self.start()
+        self.step(page(url='https://www.douyin.com/', login_page=False, login_form=False,
+                       found={'open': True}))
+        self.step()
+        self.assertEqual(self.driver.actions, [('click', 70, 50)])
+        self.step(page(url='https://www.douyin.com/jingxuan', found={}))
+        self.state('opening')
+        self.step(page(found={'open': True}))
+        self.assertEqual(self.driver.actions, [('click', 70, 50)])
+        self.step(page(url='https://www.douyin.com/jingxuan', found={'phone': True, 'send': True, 'tab': True}))
+        self.state('sending')
+        self.assertFalse(self.manager._session.tab_clicked)
+
+    def test_active_sms_pane_never_clicks_tab(self):
+        self.start()
+        self.step(page(found={'tab': True, 'sms_pane': True}))
+        self.state('opening')
+        self.assertEqual(list(self.manager._session.actions), [])
+        self.step(page(found={'phone': True, 'send': True, 'tab': True, 'sms_pane': True}))
+        self.state('sending')
+        self.assertFalse(self.manager._session.tab_clicked)
+        self.assertEqual(self.driver.actions, [])
+
+    def test_disabled_controls_wait_without_retyping_or_reclicking(self):
+        self.start()
+        self.step(page())
+        with patch.object(self.driver, 'element_rect', side_effect=[RECT, None, RECT]):
+            self.step()
+        self.assertEqual([a[0] for a in self.driver.actions], ['click', 'type_text', 'click'])
+        self.step(page(countdown=60))
+        self.manager.submit(CODE)
+        with patch.object(self.driver, 'element_rect', side_effect=[RECT, None, None]), \
+                patch('sms_login.time.monotonic', side_effect=[100, 100, 101, 106]):
+            self.step()
+        self.state('failed')
+        self.assertEqual([a[0] for a in self.driver.actions[3:]], ['click', 'type_text'])
+
     def test_opening_failed_for_missing_or_stuck_tab(self):
-        for found in ({}, {'tab': True}):
+        for found in ({}, {'tab': True}, {'open': True}):
             with self.subTest(found=found):
                 self.start()
                 self.step(page(found=found))
                 if found:
                     self.step()
-                    self.step(page(found=found), advance=16)
+                self.step(page(found=found), advance=16)
                 self.state('failed')
                 self.cleanup()
                 self.now += 10

@@ -19,19 +19,37 @@ from zoneinfo import ZoneInfo
 
 from login_driver import DriverError, DriverTimeout, is_official_origin, validate_points
 
-# UNCALIBRATED: all DOM selectors and text detection belong in this table.
-# Calibration must change this table only, never add page-specific driver logic.
+# Login DOM calibrated from the public page on 2026-10-31, without sending SMS.
+# Slider geometry/identity selectors remain unverified live. Keep DOM rules here.
 SMS_SELECTORS = {
-    'elements': ('tab', 'phone', 'send', 'countdown', 'code', 'submit', 'verification', 'login_form',
+    'elements': ('open', 'tab', 'phone', 'send', 'countdown', 'code', 'submit', 'verification', 'login_form',
+                 'sms_pane', 'qr_pane', 'qr_image',
                  'slider_handle', 'slider_track', 'slider_image', 'slider_piece'),
+    'open': {'css': ('header button, [role=banner] button, header [role=button]',
+                     'button[aria-label="登录"], [role=button][aria-label="登录"]',
+                     'header span, [role=banner] span'), 'text': ('登录',), 'exact': True},
     'tab': {'css': 'button, [role=tab], span', 'text': ('验证码登录', '短信登录')},
-    'phone': {'css': 'input[type=tel], input[placeholder*=手机号]'},
-    'send': {'css': 'button, [role=button]', 'text': ('获取验证码', '发送验证码', '重新发送')},
-    'countdown': {'css': 'button, [role=button], span', 'text': ('秒', 's后')},
-    'code': {'css': 'input[autocomplete=one-time-code], input[placeholder*=验证码]'},
-    'submit': {'css': 'button, [role=button]', 'text': ('登录',)},
-    'verification': {'css': 'iframe[src*=captcha], #captcha_container, .captcha_verify_container'},
-    'login_form': {'css': 'input[type=tel], input[placeholder*=手机号], input[autocomplete=one-time-code]'},
+    'phone': {'css': ('input#normal-input', 'input[name=normal-input]', 'input[placeholder*=手机号]')},
+    'send': {'css': ('#douyin_login_comp_button_input_id span', 'button, [role=button]'),
+             'text': ('获取验证码', '发送验证码', '重新发送'), 'enabled': True, 'filled': ('phone',)},
+    'countdown': {'css': ('#douyin_login_comp_button_input_id span', 'button, [role=button], span'),
+                  'text': ('秒', 's后')},
+    'code': {'css': ('input#button-input', 'input[name=button-input]',
+                     'input[placeholder*=验证码], input[autocomplete=one-time-code]')},
+    'submit': {'css': ('div#douyin_login_comp_btn_id', 'button, [role=button]'),
+               'text': ('登录',), 'exact': True, 'enabled': True, 'filled': ('phone', 'code')},
+    'verification': {'css': 'iframe[src*=captcha], #captcha_container, .captcha_verify_container, '
+                            '#rc-verifycenter, .rc-verifycenter, [id^="rc-verifycenter"], '
+                            'iframe[src*=verify], iframe[id*=verify], iframe[name*=verify], '
+                            '[id*=verifycenter], [class*=verifycenter]'},
+    'login_form': {'css': '#login-panel-new, #douyin-login-new-id, #douyin_login_comp_flat_panel, '
+                          '#douyin_login_landing_flat_container, div[id^="login-full-panel-"], '
+                          'input#normal-input, input[name=normal-input], input[placeholder*=手机号], '
+                          'input#button-input, input[autocomplete=one-time-code]'},
+    'sms_pane': {'css': 'div#douyin_login_comp_mobile_code'},
+    'qr_pane': {'css': 'div#douyin_login_comp_scan_code'},
+    'qr_image': {'css': ('div#animate_qrcode_container img[aria-label="二维码"]',
+                         'div#douyin_login_comp_scan_code img[aria-label="二维码"]')},
     'slider_handle': {'css': '.secsdk-captcha-drag-icon'},
     'slider_track': {'css': '.secsdk-captcha-drag-wrapper'},
     'slider_image': {'css': '#captcha-verify-image'},
@@ -198,6 +216,7 @@ class SmsLoginSession:
         self.probe_timeouts = 0
         self.next_probe = self.next_frame = now
         self.tab_clicked = False
+        self.dialog_clicked = False
         self.opening_reset = False
         self.frame = None
         self.frame_id = 0
@@ -675,10 +694,13 @@ class SmsLoginManager:
                         self._begin_send(session)
                     except SmsLoginError:
                         self._finish(session, 'rate_limited')
-                elif found.get('tab') and not session.tab_clicked:
+                elif found.get('tab') and not found.get('sms_pane') and not session.tab_clicked:
                     session.tab_clicked = True
                     session.actions.append(_Action('tab'))
-                elif self._clock()-session.entered >= 15 or not found.get('tab'):
+                elif found.get('open') and not found.get('login_form') and not session.dialog_clicked:
+                    session.dialog_clicked = True
+                    session.actions.append(_Action('open'))
+                elif self._clock()-session.entered >= 15:
                     self._finish(session, 'failed')
             elif state in ('sending', 'submitting') and self._clock()-session.entered >= 15:
                 self._finish(session, 'failed')
@@ -736,10 +758,18 @@ class SmsLoginManager:
             self.driver.drag(mapped, cancel=session.cancelled, frame=meta)
 
     def _click_element(self, session, key):
-        self.driver.require_official_origin()
-        rect = self.driver.element_rect(key)
-        if rect is None:
-            raise DriverError('selector_missing')
+        # React may enable a span/div on the next render after the last key.
+        # This bounded wait stays on the app worker; bridge commands stay short.
+        deadline = time.monotonic() + 5 if key in ('send', 'submit') else 0
+        while True:
+            self.driver.require_official_origin()
+            rect = self.driver.element_rect(key)
+            if rect is not None:
+                break
+            if time.monotonic() >= deadline:
+                raise DriverError('selector_missing')
+            if session.cancelled.wait(.05):
+                raise DriverError('cancelled')
         self.driver.click(rect['x']+rect['width']/2, rect['y']+rect['height']/2, cancel=session.cancelled)
 
     def _action(self, session, action):
@@ -750,14 +780,15 @@ class SmsLoginManager:
             if action.kind == 'reset':
                 self.driver.reset_login(cancel=session.cancelled)
                 session.tab_clicked = False
+                session.dialog_clicked = False
                 session.next_probe = 0
             elif action.kind == 'send':
                 self._click_element(session, 'phone')
                 self.driver.require_official_origin()
                 self.driver.type_text(session.phone, cancel=session.cancelled)
                 self._click_element(session, 'send')
-            elif action.kind == 'tab':
-                self._click_element(session, 'tab')
+            elif action.kind in ('open', 'tab'):
+                self._click_element(session, action.kind)
             elif action.kind == 'code':
                 if action.nonce != session.nonce:
                     raise DriverError('code_consumed')

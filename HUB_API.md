@@ -197,6 +197,6 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 
 开始前写 `paused={"code":"login_in_progress"}`，worker 在网页关闭后也会检查登录结果；结束转为 `manual_resume_required`，保持暂停直到管理员恢复，不重试失败任务。整个登录持有取数锁，与扫码互斥，成功清空旧 QR holder。桥接返回超时属于不确定结果，保持暂停直至状态明确。
 
-手机号、验证码和截图不进日志、SQLite、结果或页面 storage；仅存在内存中，表单提交立即清空。日志兜底遮盖手机号及 phone/mobile/sms/otp/verify_code 等赋值，SMS 异常不格式化原文。Python 字符串不能保证清零；官方页面仍可能自行把手机号写进已授权的持久 profile。所有选择器集中于 `SMS_SELECTORS`，尚需用户参与真实页面校准；本次未作真实登录或取数验证。
+手机号、验证码和截图不进日志、SQLite、结果或页面 storage；仅存在内存中，表单提交立即清空。日志兜底遮盖手机号及 phone/mobile/sms/otp/verify_code 等赋值，SMS 异常不格式化原文。Python 字符串不能保证清零；官方页面仍可能自行把手机号写进已授权的持久 profile。短信 DOM 规则集中于 `SMS_SELECTORS`。登录/二维码选择器已按 2026-10-31 公开页面 DOM 校准（未输入手机号、未发短信）：点击页头「登录」，可能跳转 `/jingxuan`，弹窗不在 iframe；验证码登录默认激活，保留 +86；发码是 span、提交是 div，等待控件启用后点击；协议文字仅作提示，没有勾选框。稳定 ID 优先，name/placeholder/aria/text 和 `login-full-panel-` 前缀作为回退。验证检测保留原规则并覆盖可见 verifycenter/verify iframe，忽略隐藏辅助 iframe。滑块尚未见到真实页面，几何/题目身份规则仍待验证，识别器逻辑未改。本次未作真实登录或取数验证。
 
 离线验收使用 `test_sms_browser.py` 的 127.0.0.1 假页面和真实 Qt，包含完整成功流程后的日志/临时文件/SQLite/API 响应泄露扫描。命令与 RSS 测量见 [README.md](README.md)；这些结果不等同真实短信或官方验证通过率。

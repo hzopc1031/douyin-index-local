@@ -120,7 +120,9 @@ dist/DouyinIndexLocal.app/Contents/MacOS/DouyinIndexLocal --connection-check
 
 可选本地识别器使用 MIT 的 `captcha-recognizer==1.0.2`（依赖 ONNX Runtime），只处理明确识别为普通缺口滑块且几何信息完整的题目。安装 `requirements-solver.txt`；模型随该版本 wheel 提供，无运行时下载，也不把模型加入仓库。依赖/模型按需加载，禁用 ORT 遥测，不调用第三方服务。每轮最多自动提交 3 次，两阶段共用计数；只在新题身份稳定后尝试，不因动画重试。低置信度、异常、拒绝或页面未确认通过均退回人工截图，人工拖动仍未通过则提示远程桌面；旋转题直接提示远程桌面。出现平台限频、账号异常或拒绝访问立即停止。
 
-`VerificationSolver.solve(capture, challenge, cancel)` 是扩展点：返回相对坐标轨迹或 `None`，不直接操作浏览器；`solver=None` 可禁用自动识别。状态机执行次数限制、取消检查、重新探测以及与人工共用的回放。页面仍须独立确认倒计时/登录成功。截图 `frame_id` 表示图片更新；服务端另保留题目/布局 epoch，同一 epoch 的旧图片允许回传坐标，换题、裁剪或缩放变化则拒绝。题目身份只对配置的 DOM 资源属性做内存摘要，不返回资源 URL。所有选择器、题型文字、身份属性均集中于 `SMS_SELECTORS`，尚未真实校准；跨域 iframe 或无可识别身份/几何信息的题目不能承诺自动处理，canvas 内换题也需要校准可观测的身份属性。
+`VerificationSolver.solve(capture, challenge, cancel)` 是扩展点：返回相对坐标轨迹或 `None`，不直接操作浏览器；`solver=None` 可禁用自动识别。状态机执行次数限制、取消检查、重新探测以及与人工共用的回放。页面仍须独立确认倒计时/登录成功。截图 `frame_id` 表示图片更新；服务端另保留题目/布局 epoch，同一 epoch 的旧图片允许回传坐标，换题、裁剪或缩放变化则拒绝。题目身份只对配置的 DOM 资源属性做内存摘要，不返回资源 URL。所有短信选择器、题型文字、身份属性均集中于 `SMS_SELECTORS`。登录/二维码 DOM 已按 2026-10-31 公开页面校准；滑块尚未见到真实页面，其几何/身份规则仍待验证。跨域 iframe 或无可识别身份/几何信息的题目不能承诺自动处理，canvas 内换题也需要校准可观测的身份属性。
+
+此次校准没有输入手机号或发送短信。页头「登录」打开顶层弹窗，可能跳转 `/jingxuan`；验证码登录默认激活，不重复点击页签，国家区号保持 +86。手机号/验证码使用稳定 ID、name 和 placeholder；发码控件为 span，提交为 div，等待启用后点击；没有协议勾选框，仅有隐含同意文字。弹窗支持 `login-full-panel-` ID 前缀回退，扫码回退支持 `douyin_login_comp_scan_code` 与 `animate_qrcode_container` 内 `aria-label="二维码"` 的图片。忽略隐藏辅助 iframe，检测可见 verifycenter/verify iframe 或覆盖层并保留原 CAPTCHA 规则。短信输入仅接受 HTTPS `creator.douyin.com` / `www.douyin.com` 默认 TLS 端口；采集仍要求创作者中心页面。自动识别逻辑、限额和登录模式开关不变。
 
 离线验证（本次测试环境 Python 3.13；项目常规环境仍为 3.12）：
 
@@ -136,10 +138,12 @@ node test_sms_ui.cjs
 
 模型测试只用程序生成的合成缺口图。未安装可选依赖/模型时跳过；`INDEX_HUB_REQUIRE_SOLVER_TESTS=1` 将缺失视为失败。Qt 输入测试仅在 `INDEX_HUB_REQUIRE_BROWSER_TESTS=1` 时执行，保留真实 `isTrusted`、坐标、节奏与缩放失效断言。JS 摘要/矩形通过 JSON 字符串跨过 PySide 回调边界，避免绑定版本对对象/数组返回值的转换差异。
 
-`fake_sms_page.py` 的 aiohttp 页面仅由测试绑定 127.0.0.1：含二维码/短信页签、缩短倒计时、合成缺口图、错误码提示、假 sessionid，以及旋转、限频、二次验证开关。`test_sms_browser.py` 走真实管理员 HTTP、Unix 桥接、后台状态机和 Qt 按键/鼠标；实际模型识别截图后必须由页面确认通过。覆盖人工拖动、跨两个阶段累计 3 次自动提交后转人工、人工失败/旋转转远程桌面，并拒绝平滑但 `isTrusted=false` 的 JS 事件。完整成功流程及退出后扫描临时目录、Python/Qt/Chromium 日志、SQLite/WAL、数据库逻辑导出和所有 API 响应；同时检查输入框截图遮盖。浏览器使用临时无痕 profile；只有测试适配器映射本地来源以验证成功判定，生产 HTTPS/域名检查不变。
+`fake_sms_page.py` 的 aiohttp 页面仅由测试绑定 127.0.0.1：登录结构模拟此次公开 DOM，包括页头打开与 `/jingxuan` 跳转、并排二维码/默认短信面板、密码页签、span/div 控件和隐藏 verifycenter；另有缩短倒计时、合成缺口图、错误码提示、假 sessionid，以及旋转、限频、二次验证开关。`test_sms_browser.py` 走真实管理员 HTTP、Unix 桥接、后台状态机和 Qt 按键/鼠标；实际模型识别截图后必须由页面确认通过。覆盖人工拖动、跨两个阶段累计 3 次自动提交后转人工、人工失败/旋转转远程桌面，并拒绝平滑但 `isTrusted=false` 的 JS 事件。完整成功流程及退出后扫描临时目录、Python/Qt/Chromium 日志、SQLite/WAL、数据库逻辑导出和所有 API 响应；同时检查输入框截图遮盖。浏览器使用临时无痕 profile；只有测试适配器映射本地来源以验证成功判定，生产不接受回环来源。
 
-RSS 脚本默认测 ONNX 模型及一次合成识别；`--qt` 在同一进程加载 app/SMS/模型、完成 Qt 登录及泄露检查，再识别一次合成图。输出进程峰值和每 50ms 采样的含 Chromium 子进程 RSS 总和（共享页会重复计数，采样可能错过短峰，非 cgroup 内存值）。本地小页面的内存占用不能代表真实官方页面或部署服务峰值。没有真实登录、选择器校准或线上通过率结论。
+RSS 脚本默认测 ONNX 模型及一次合成识别；`--qt` 在同一进程加载 app/SMS/模型、完成 Qt 登录及泄露检查，再识别一次合成图。输出进程峰值和每 50ms 采样的含 Chromium 子进程 RSS 总和（共享页会重复计数，采样可能错过短峰，非 cgroup 内存值）。本地小页面的内存占用不能代表真实官方页面或部署服务峰值。内存测试不提供真实登录、滑块校准或线上通过率结论。
 
 2026-10-31 本地验证（Python 3.13、QtWebEngine 6.12.0、pywebview 6.2.1）：上述双标志全量 unittest **362 项通过、0 跳过**；两个 Node 脚本通过（SMS 12 项，report 47 条断言）。新增 6 项真实 Qt 短信回归，可信事件和泄露检查通过。独立 ONNX 识别进程峰值 **342.7 MiB**；app/SMS/模型加 Qt 完整流程进程峰值 **684.2 MiB**，含 Chromium 的采样进程树峰值 **897.8 MiB**，低于模板的 3072 MiB 硬上限。未部署、未发真实短信、未消耗取数额度。
 
 同日代码审查修复后：新增 13 项 Python 回归及 1 项短信 UI 回归，双标志全量 unittest **375 项通过、0 跳过**；SMS UI **13 项通过**，report **47 条断言通过**。覆盖非官方来源与输入中导航、登录验证后的短信码过期，以及 8 秒拖动期间的状态查询、取消、worker 轮询和浏览器互斥。仅使用合成数据及回环页面。
+
+同日公开 DOM 校准后：本次新增 7 项回归（3 项状态机、4 项真实 Qt），覆盖页头打开与跳转、默认短信页签、稳定选择器回退、span/div 禁用状态，以及隐藏/可见 verifycenter；原有完整 Qt 流程改用此次 DOM 结构。双标志全量 unittest **397 项通过、0 跳过**；report UI 通过，SMS UI **19 项通过**。测试仅使用合成数据与 127.0.0.1，未部署、未发真实短信，滑块仍未见到真实页面。
