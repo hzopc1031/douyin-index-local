@@ -15,7 +15,7 @@ Type=simple
 User=work-tencent-manager
 Group=work-tencent-manager
 WorkingDirectory=/srv/work-ecs-projects/douyin-index-local
-ExecStart=/usr/bin/dbus-run-session -- /bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-start.sh
+ExecStart=/bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-start.sh
 Restart=always
 RestartSec=10
 UMask=0077
@@ -25,7 +25,8 @@ ProtectHome=true
 ReadWritePaths=/srv/work-ecs-projects/douyin-index-local
 LimitCORE=0
 TasksMax=1024
-KillMode=control-group
+KillMode=mixed
+TimeoutStopSec=12
 [Install]
 WantedBy=multi-user.target
 UNIT

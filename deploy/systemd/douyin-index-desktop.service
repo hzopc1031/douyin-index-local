@@ -10,7 +10,7 @@ Type=simple
 User=douyin-svc
 Group=douyin-svc
 WorkingDirectory=/srv/work-ecs-projects/douyin-index-local
-ExecStart=/usr/bin/dbus-run-session -- /bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-desktop.sh
+ExecStart=/bin/bash /srv/work-ecs-projects/douyin-index-local/tencent-desktop.sh
 Restart=on-failure
 RestartSec=15
 RestartSteps=4
@@ -37,6 +37,9 @@ ProtectHome=true
 ReadWritePaths=/var/lib/douyin-index /var/log/douyin-index /srv/work-ecs-projects/douyin-index-local/.cloud-home /srv/work-ecs-projects/douyin-index-local/results
 LimitCORE=0
 TasksMax=1024
-KillMode=control-group
+# TERM only the supervisor, preserving Xvfb/D-Bus until Qt finishes shutdown.
+# The wrapper allows 6s for Qt, then 2s for helpers; KILL the cgroup as a fallback.
+KillMode=mixed
+TimeoutStopSec=12
 [Install]
 WantedBy=multi-user.target
