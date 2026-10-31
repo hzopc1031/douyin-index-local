@@ -102,3 +102,12 @@ class StderrAndAuthorizationTests(unittest.TestCase):
             with self.subTest(sample=sample):
                 self.assertNotIn(secret, redact(sample))
 
+
+
+class DiagnosticRedactionTests(unittest.TestCase):
+    def test_identifiers_and_opaque_tokens(self):
+        from hub_logging import redact
+        line = 'QR login finished state=verification_required stage=close accepted=3'
+        self.assertEqual(redact(line), line)
+        for token in ('R8cX7pQ2mN9vK4sT6bH1jF5dW0zL3uYe', 'QWxhZGRpbjpvcGVuIHNlc2FtZVhZWg==', 'a=R8cX7pQ2mN9vK4sT6bH1jF5dW0zL3u', 'sessionid=xyz', 'A'*24):
+            self.assertIn('***', redact(token))
