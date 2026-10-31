@@ -357,7 +357,45 @@ class QtLoginDriver:
         QApplication.sendEvent(target, QMouseEvent(event_type, point, target.mapToGlobal(point),
                                                   button, buttons, Qt.NoModifier))
 
+    def _prepare_input(self, *, cancel=None):
+        from PySide6.QtCore import Qt
+
+        def focus():
+            window = self._view.window()
+            window.raise_()
+            window.activateWindow()
+            (self._view.focusProxy() or self._view).setFocus(Qt.OtherFocusReason)
+
+        def ready():
+            window = self._view.window()
+            handle = window.windowHandle()
+            target = self._view.focusProxy() or self._view
+            page = self._view.page() if hasattr(self._view, 'page') else None
+            # WebEngine's loadFinished/DOM geometry and Qt exposure can precede
+            # the first Chromium frame metadata. Until contentsSize is populated,
+            # xcb can silently drop mouse presses even with the right receiver,
+            # coordinates and focus. Widget-only adapters have no such barrier.
+            if hasattr(page, 'contentsSize') and page.contentsSize().isEmpty():
+                return False
+            return (self._view.isVisible() and self._view.isEnabled()
+                    and handle is not None and handle.isExposed()
+                    and window.isActiveWindow() and target.hasFocus())
+
+        # sendEvent does not activate a native window like a real X11 click.
+        # Wait on the worker for both activation and WebEngine frame readiness,
+        # leaving the GUI free to process rendering, exposure and FocusIn. Do
+        # not probe readiness with a click or retry dropped input: either could
+        # submit a login action twice. Timeout/cancellation sends no input.
+        deadline = time.monotonic() + self.dispatcher.timeout
+        self.dispatcher.call(focus, cancel=cancel)
+        while not self.dispatcher.call(ready, cancel=cancel):
+            if time.monotonic() >= deadline:
+                raise DriverTimeout()
+            self._wait(.01, cancel)
+
     def click(self, x, y, *, cancel=None, frame=None):
+        self.dispatcher.call(lambda: self._point(x, y, frame), cancel=cancel)
+        self._prepare_input(cancel=cancel)
         def click():
             point = self._point(x, y, frame)
             self._mouse('press', point)
@@ -390,6 +428,13 @@ class QtLoginDriver:
             replay['error'] = error
             done.set()
         def start():
+            # Rendering/activation may have taken time after convert(). Reject
+            # a changed transform or bounds before pressing, not on the first
+            # timer tick after the press has already reached the page.
+            if self._view.zoomFactor() != zoom or self._view.devicePixelRatioF() != dpr:
+                raise DriverError('stale_frame')
+            for x, y, _ in points:
+                self._point(x, y, frame)
             # One GUI-owned timer, with a short cancellation heartbeat. The
             # worker waits for replay, never blocks the GUI with sleep/wait.
             timer = replay['timer'] = QTimer(self._view)
@@ -424,6 +469,7 @@ class QtLoginDriver:
             self._mouse('press', QPointF(*path[0][:2]))
             replay['pressed'] = True
             tick()
+        self._prepare_input(cancel=cancel)
         try:
             self.dispatcher.call(start, cancel=cancel)
             if not done.wait(points[-1][2]/1000+1):
@@ -450,6 +496,7 @@ class QtLoginDriver:
             for kind in (QEvent.KeyPress, QEvent.KeyRelease):
                 QApplication.sendEvent(target, QKeyEvent(kind, keycode, modifiers, value))
         try:
+            self._prepare_input(cancel=cancel)
             if clear:
                 self.dispatcher.call(lambda: key(Qt.Key_A, modifiers=Qt.ControlModifier), cancel=cancel)
                 self.dispatcher.call(lambda: key(Qt.Key_Backspace), cancel=cancel)

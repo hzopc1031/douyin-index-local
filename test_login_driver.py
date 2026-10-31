@@ -270,6 +270,92 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(events[-1][0], QEvent.MouseButtonRelease)
         self.assertTrue(all(on_gui for _, on_gui in events))
 
+    def test_input_waits_for_frame_metadata_and_stops_without_input(self):
+        from PySide6.QtCore import QEvent, QSizeF, QTimer
+        from PySide6.QtWidgets import QWidget
+        from login_driver import QtLoginDriver
+
+        # A visible, focused native widget can precede WebEngine's first frame.
+        # Control that gap deterministically, including cancel/timeout, without
+        # relying on how fast the fixture browser happens to paint on this host.
+        for operation in ('click', 'drag', 'type_text'):
+            outcomes = ['ready', 'cancel', 'timeout']
+            if operation == 'drag':
+                outcomes += ['zoom', 'bounds']
+            for outcome in outcomes:
+                with self.subTest(operation=operation, outcome=outcome):
+                    events, errors, checked = [], [], []
+                    cancel = threading.Event()
+                    size = QSizeF()
+                    zoom = 1
+
+                    def settle():
+                        nonlocal size, zoom
+                        if outcome in ('ready', 'zoom', 'bounds'):
+                            size = QSizeF(400, 200)
+                            if outcome == 'zoom':
+                                zoom = 2
+                            elif outcome == 'bounds':
+                                view.resize(50, 100)
+                        elif outcome == 'cancel':
+                            cancel.set()
+
+                    class Page:
+                        def contentsSize(self):
+                            if not checked:
+                                checked.append(True)
+                                QTimer.singleShot(30, settle)
+                            return size
+
+                    page = Page()
+
+                    class View(QWidget):
+                        def zoomFactor(self):
+                            return zoom
+
+                        def page(self):
+                            return page
+
+                        def event(self, event):
+                            if event.type() in (QEvent.MouseButtonPress, QEvent.MouseMove,
+                                                QEvent.MouseButtonRelease, QEvent.KeyPress,
+                                                QEvent.KeyRelease):
+                                events.append((event.type(), not size.isEmpty()))
+                            return super().event(event)
+
+                    view = View()
+                    view.resize(400, 200)
+                    view.show()
+                    self.addCleanup(view.close)
+                    driver = QtLoginDriver(view, dispatcher=QtDispatcher(timeout=.3))
+                    args = {'click': (20, 20), 'drag': ([(20, 50, 0), (80, 50, 80)],),
+                            'type_text': ('246810',)}[operation]
+
+                    def work():
+                        try:
+                            getattr(driver, operation)(*args, cancel=cancel)
+                        except Exception as exc:
+                            errors.append(str(exc))
+
+                    try:
+                        worker = threading.Thread(target=work)
+                        worker.start()
+                        self.pump(worker)
+                        self.assertTrue(checked)
+                        expected_error = {'cancel': 'cancelled', 'timeout': 'driver_timeout',
+                                          'zoom': 'stale_frame', 'bounds': 'out_of_bounds'}.get(outcome)
+                        self.assertEqual(errors, [expected_error] if expected_error else [])
+                        if outcome == 'ready':
+                            self.assertTrue(events)
+                            self.assertTrue(all(ready for _, ready in events))
+                        else:
+                            # Becoming ready after failure must not replay input.
+                            size = QSizeF(400, 200)
+                            self.app.processEvents()
+                            self.assertEqual(events, [])
+                    finally:
+                        view.close()
+
 
 @unittest.skipUnless(os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1', 'Qt tests require explicit Xvfb opt-in')
 class QtInputTests(unittest.TestCase):
@@ -305,7 +391,7 @@ class QtInputTests(unittest.TestCase):
           #captcha_container {position:absolute;left:40px;top:140px;width:240px;height:80px;background:#89a;}
           </style></head><body><input type="tel"><div id="captcha_container"></div>
           <script>window.events=[];
-          for (const type of ['pointerdown','pointermove','pointerup','input'])
+          for (const type of ['pointerdown','pointermove','pointerup','keydown','keyup','input'])
             document.addEventListener(type, e => events.push({type, trusted:e.isTrusted,x:e.clientX,y:e.clientY,t:performance.now()}));
           </script></body></html>''', QUrl('http://127.0.0.1/fixture'))
         deadline = time.monotonic()+10
@@ -347,6 +433,7 @@ class QtInputTests(unittest.TestCase):
         rect = self.work(lambda: self.driver.element_rect('verification'))
         self.assertEqual(rect, dict(x=40, y=140, width=240, height=80))
         self.work(lambda: self.driver.click(80, 55))
+        self.assertTrue(self.js("document.activeElement === document.querySelector('input')"))
         self.work(lambda: self.driver.type_text('13800138000'))
         self.assertTrue(self.js("document.querySelector('input').value === '13800138000'"))
         self.work(lambda: self.driver.type_text('246810'))
@@ -367,6 +454,14 @@ class QtInputTests(unittest.TestCase):
         events = self.js('window.events')
         pointer = [e for e in events if e['type'].startswith('pointer')]
         self.assertTrue(all(e['trusted'] for e in events))
+        # Exactly one click and one drag; readiness never probes/retries clicks.
+        self.assertEqual(sum(e['type'] == 'pointerdown' for e in pointer), 2)
+        self.assertEqual(sum(e['type'] == 'pointerup' for e in pointer), 2)
+        self.assertAlmostEqual(pointer[0]['x'], 80, delta=1)
+        self.assertAlmostEqual(pointer[0]['y'], 55, delta=1)
+        # 17 digits plus select-all/backspace for each of the two replacements.
+        self.assertEqual(sum(e['type'] == 'keydown' for e in events), 21)
+        self.assertEqual(sum(e['type'] == 'keyup' for e in events), 21)
         self.assertEqual(pointer[-1]['type'], 'pointerup')
         drag = pointer[pointer.index(next(e for e in pointer if e['type'] == 'pointerdown' and e['y'] > 100)):]
         self.assertAlmostEqual(drag[0]['x'], 50, delta=1)
