@@ -1,8 +1,7 @@
 """Memory-only SMS login worker for the existing official browser window.
 
-No HTTP/bridge wiring or default-mode switch lives here (plan items 3–5).
-Later app wiring must pass Api._lock, Api._login_coordinator and an on_success
-callback clearing qr.holder. Short methods only admit work/read snapshots;
+App wiring passes Api._lock, Api._login_coordinator and an on_success callback
+clearing qr.holder. Short methods only admit work/read snapshots;
 pointer waits at most 12s. Secrets never enter messages, reprs or selectors.
 Python strings cannot be securely erased; references are dropped on completion.
 """
@@ -66,6 +65,54 @@ _MESSAGES = {
 TERMINAL = frozenset(('already_logged_in', 'succeeded', 'rate_limited', 'failed', 'timeout', 'cancelled'))
 VERIFY = frozenset(('verify_send', 'verify_login'))
 SHANGHAI = ZoneInfo('Asia/Shanghai')
+FRAME_BASE64_LIMIT = 300 * 1024
+FRAME_PNG_LIMIT = FRAME_BASE64_LIMIT // 4 * 3
+
+
+def validate_sms_payload(action, body):
+    """Shared strict bridge/HTTP schemas; never include input in errors."""
+    fields = {'start': {'phone'}, 'code': {'code'}, 'text': {'text'},
+              'pointer': {'frame', 'kind', 'points'}, 'frame': {'frame'},
+              'resend': set(), 'cancel': set(), 'status': set()}
+    if action not in fields or type(body) is not dict or set(body) != fields[action]:
+        raise SmsLoginError('invalid_payload')
+    patterns = {'start': ('phone', r'1[3-9][0-9]{9}'),
+                'code': ('code', r'[0-9]{4,8}'), 'text': ('text', r'[A-Za-z0-9]{1,8}')}
+    if action in patterns:
+        key, pattern = patterns[action]
+        if not isinstance(body[key], str) or re.fullmatch(pattern, body[key]) is None:
+            raise SmsLoginError('invalid_' + key)
+    if action in ('frame', 'pointer'):
+        if type(body['frame']) is not int or not 1 <= body['frame'] <= 2**53-1:
+            raise SmsLoginError('invalid_frame')
+    if action == 'pointer':
+        try:
+            validate_points(body['kind'], body['points'])
+        except DriverError as exc:
+            raise SmsLoginError(exc.code) from None
+    return body
+
+
+def public_sms_status(value):
+    """Allowlist snapshot fields at the transport boundary, including copy."""
+    state = value.get('state')
+    if state not in _MESSAGES:
+        raise SmsLoginError('browser_unavailable')
+    mode = value.get('verification_mode') if state in VERIFY else None
+    if state in VERIFY and mode not in ('auto', 'manual', 'desktop'):
+        raise SmsLoginError('browser_unavailable')
+    phone = value.get('phone', '')
+    if not isinstance(phone, str) or (phone and re.fullmatch(r'1[3-9][0-9]\*{4}[0-9]{4}', phone) is None):
+        raise SmsLoginError('browser_unavailable')
+    message = {'auto': '自动验证中…', 'manual': _MESSAGES[state],
+               'desktop': '请改用远程桌面完成验证'}.get(mode, _MESSAGES[state])
+    result = dict(state=state, phone=phone, verification_mode=mode, message=message)
+    for key in ('resend_in', 'attempts_left', 'frame_id', 'challenge_epoch', 'frame_width', 'frame_height'):
+        number = value.get(key, 0)
+        if type(number) is not int or not 0 <= number <= 2**53-1:
+            raise SmsLoginError('browser_unavailable')
+        result[key] = number
+    return result
 
 
 class SmsLoginError(ValueError):
@@ -180,7 +227,11 @@ class SmsLoginSession:
         return dict(state=self.state, phone=self.masked_phone,
                     resend_in=max(0, math.ceil(self.resend_at-now)) if self.state not in TERMINAL else 0,
                     attempts_left=max(0, 3-self.submissions) if self.nonce and self.state not in TERMINAL else 0,
-                    frame_id=self.frame_id if self.frame else 0, message=message)
+                    frame_id=self.frame_id if self.frame else 0, message=message,
+                    challenge_epoch=self.challenge_epoch,
+                    verification_mode=self.verification_mode if self.state in VERIFY else None,
+                    frame_width=self.frame.metadata.width if self.frame else 0,
+                    frame_height=self.frame.metadata.height if self.frame else 0)
 
 
 class SmsLoginManager:
@@ -209,7 +260,8 @@ class SmsLoginManager:
         if self._session:
             return self._session.snapshot(self._clock())
         return dict(state='idle', phone='', resend_in=0, attempts_left=0,
-                    frame_id=0, message=_MESSAGES['idle'])
+                    frame_id=0, challenge_epoch=0, verification_mode=None,
+                    frame_width=0, frame_height=0, message=_MESSAGES['idle'])
 
     def start(self, phone):
         if not isinstance(phone, str) or re.fullmatch(r'1[3-9][0-9]{9}', phone) is None:
@@ -220,6 +272,9 @@ class SmsLoginManager:
                 raise LoginBusy()
             if now - self._last_start < 10:
                 raise SmsLoginError('sms_rate_limited')
+            # Reject known local send limits during admission, so transports
+            # return 429 instead of accepting work that will immediately fail.
+            self._send_allowed(now)
             lease = self.coordinator.acquire(self._fetch_lock)
             session = SmsLoginSession(phone, now)
             session.lease = lease
@@ -393,7 +448,7 @@ class SmsLoginManager:
                 raise SmsLoginError('stale_frame')
             frame = session.frame
             # Metadata (crop origin, zoom, DPR) never leaves this process.
-            return dict(frame_id=session.frame_id, width=frame.metadata.width,
+            return dict(frame_id=session.frame_id, challenge_epoch=session.challenge_epoch, width=frame.metadata.width,
                         height=frame.metadata.height, png=frame.png)
 
     def refresh_frame(self):
@@ -716,7 +771,7 @@ class SmsLoginManager:
             rect = dict(x=rect['x']-16, y=rect['y']-16,
                         width=rect['width']+32, height=rect['height']+32)
         frame = self.driver.grab(rect)
-        if len(frame.png) > 300*1024:
+        if len(frame.png) > FRAME_PNG_LIMIT:
             raise DriverError('frame_too_large')
         # Picture versions drive refresh; only a challenge/transform change
         # invalidates coordinates. Do not reject gestures because of animation.
@@ -727,6 +782,8 @@ class SmsLoginManager:
             if digest != session.frame_hash:
                 self._frame_version += 1
                 if session.frame is None or session.frame.metadata != frame.metadata:
+                    if session.frame is not None:
+                        session.challenge_epoch += 1
                     session.frame_floor = self._frame_version
                 session.frame_id = self._frame_version
                 session.frame, session.frame_hash = frame, digest

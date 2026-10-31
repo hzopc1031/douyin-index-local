@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 umask 077
+export INDEX_HUB_LOGIN_MODE="${INDEX_HUB_LOGIN_MODE:-sms}"
 cd "$(dirname "${BASH_SOURCE[0]}")"
 STATE_DIR="${INDEX_HUB_STATE_DIR:-$PWD/.cloud-state}"
 LOG_DIR="${INDEX_HUB_LOG_DIR:-$PWD/logs}"

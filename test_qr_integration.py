@@ -20,7 +20,7 @@ class WiringTests(unittest.TestCase):
     def test_mode(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(qr_login.login_mode(), 'desktop')
-            for value in ('desktop', 'qr'):
+            for value in ('desktop', 'qr', 'sms'):
                 os.environ['INDEX_HUB_LOGIN_MODE'] = value
                 self.assertEqual(qr_login.login_mode(), value)
             os.environ['INDEX_HUB_LOGIN_MODE'] = 'invalid'

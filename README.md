@@ -110,7 +110,7 @@ dist/DouyinIndexLocal.app/Contents/MacOS/DouyinIndexLocal --connection-check
 
 云端 Hub 默认持久化浏览器登录资料到服务账号所有的 0700 目录：`INDEX_HUB_PROFILE_DIR`，默认 `INDEX_HUB_STATE_DIR/browser-profiles`。Cookie 以近似明文形式保存在该目录（无系统钥匙串），任何能以 douyin-svc 或 root 身份读盘的人都能拿到登录态；若目录不归 douyin-svc 所有或是符号链接，app.py 会拒绝启动。禁止提交、上传或打印这些资料。`INDEX_HUB_PERSIST_LOGIN=0` 恢复无痕模式；普通桌面启动仍使用无痕模式。远程桌面先由管理员携带 `X-Hub-Request` 调用 `POST /api/v1/desktop/ticket`，取得 60 秒内单次有效的 WebSocket 票据（仅内存保存其 SHA-256）。
 
-短信方案 B 的底层组件在 `login_driver.py`、`sms_login.py`：后台状态机、Qt 主线程截图与按键、QTimer 鼠标回放、短信/扫码/取数互斥。手机号、短信码只在内存中处理，截图遮盖输入框，快照只显示脱敏手机号。此次只实现方案第 12 节的第 1、2 项及本地滑块扩展；短信桥接、网关、网页卡片和默认 `sms` 切换仍待后续接线。8443 不变，现有 desktop/qr 行为不变。
+短信方案 B 的底层组件在 `login_driver.py`、`sms_login.py`：后台状态机、Qt 主线程截图与按键、QTimer 鼠标回放、短信/扫码/取数互斥。手机号、短信码只在内存中处理，截图遮盖输入框，快照只显示脱敏手机号。已接通短信桥接、管理员网关与手机号登录卡片（方案第 12 节第 1–5 项及本地滑块扩展）。Hub 启动脚本和部署模板默认 `sms`；两服务均可设 `INDEX_HUB_LOGIN_MODE=qr` 或 `desktop` 切回。直接运行普通桌面仍默认 desktop，8443 不变。短信期间暂停采集，成功、失败、取消或超时后仍需手动恢复；没有自动重试。接口与状态字段见 [HUB_API.md](HUB_API.md)。
 
 可选本地识别器使用 MIT 的 `captcha-recognizer==1.0.2`（依赖 ONNX Runtime），只处理明确识别为普通缺口滑块且几何信息完整的题目。安装 `requirements-solver.txt`；模型随该版本 wheel 提供，无运行时下载，也不把模型加入仓库。依赖/模型按需加载，禁用 ORT 遥测，不调用第三方服务。每轮最多自动提交 3 次，两阶段共用计数；只在新题身份稳定后尝试，不因动画重试。低置信度、异常、拒绝或页面未确认通过均退回人工截图，人工拖动仍未通过则提示远程桌面；旋转题直接提示远程桌面。出现平台限频、账号异常或拒绝访问立即停止。
 
@@ -121,9 +121,10 @@ dist/DouyinIndexLocal.app/Contents/MacOS/DouyinIndexLocal --connection-check
 ```sh
 /tmp/dyvenv/bin/python -m pip install -r requirements-solver.txt
 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 /tmp/dyvenv/bin/python -m unittest -v test_slider_solver test_sms_login
-INDEX_HUB_REQUIRE_BROWSER_TESTS=1 xvfb-run -a /tmp/dyvenv/bin/python -m unittest discover -p 'test_*.py'
+INDEX_HUB_REQUIRE_BROWSER_TESTS=1 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 xvfb-run -a /tmp/dyvenv/bin/python -m unittest discover -p 'test_*.py'
 /tmp/dyvenv/bin/python measure_solver_rss.py
 node test_report_ui.cjs
+node test_sms_ui.cjs
 ```
 
 模型测试只用程序生成的合成缺口图。未安装可选依赖/模型时跳过；`INDEX_HUB_REQUIRE_SOLVER_TESTS=1` 将缺失视为失败。Qt 输入测试仅在 `INDEX_HUB_REQUIRE_BROWSER_TESTS=1` 时执行，保留真实 `isTrusted`、坐标、节奏与缩放失效断言。JS 摘要/矩形通过 JSON 字符串跨过 PySide 回调边界，避免绑定版本对对象/数组返回值的转换差异。RSS 脚本打印加载 ONNX 模型并实际识别合成图片后的进程峰值；它不包括 Qt/Chromium，判断 3G 服务上限仍需加上部署时浏览器进程组的内存。没有真实登录、选择器校准或线上通过率结论。

@@ -155,7 +155,7 @@ worker 保护状态码：
 
 ## 扫码登录（实验）
 
-默认仍为远程桌面登录。设置 `INDEX_HUB_LOGIN_MODE=qr` 后，管理员可使用：
+Hub 部署默认短信登录；直接运行普通桌面仍默认 desktop。两服务均设置 `INDEX_HUB_LOGIN_MODE=qr` 后，管理员可使用：
 
 | 接口 | 用途 |
 | --- | --- |
@@ -169,3 +169,30 @@ worker 保护状态码：
 交接后的会话只在 `app.py` 进程内存中，不写状态文件和日志。扫码 Chromium 默认使用服务账号所有的 0700 持久 profile，重启后保留登录资料；`INDEX_HUB_PERSIST_LOGIN=0` 时恢复 Playwright 临时 profile（PrivateTmp 下，正常关闭删除，强杀残留直到单元停止）。Chromium 沙箱由 Playwright 默认关闭（`--no-sandbox`），代码显式设置 `chromium_sandbox=False`；开启需另做 AppArmor/userns 配置。
 
 云端 Hub 默认持久化浏览器登录资料到服务账号所有的 0700 目录：`INDEX_HUB_PROFILE_DIR`，默认 `INDEX_HUB_STATE_DIR/browser-profiles`。Cookie 以近似明文形式保存在该目录（无系统钥匙串），任何能以 douyin-svc 或 root 身份读盘的人都能拿到登录态；若目录不归 douyin-svc 所有或是符号链接，app.py 会拒绝启动。禁止提交、上传或打印这些资料。`INDEX_HUB_PERSIST_LOGIN=0` 恢复无痕模式；普通桌面启动仍使用无痕模式。远程桌面先由管理员携带 `X-Hub-Request` 调用 `POST /api/v1/desktop/ticket`，取得 60 秒内单次有效的 WebSocket 票据（仅内存保存其 SHA-256）。
+
+
+## 手机号登录（实验，选择器待校准）
+
+Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `desktop` / `qr` 保留原有入口。端口仍为 8443。短信只操作 app 内现有官方窗口，不另开 profile。全部接口仅接受管理员 Basic 认证；API Key 返回 403，缺少认证返回 401，远程桌面票据不能访问本组接口。POST 必须有 `X-Hub-Request: 1`，提供 Origin 时必须与 HTTPS 网关同源。JSON 不允许额外字段、重复字段或非有限数值，所有响应 `Cache-Control: no-store`。
+
+| 方法 / 路径（前缀 `/api/v1/login/sms`） | 请求 | 响应 |
+| --- | --- | --- |
+| GET 空路径 | 无 | 状态快照及 browser；进行中为 login_in_progress，结束后读取浏览器状态 |
+| POST `/start` | `{"phone":"13800138000"}`（合成示例） | 立即返回，后台开始登录 |
+| POST `/code` | `{"code":"246810"}`（合成示例） | 立即返回，后台通过按键输入 |
+| POST `/resend`、`/cancel` | `{}` | 重发 / 取消后的快照 |
+| GET `/frame?v=N` | 唯一正整数版本号 | PNG；图片版本不一致返回 409 |
+| POST `/pointer` | `{"frame":N,"kind":"tap或drag","points":[[u,v,t],…]}` | 人工回放后快照，最多等待 12 秒 |
+| POST `/text` | `{"text":"A1"}`（合成示例） | 向截图中当前焦点输入，最多 8 位字母或数字 |
+
+快照只允许 state、phone（如 `138****8000`）、resend_in、attempts_left、message、frame_id、frame_width、frame_height、challenge_epoch、verification_mode。验证码从不回显；裁剪原点、缩放元数据、DOM 题目身份摘要和 nonce 不离开 app。`verification_mode` 为 `auto`（自动验证中）、`manual`（人工截图）或 `desktop`（需远程桌面），非验证状态为 null。自动求解行为沿用已有本地普通缺口滑块实现，不新增识别方式。
+
+`frame_id` 随图片变化增加；`challenge_epoch` 只在题目或布局/缩放变化时增加。GET 图片必须匹配当前 frame_id；人工输入接受同 epoch 内较旧的 frame_id，动画本身不会触发 stale_frame。前端在手势期间固定当前图片；换题后取消手势。轨迹使用 0–1 相对坐标和毫秒原始节奏，采样至少 16ms、最多 200 点、最长 10 秒。Qt 主线程执行截图/输入，派发超时 5 秒；手机号与验证码只通过按键输入。截图编码后最多 300KB。
+
+400：invalid_payload / invalid_phone / invalid_code / invalid_text / invalid_frame / invalid_pointer / out_of_bounds。409：login_busy / busy_fetching / sms_disabled / login_not_active / code_consumed / stale_frame / not_in_verification / verification_busy / remote_desktop_required / frame_not_ready。429：resend_too_early / sms_rate_limited（本服务保护），以及原网关认证和请求限频。503：桥接不可用、回放超时或截图不可用。不设手机号白名单。
+
+每轮最多 10 分钟；code_sent 无提交 5 分钟超时。start 间隔至少 10 秒；发码等待至少 60 秒倒计时，每小时最多 3 次、每上海自然日最多 6 次，只记次数不记号码。pointer 每秒最多 3 次，code/text 各每轮最多 5 次；每次发码最多提交 3 次，nonce 和 code_consumed 拒绝重复/旧代提交。管理员短信 status/frame 读取共用独立 180 次/分钟预算，其他请求仍为原 120 次/分钟，避免每秒状态/截图轮询占满取消和提交额度。
+
+开始前写 `paused={"code":"login_in_progress"}`，worker 在网页关闭后也会检查登录结果；结束转为 `manual_resume_required`，保持暂停直到管理员恢复，不重试失败任务。整个登录持有取数锁，与扫码互斥，成功清空旧 QR holder。桥接返回超时属于不确定结果，保持暂停直至状态明确。
+
+手机号、验证码和截图不进日志、SQLite、结果或页面 storage；仅存在内存中，表单提交立即清空。日志兜底遮盖手机号及 phone/mobile/sms/otp/verify_code 等赋值，SMS 异常不格式化原文。Python 字符串不能保证清零；官方页面仍可能自行把手机号写进已授权的持久 profile。所有选择器集中于 `SMS_SELECTORS`，尚需用户参与真实页面校准；本次未作真实登录或取数验证。

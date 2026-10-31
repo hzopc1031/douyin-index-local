@@ -9,6 +9,7 @@ import json
 import math
 import logging
 import os
+import re
 import socket
 import time
 from pathlib import Path
@@ -18,6 +19,8 @@ from aiohttp import web
 import hub_bridge
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
+from sms_login import (FRAME_BASE64_LIMIT, SmsLoginError, TERMINAL, public_sms_status,
+                       validate_sms_payload)
 
 logger = logging.getLogger('index_hub')
 
@@ -48,6 +51,33 @@ PARAMETER_ERRORS = {'invalid_query', 'invalid_dates', 'invalid_keywords', 'inval
 SAFE_ERRORS.update({code: '参数错误，请检查请求' for code in PARAMETER_ERRORS})
 SAFE_ERRORS['busy_requeue_exhausted'] = '浏览器长时间被占用，已放回队列多次仍未执行，未自动重试'
 PAUSING = {'browser_unavailable', 'authentication_required', 'verification_required', 'rate_limited', 'access_denied'}
+SMS_ERRORS = {
+    'invalid_payload': (400, '请求字段无效。'), 'invalid_phone': (400, '请输入有效的手机号。'),
+    'invalid_code': (400, '请输入 4 至 8 位数字验证码。'), 'invalid_text': (400, '仅允许 1 至 8 位数字或字母。'),
+    'invalid_frame': (400, '截图版本无效。'), 'invalid_pointer': (400, '点击或拖动轨迹无效。'),
+    'out_of_bounds': (400, '操作超出截图范围。'),
+    'login_busy': (409, '登录正在进行，请先取消或等待结束。'),
+    'busy_fetching': (409, '正在采集，请等待结束后登录。'),
+    'sms_disabled': (409, '未启用短信登录。'), 'login_not_active': (409, '请先开始短信登录。'),
+    'code_consumed': (409, '此验证码已提交或失效，请等待结果或重新发码。'),
+    'stale_frame': (409, '画面已更新，请重新操作。'),
+    'not_in_verification': (409, '当前不需要截图验证。'),
+    'verification_busy': (409, '自动验证中，请稍候。'),
+    'remote_desktop_required': (409, '请改用远程桌面完成验证。'),
+    'frame_not_ready': (409, '截图尚未就绪，请稍后刷新。'),
+    'resend_too_early': (429, '请等待倒计时结束后重发。'),
+    'sms_rate_limited': (429, '已达到本服务操作频率限制，请稍后再试。'),
+    'browser_unavailable': (503, '浏览器未就绪，请检查远程桌面。'),
+    'pointer_timeout': (503, '回放超时，请检查登录状态。'),
+    'frame_too_large': (503, '截图过大，请改用远程桌面。'),
+    'login_failed': (503, '登录未能启动，请改用远程桌面。'),
+}
+
+
+def sms_error(code):
+    code = code if isinstance(code, str) and code in SMS_ERRORS else 'browser_unavailable'
+    status, message = SMS_ERRORS[code]
+    return HubError(code, message, status)
 
 
 class Hub:
@@ -71,8 +101,55 @@ class Hub:
             from hub_bridge import call_bridge
             bridge = call_bridge
         self._qr_last_start = None
+        self._sms_lock = asyncio.Lock()
         self.bridge = bridge
         self.worker_task = None
+
+    def _sms_pause(self, snapshot):
+        paused = (self.store.get('paused') or {}).get('code')
+        if snapshot['state'] not in TERMINAL | {'idle'}:
+            if paused != 'login_in_progress':
+                self.store.set('paused', {'code': 'login_in_progress'})
+        elif paused == 'login_in_progress':
+            self.store.set('paused', {'code': 'manual_resume_required'})
+
+    async def sms_call(self, action, body):
+        try:
+            result = await asyncio.to_thread(self.bridge, 'sms_' + action, body,
+                                             12 if action == 'pointer' else 2)
+            if not result.get('ok'):
+                raise sms_error(result.get('code'))
+            if action == 'frame':
+                encoded = result['png_base64']
+                if not isinstance(encoded, str) or len(encoded) > FRAME_BASE64_LIMIT:
+                    raise ValueError
+                png = base64.b64decode(encoded, validate=True)
+                if result['frame_id'] != body['frame']:
+                    raise sms_error('stale_frame')
+                if not png.startswith(b'\x89PNG\r\n\x1a\n'):
+                    raise ValueError
+                return png
+            return public_sms_status(result)
+        except HubError:
+            raise
+        except Exception:
+            # No exception text or request payload may enter logs/responses.
+            raise sms_error('browser_unavailable') from None
+
+    async def sync_sms_pause(self):
+        async with self._sms_lock:
+            if (self.store.get('paused') or {}).get('code') == 'login_in_progress':
+                await self._check_sms_pause()
+
+    async def _check_sms_pause(self):
+        try:
+            self._sms_pause(await self.sms_call('status', {}))
+        except HubError as exc:
+            # Both services may have restarted in the supported QR/desktop
+            # fallback mode while SQLite still carries the old SMS pause.
+            if exc.code != 'sms_disabled' or login_mode() == 'sms':
+                raise
+            self._sms_pause({'state': 'idle'})
 
     async def browser_status(self, *, details=False):
         from browser_login import LOGIN_STATES
@@ -124,6 +201,9 @@ class Hub:
             return True
         # Socket readiness checking never calls the upstream. No hidden login request.
         state = await self.browser_status()
+        # A login may have been admitted while the status preflight awaited.
+        if self.store.get('paused'):
+            return False
         if state != 'browser_ready':
             code = 'authentication_required' if state == 'login_required' else 'browser_unavailable'
             if code == 'browser_unavailable':
@@ -210,6 +290,7 @@ class Hub:
     async def worker(self):
         while True:
             try:
+                await self.sync_sms_pause()
                 await self.run_one()
             except asyncio.CancelledError:
                 raise
@@ -302,10 +383,18 @@ def openapi():
                          ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
         paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
                               'responses': {'200': {'description': '成功'}, '403': error, '409': error, '429': error, '503': error}}}
+    for action in ('status', 'frame', 'start', 'code', 'resend', 'pointer', 'text', 'cancel'):
+        path = '/api/v1/login/sms' + ('' if action == 'status' else '/' + action)
+        method = 'get' if action in ('status', 'frame') else 'post'
+        paths[path] = {method: {'summary': '管理员短信登录（仅 Basic；POST 需 X-Hub-Request 和同源校验）',
+            'security': [{'BasicAuth': []}],
+            'responses': {'200': {'description': '状态快照或 PNG；no-store'},
+                          **{str(code): error for code in (400, 401, 403, 409, 429, 503)}}}}
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
              'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
-            'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'}},
+            'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'},
+                                               'BasicAuth': {'type': 'http', 'scheme': 'basic'}},
              'schemas': {'Query': {'type': 'object', 'additionalProperties': False, 'required': ['keywords', 'end_date'],
               'properties': {'platform': {'type': 'string', 'enum': ['douyin'], 'default': 'douyin'},
                'keywords': {'type': 'array', 'minItems': 1, 'maxItems': 5, 'uniqueItems': True,
@@ -320,6 +409,51 @@ def mount(app, hub):
     async def index(request):
         require(request, admin=True)
         return web.FileResponse(hub.root / 'hub.html')
+
+    async def sms_login(request):
+        require(request, admin=True)
+        action = request.match_info.get('action', 'status')
+        if request.method != 'POST' and request.can_read_body:
+            raise sms_error('invalid_payload')
+        if request.query and (action != 'frame' or set(request.query) != {'v'}
+                              or len(request.query.getall('v')) != 1):
+            raise sms_error('invalid_payload')
+        if action == 'frame':
+            version = request.query.get('v', '')
+            if re.fullmatch(r'[0-9]{1,16}', version) is None:
+                raise sms_error('invalid_frame')
+            body = {'frame': int(version)}
+        else:
+            body = await read_json(request) if request.method == 'POST' else {}
+        try:
+            validate_sms_payload(action, body)
+        except SmsLoginError as exc:
+            raise sms_error(exc.code) from None
+        if action == 'start':
+            async with hub._sms_lock:
+                previous = s.get('paused')
+                s.set('paused', {'code': 'login_in_progress'})
+                try:
+                    result = await hub.sms_call(action, body)
+                except HubError as exc:
+                    # A timeout is ambiguous: keep paused until status resolves
+                    # it. Known admission failures did not start a new round.
+                    if exc.status != 503 and exc.code != 'login_busy':
+                        s.set('paused', previous)
+                    raise
+                hub._sms_pause(result)
+        else:
+            result = await hub.sms_call(action, body)
+            if action != 'frame':
+                # Re-read under the lock: an older terminal response must not
+                # clear a new start's login pause.
+                await hub.sync_sms_pause()
+        if action == 'frame':
+            return web.Response(body=result, content_type='image/png', headers={'Cache-Control': 'no-store'})
+        if action == 'status':
+            result['browser'] = (await hub.browser_status() if result['state'] in TERMINAL | {'idle'}
+                                 else 'login_in_progress')
+        return reply({'ok': True, **result, 'login_mode': login_mode()})
 
     async def qr_login(request):
         require(request, admin=True)
@@ -472,12 +606,17 @@ def mount(app, hub):
 
     async def resume(request):
         require(request, admin=True)
-        state = await hub.browser_status()
-        if state != 'browser_ready':
-            raise HubError('browser_not_ready', '请先通过远程桌面完成登录或验证。', 409)
-        s.set('paused', None)
-        s.set('consecutive_bridge_timeouts', 0)
-        s.set('worker_error', None)
+        async with hub._sms_lock:
+            if login_mode() == 'sms' or (s.get('paused') or {}).get('code') == 'login_in_progress':
+                await hub._check_sms_pause()
+                if (s.get('paused') or {}).get('code') == 'login_in_progress':
+                    raise HubError('login_in_progress', '登录仍在进行，请等待结束后恢复采集。', 409)
+            state = await hub.browser_status()
+            if state != 'browser_ready':
+                raise HubError('browser_not_ready', '请先通过远程桌面完成登录或验证。', 409)
+            s.set('paused', None)
+            s.set('consecutive_bridge_timeouts', 0)
+            s.set('worker_error', None)
         return reply({'ok': True, 'note': '已恢复。保留原有冷却间隔与每日上限；失败任务不会重试。'})
 
     async def schema(request):
@@ -485,6 +624,9 @@ def mount(app, hub):
         return reply(openapi())
 
     app.router.add_get('/', index)
+    app.router.add_get('/api/v1/login/sms', sms_login)
+    app.router.add_get('/api/v1/login/sms/{action:frame}', sms_login)
+    app.router.add_post('/api/v1/login/sms/{action:start|code|resend|pointer|text|cancel}', sms_login)
     app.router.add_get('/api/v1/login/qr', qr_login)
     app.router.add_get('/api/v1/login/qr/{action:image}', qr_login)
     app.router.add_post('/api/v1/login/qr/{action:start|cancel}', qr_login)

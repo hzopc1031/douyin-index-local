@@ -9,7 +9,7 @@ INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
 
 ### 实验扫码登录
 
-`INDEX_HUB_LOGIN_MODE=desktop`（默认）沿用远程桌面登录；设为 `qr` 启用接入页扫码卡片与管理员扫码接口。其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
+Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`，显示手机号登录卡片并隐藏扫码卡片；设为 `desktop` 沿用远程桌面登录，设为 `qr` 启用接入页扫码卡片与管理员扫码接口。两服务的设置必须一致。直接运行 Python 的默认值仍是 desktop，其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
 
 `INDEX_HUB_QR_TIMEOUT` 设置每轮扫码超时秒数，默认 180；无效、非正或非有限值使用默认值。交接后的会话只保存在 `app.py` 进程内存中，不写状态文件和日志，进程重启后内存交接会话清空，可从持久浏览器资料重新登录。此原型尚需真实页面校准，不改变取数保护限制。
 
@@ -32,3 +32,5 @@ Hub 持久模式还安装 `webview_shutdown.py` 的 SIGTERM 处理：在 GUI 线
 Cookie 恢复还需要 `webview_cookies.py`：本机 Qt 6.12.0 在 GUI 线程调用 `loadAllCookies()` 也不重放磁盘 Cookie，pywebview 原始镜像重启后为空。生产 hook 因此在 Qt 打开 profile 前，通过 SQLite `mode=ro` 只读取两个允许域的 Cookie 来初始化内存镜像，随后用 QNetworkCookie 字段处理实时增删；`login_state` 和 Python 请求均使用此镜像。启动读取兼容已提交的 WAL，不创建副本或导出 Cookie。实测 schema 24 使用明文 value；加密值、损坏或无法读取时返回 `unknown`，不使用不完整会话。Qt 6.12.0 的相同会话 Cookie 覆盖会产生一对删除信号，已针对同一 GUI 批次合并，真实删除仍生效。详见 [HUB_API.md](../HUB_API.md)。
 
 本地 Qt 回归使用生产 profile hook、两窗口和 127.0.0.1 合成页面，两组各连续启动三次，覆盖普通退出及设置 Cookie 约 2 秒后 SIGTERM。每次均检查 HttpOnly 会话 `sessionid`、HttpOnly 持久 `sid_guard`、普通持久 Cookie 的来源及属性，并让生产 `_client()` 创建的 requests.Session 发往 fixture echo，确认全部发送；重启后 `login_state=cookie_present`，空 profile 为 `no_session_cookie`。另验证替换、删除、相同 Cookie 重设及 localStorage。loopback 放行仅通过显式测试参数启用，生产域名和 HTTPS 限制保持固定。本次未验证真实抖音登录或在线取数。外部 watchdog 限制每个进程树 1500 MB / 45 秒（低于 60 秒要求）；原始双 profile 缺陷的负对照默认不运行，可用 `INDEX_HUB_QT_NEGATIVE_CONTROL=1` 启用，限制 1500 MB / 20 秒。
+
+短信登录使用现有官方 Qt 窗口，持有取数锁，成功后清除旧扫码内存会话。所有 `SMS_SELECTORS` 仍未真实校准；本次只验证合成离线流程，不部署、不重启服务、不发真实短信。截图 PNG 经 base64 后最多 300KB，只在内存中中转。`verify_send` / `verify_login` 快照用 `verification_mode=auto|manual|desktop` 区分自动验证、人工截图和远程桌面。换题/布局 epoch 与图片版本分开；动画不会让同题坐标失效。登录结束转为 `manual_resume_required` 暂停，须手动恢复采集。

@@ -227,7 +227,7 @@ class StateTests(unittest.TestCase):
 
     def test_code_sent_idle_and_whole_round_deadlines(self):
         self.sent()
-        self.step(advance=299)
+        self.step(page(countdown=0), advance=299)
         self.state('code_sent')
         self.step(advance=1)
         self.state('timeout')
@@ -277,9 +277,11 @@ class StateTests(unittest.TestCase):
         self.step(page(countdown=120))
         self.cleanup()
         self.now += 61
+        self.error('resend_too_early', self.manager.start, PHONE)
+        self.now += 60
         self.start()
         self.step(page())
-        self.state('rate_limited')
+        self.state('sending')
 
     def test_deadline_callback_is_generation_guarded_and_cancels_inflight_work(self):
         self.start()
@@ -393,9 +395,7 @@ class StateTests(unittest.TestCase):
         self.sent()
         self.cleanup()
         self.now += 10
-        self.start()
-        self.step(page())
-        self.state('rate_limited')
+        self.error('resend_too_early', self.manager.start, PHONE)
         self.assertEqual(self.manager._day_count, 1)
 
     def test_five_code_and_text_admissions_per_round(self):
@@ -422,16 +422,18 @@ class StateTests(unittest.TestCase):
         self.submitted()
         self.step(page(verification=True))
         frame = self.manager.frame()
-        self.assertEqual(set(frame), {'frame_id', 'width', 'height', 'png'})
+        self.assertEqual(set(frame), {'frame_id', 'challenge_epoch', 'width', 'height', 'png'})
         self.assertEqual(self.driver.actions[-1], ('grab', dict(x=4, y=14, width=132, height=72)))
         self.step(page(verification=True))
         self.assertEqual(self.manager.frame()['frame_id'], frame['frame_id'])
         self.driver.capture = Capture(b'synthetic-png', FrameMetadata(10, 20, 300, 150, 2, 2))
         self.step(page(verification=True))
         self.assertGreater(self.manager.frame()['frame_id'], frame['frame_id'])
+        self.assertGreater(self.manager.status()['challenge_epoch'], frame['challenge_epoch'])
         self.error('stale_frame', self.manager.frame, frame['frame_id'])
         self.error('stale_frame', self.manager.pointer, frame['frame_id'], 'tap', [[.5, .5, 0]])
-        self.assertEqual(set(self.manager.status()), {'state', 'phone', 'resend_in', 'attempts_left', 'frame_id', 'message'})
+        self.assertEqual(set(self.manager.status()), {'state', 'phone', 'resend_in', 'attempts_left',
+                         'frame_id', 'message', 'verification_mode', 'challenge_epoch', 'frame_width', 'frame_height'})
         self.assertEqual(self.manager.status()['phone'], '138****8000')
         self.assertNotIn(PHONE, repr(self.manager.status())+repr(self.manager._session))
         self.assertNotIn(CODE, repr(self.manager.status())+repr(self.manager._session))

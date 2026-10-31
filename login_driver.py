@@ -284,6 +284,7 @@ class QtLoginDriver:
         return self._read_json(script, 'probe_failed')
 
     def grab(self, rect=None):
+        from sms_login import FRAME_PNG_LIMIT
         from PySide6.QtCore import QBuffer, QIODevice, QRect, Qt
         from PySide6.QtGui import QColor, QPainter
         def capture(private_rects):
@@ -322,7 +323,7 @@ class QtLoginDriver:
                 if not output.save(buffer, 'PNG'):
                     raise DriverError('capture_failed')
                 png = bytes(buffer.data())
-                if len(png) <= 300*1024:
+                if len(png) <= FRAME_PNG_LIMIT:
                     return Capture(png, FrameMetadata(left/zoom, top/zoom, w, h, zoom, dpr, 1/factor,
                         (right-left)*w*factor/bitmap.width(), (bottom-top)*h*factor/bitmap.height()))
                 factor *= 2

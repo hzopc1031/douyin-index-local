@@ -74,12 +74,18 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
             else:
                 throttle.success(ip)
                 request[PRINCIPAL_KEY] = principal
-                recent = [t for t in rates.get(principal['id'], []) if now - t < 60]
-                if len(recent) >= 120:
+                # Verification polls status and a changing image once/second.
+                # Give those admin-only reads a separate bounded bucket so
+                # they cannot exhaust the action budget (e.g. cancel/code).
+                sms_read = (principal.get('admin') and request.method == 'GET'
+                            and request.path in ('/api/v1/login/sms', '/api/v1/login/sms/frame'))
+                rate_key = (principal['id'], 'sms_read') if sms_read else principal['id']
+                recent = [t for t in rates.get(rate_key, []) if now - t < 60]
+                if len(recent) >= (180 if sms_read else 120):
                     raise HubError('api_rate_limited', '接口请求过于频繁，请一分钟后再试。', 429)
-                if len(rates) >= 1024 and principal['id'] not in rates:
+                if len(rates) >= 1024 and rate_key not in rates:
                     rates.pop(next(iter(rates)))
-                rates[principal['id']] = recent + [now]
+                rates[rate_key] = recent + [now]
                 response = await handler(request)
         except HubError as exc:
             response = reply({'error': {'code': exc.code, 'message': str(exc)}}, exc.status)

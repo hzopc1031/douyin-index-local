@@ -27,7 +27,7 @@ _mode_lock = threading.Lock()
 def login_mode():
     global _mode_warned
     value = os.environ.get('INDEX_HUB_LOGIN_MODE', 'desktop')
-    if value in ('desktop', 'qr'):
+    if value in ('desktop', 'qr', 'sms'):
         return value
     with _mode_lock:
         if not _mode_warned:

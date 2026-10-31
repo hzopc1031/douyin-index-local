@@ -7,12 +7,16 @@ import re
 
 
 KEY_NAMES = ('cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|'
-             'verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key')
+             'verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key|'
+             'phone|mobile|sms|otp|verify_code|text')
 
 
 def redact(text) -> str:
     """Redact credential assignments and long opaque strings in diagnostics."""
     text = str(text)
+    text = re.sub(r'(?<![0-9])1[3-9][0-9]{9}(?![0-9])', '1**********', text)
+    text = re.sub(r'''(?i)(\bcode["']?\s*[:=]\s*)(?:"[0-9]{4,8}"|'[0-9]{4,8}'|[0-9]{4,8}\b)''',
+                  r'\1***', text)
     # Authorization values are short enough to escape the long-string rule.
     text = re.sub(r"(?i)\b(Basic|Bearer|Digest|Token)\s+[^\s,;\"']+", r'\1 ***', text)
     # Cookie headers contain several assignments; redact the whole header first.
