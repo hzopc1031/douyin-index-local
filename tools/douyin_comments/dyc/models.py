@@ -41,9 +41,15 @@ def normalize(raw, root=None, source="top"):
     cid = site.identifier(raw.get(f["id"]))
     reply_id = site.identifier(raw.get(f["reply_id"]), optional=True)
     reply_to = site.identifier(raw.get(f["reply_to_reply"]), optional=True)
-    user = raw.get(f["user"]) or {}
-    other = raw.get(f["reply_user"]) or {}
+    user = raw.get(f["user"])
+    other = raw.get(f["reply_user"])
+    user = {} if user is None else user
+    other = {} if other is None else other
     if not isinstance(user, dict) or not isinstance(other, dict):
+        raise Stop(3, "suspicious_schema")
+    if raw.get(f["images"]) is not None and not isinstance(raw[f["images"]], list):
+        raise Stop(3, "suspicious_schema")
+    if raw.get(f["sticker"]) is not None and not isinstance(raw[f["sticker"]], dict):
         raise Stop(3, "suspicious_schema")
     created = raw.get(f["created"])
     stamp = ""

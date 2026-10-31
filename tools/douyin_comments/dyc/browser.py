@@ -171,9 +171,11 @@ class Browser:
             self.page.set_default_timeout(5000)
             self.watcher = self.spawn(self.watch())
             return self
-        except BaseException:
+        except BaseException as error:
             await self.close()
-            raise
+            if isinstance(error, (Stop, asyncio.CancelledError, KeyboardInterrupt)):
+                raise
+            raise Stop(5, "browser_start_failed") from None
 
     async def __aexit__(self, *_):
         await self.close()
@@ -205,6 +207,17 @@ class Browser:
             event.set()
 
     async def route(self, route):
+        try:
+            await self._route(route)
+        except Exception:
+            if not self.closing:
+                self.control.stop(1, "request_route_error")
+            try:
+                await route.abort()
+            except Exception:
+                pass
+
+    async def _route(self, route):
         request = route.request
         if self.backend and not self.backend.allowed(request.url):
             await route.abort()
@@ -339,12 +352,22 @@ class Browser:
         except asyncio.TimeoutError:
             raise Stop(2, "comment_template_missing") from None
         self.seeding = False
-        title = await self.page.locator(site.SIGNALS["title"]).first.text_content() if await self.page.locator(site.SIGNALS["title"]).count() else ""
-        displayed = await self.page.locator(site.SIGNALS["count"]).first.text_content() if await self.page.locator(site.SIGNALS["count"]).count() else ""
+        async def text_at(selector):
+            locator = self.page.locator(selector)
+            return await locator.first.text_content() if await locator.count() else ""
+        title = await self.control.run(text_at(site.SIGNALS["title"]))
+        displayed = await self.control.run(text_at(site.SIGNALS["count"]))
         return resolved, title or "", displayed or ""
 
     async def fetch(self, video_id, root, cursor):
         self.control.check()
+        # Let the prior request settle and pace BEFORE starting the XHR timer.
+        # The route repeats this guard for unsolicited seed requests.
+        await self.control.run(self.gate.acquire())
+        try:
+            await self.control.run(self.pacer.before())
+        finally:
+            self.gate.release()
         kind = "reply" if root else "top"
         template = self.templates.get(kind) or self.templates.get("top")
         if template is None:
@@ -372,19 +395,19 @@ class Browser:
         for task in list(self.tasks):
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
-        failed = False
         if self.context:
             try:
                 await asyncio.wait_for(self.context.close(), 2.5)
             except Exception:
-                failed = True
+                pass
         if self.playwright:
             try:
                 await asyncio.wait_for(self.playwright.stop(), 1)
             except Exception:
-                failed = True
-        if failed:
-            _kill_owned(records)
+                pass
+        # Only exact process identities from our own driver tree are eligible.
+        # Also reap stragglers if a driver reported successful shutdown early.
+        _kill_owned(records)
         await self.display.close()
         self.profile.__exit__(None, None, None)
         self.templates.clear()

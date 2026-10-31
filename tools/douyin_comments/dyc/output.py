@@ -8,6 +8,7 @@ import json
 import re
 import sys
 
+from . import site
 from .runtime import atomic_text, private_dir, private_open
 
 COLUMNS = ("run_id fetched_at video_id video_url video_title source comment_id level "
@@ -15,8 +16,9 @@ COLUMNS = ("run_id fetched_at video_id video_url video_title source comment_id l
            "created_at has_image has_sticker like_count reply_count_reported user_id "
            "nickname reply_to_user_id reply_to_nickname ip_label thread_status").split()
 NUMERIC = {"level", "has_image", "has_sticker", "like_count", "reply_count_reported"}
-SECRET = re.compile(r"(?i)(?:cookie|set-cookie|authorization|mstoken|a_bogus|x-bogus|_signature)"
-                    r"\s*[=:]\s*[^\s,;<>]+")
+SECRET_NAMES = ("cookie", "set-cookie", "authorization", site.PARAM["token"], *site.SIGNATURES)
+SECRET = re.compile(r"(?i)(?:" + "|".join(re.escape(name) for name in SECRET_NAMES) +
+                    r")\s*[=:]\s*[^\s,;<>]+")
 URL_QUERY = re.compile(r"(https?://[^\s?<>]+)\?[^\s<>]*", re.I)
 
 

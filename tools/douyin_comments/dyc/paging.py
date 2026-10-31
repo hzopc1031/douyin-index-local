@@ -50,7 +50,8 @@ async def collect(video, transport, page_budget=1500):
                 else:
                     if cid not in video.threads:
                         video.threads[cid] = Thread(cid, comment.reply_count_reported)
-                    inline = raw.get(site.FIELDS["inline"]) or []
+                    inline = raw.get(site.FIELDS["inline"])
+                    inline = [] if inline is None else inline
                     if not isinstance(inline, list):
                         raise Stop(3, "suspicious_schema")
                     for reply in inline:

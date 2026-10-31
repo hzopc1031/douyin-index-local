@@ -93,18 +93,29 @@ def main(argv=None):
     # Never let inherited Playwright debug flags dump signed URLs to a terminal.
     os.environ.pop("DEBUG", None)
     os.environ.pop("PWDEBUG", None)
+    args = None
+    identity = None
     try:
         args = defaults(parser().parse_args(argv))
         if args.command == "check-env":
             code, result = check_env(args)
         else:
             from . import runner
-            code, result = asyncio.run(getattr(runner, args.command)(args))
+            if args.command == "fetch":
+                identity = runner.run_id()
+                code, result = asyncio.run(runner.fetch(args, identity=identity))
+            else:
+                code, result = asyncio.run(getattr(runner, args.command)(args))
     except Stop as error:
         code, result = error.code, dict(exit_code=error.code, exit_reason=error.reason)
     except KeyboardInterrupt:
         code, result = 2, dict(exit_code=2, exit_reason="interrupted")
     except Exception:
         code, result = 1, dict(exit_code=1, exit_reason="internal_error")
+    if args is not None and args.command == "fetch" and "run_id" not in result:
+        result.update(run_id=identity,
+                      out=str(Path(args.out).expanduser().absolute() if args.out
+                              else Path.home() / "dyc-output" / identity),
+                      videos=[], requests=0, site_calibrated=False)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")), flush=True)
     return code

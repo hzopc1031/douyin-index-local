@@ -71,7 +71,7 @@ def parse_url(value, *, fake=False):
         if parsed.hostname not in hosts:
             raise ValueError
         match = re.fullmatch(VIDEO_PATH, parsed.path)
-        values = parse_qs(parsed.query).get(MODAL_PARAM, [])
+        values = parse_qs(parsed.query, keep_blank_values=True).get(MODAL_PARAM, [])
         if len(values) > 1 or (match and values and values[0] != match[1]):
             raise ValueError
         vid = match[1] if match else (values[0] if len(values) == 1 else None)
@@ -132,7 +132,7 @@ def _signals(obj):
     if isinstance(obj, dict):
         if any(obj.get(key) for key in LOGIN_FIELDS):
             raise Stop(4, "login_expired")
-        if any(obj.get(key) not in (None, False, "", 0, [], {}) for key in RISK_FIELDS):
+        if any(key in obj for key in RISK_FIELDS):
             raise Stop(3, "verification_response")
         for value in obj.values():
             _signals(value)

@@ -182,7 +182,7 @@ class RuntimeTests(unittest.TestCase):
     def test_stale_singleton_removed_only_with_lock(self):
         path = self.base / "profile"
         with Profile(path):
-            (path / "SingletonLock").symlink_to("synthetic-host-1")
+            (path / "SingletonLock").symlink_to(os.uname().nodename + "-99999999")
             with self.assertRaises(Stop):
                 with Profile(path):
                     pass
@@ -200,6 +200,16 @@ class RuntimeTests(unittest.TestCase):
         mem.write_text("missing")
         with self.assertRaises(Stop):
             check_memory(path=mem)
+
+    def test_live_singleton_is_never_cleared(self):
+        path = private_dir(self.base / "profile")
+        lock = path / "SingletonLock"
+        lock.symlink_to(os.uname().nodename + "-" + str(os.getpid()))
+        with self.assertRaises(Stop) as ctx:
+            with Profile(path):
+                pass
+        self.assertEqual(ctx.exception.reason, "profile_browser_alive")
+        self.assertTrue(lock.is_symlink())
 
     def test_caps_count_only_and_day_rollover(self):
         day = ["2026-10-31"]

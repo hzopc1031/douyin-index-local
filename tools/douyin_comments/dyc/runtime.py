@@ -25,8 +25,11 @@ def private_dir(path):
     for part in (path, *path.parents):
         if part.is_symlink():
             raise Stop(5, "directory_symlink")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.stat()
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = path.stat()
+    except OSError:
+        raise Stop(5, "directory_unavailable") from None
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise Stop(5, "directory_permissions")
     return path
@@ -85,6 +88,13 @@ class Profile:
             raise Stop(5, "profile_locked") from None
         try:
             # This profile is exclusively ours. Never touch any other profile.
+            singleton = self.path / "SingletonLock"
+            if singleton.is_symlink():
+                host, _, pid = os.readlink(singleton).rpartition("-")
+                if host != os.uname().nodename or not pid.isdigit():
+                    raise Stop(5, "profile_lock_unknown")
+                if Path(f"/proc/{pid}").exists():
+                    raise Stop(5, "profile_browser_alive")
             for entry in self.path.glob("Singleton*") if self.clear_stale else ():
                 if entry.is_symlink() or entry.is_file():
                     entry.unlink()
@@ -127,13 +137,17 @@ class DailyCounter:
     def locked(self):
         fd = private_open(self.state / ".usage.lock", os.O_RDWR | os.O_CREAT)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Stop(5, "usage_locked") from None
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-    def _read(self):
+    def _read(self, day=None):
+        day = day or self.today()
         path = self.state / "usage.json"
         if not path.exists() and not path.is_symlink():
             return 0
@@ -145,9 +159,9 @@ class DailyCounter:
                     or data["count"] < 0 or not isinstance(data["day"], str)):
                 raise ValueError
             datetime.strptime(data["day"], "%Y-%m-%d")
-            if data["day"] > self.today():
+            if data["day"] > day:
                 raise ValueError
-            return data["count"] if data["day"] == self.today() else 0
+            return data["count"] if data["day"] == day else 0
         except (OSError, ValueError, TypeError):
             raise Stop(5, "usage_corrupt") from None
 
@@ -161,11 +175,12 @@ class DailyCounter:
 
     def reserve(self):
         with self.locked():
-            count = self._read()
+            day = self.today()
+            count = self._read(day)
             if count >= self.limit:
                 raise Stop(2, "daily_cap")
             atomic_text(self.state / "usage.json", json.dumps(
-                {"day": self.today(), "count": count + 1}) + "\n")
+                {"day": day, "count": count + 1}) + "\n")
 
 
 class Budget:
