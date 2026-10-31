@@ -314,6 +314,232 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/short/synthetic", fake.navigations)
         self.assertEqual(fake.foreign, [])
 
+    async def test_canonical_then_short_links_do_not_consume_request_budget(self):
+        for cap in ("normal", "daily", "batch"):
+            with self.subTest(cap=cap):
+                args = self.args()
+                args.state_dir = self.root / ("state-" + cap)
+                args.out = self.root / ("out-" + cap)
+                args.urls = [site.FAKE_ORIGIN + path for path in
+                             ("/video/100", "/short/synthetic-one", "/short/synthetic-two")]
+                counter = DailyCounter(args.state_dir)
+                initial = 2996 if cap == "daily" else 0
+                from dyc.runtime import atomic_text
+                atomic_text(counter.state / "usage.json", json.dumps(
+                    {"day": counter.today(), "count": initial}))
+                # Leave exactly enough batch/daily budget for the unique video.
+                def budget(counter, **kwargs):
+                    return Budget(counter, batch_limit=4 if cap == "batch" else 1500, **kwargs)
+                fake = FakeSite(reply_seed=True)
+                with patch("dyc.runner.Budget", side_effect=budget):
+                    code, result = await fetch(args, backend=fake, pacer=FastPacer())
+                self.assertEqual((code, result["exit_reason"]), (0, "complete"), result)
+                self.assertEqual(result["requests"], 4)
+                self.assertEqual(len(fake.calls), 4)
+                self.assertEqual(counter.usage(), initial + 4)
+                self.assertEqual([v["video_id"] for v in result["videos"]], ["100"])
+                self.assertEqual(result["videos"][0]["top_count"], 2)
+                self.assertEqual(result["videos"][0]["reply_count"], 21)
+                self.assertIn("/short/synthetic-one", fake.navigations)
+                self.assertIn("/short/synthetic-two", fake.navigations)
+                with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+                    self.assertEqual(len(list(csv.DictReader(stream))), 23)
+                self.assertEqual(fake.foreign, [])
+
+    async def test_slow_seed_response_is_exported_before_next_video(self):
+        class SlowSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url):
+                    video = parse_qs(urlsplit(route.request.url).query)[site.PARAM["video"]][0]
+                    self.calls.append(video)
+                    if video == "100":
+                        # Reproduce the original 15-second discovery / 22-second
+                        # admitted-request race using the production deadlines.
+                        await asyncio.sleep(16)
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page(
+                                            [fixture_comment(int(video) * 100 + 1)], 0, False, 1)))
+                else:
+                    await super().deliver(route)
+
+        class BetweenVideos(FastPacer):
+            async def between_videos(self):
+                await asyncio.sleep(2)
+
+        args, fake = self.args(), SlowSeed()
+        code, result = await fetch(args, backend=fake, pacer=BetweenVideos())
+        self.assertEqual((code, result["requests"]), (0, 2), result)
+        self.assertEqual([(v["status"], v["top_count"], v["pages"]) for v in result["videos"]],
+                         [("complete", 1, 1), ("complete", 1, 1)])
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            self.assertEqual([(row["video_id"], row["comment_id"]) for row in csv.DictReader(stream)],
+                             [("100", "10001"), ("200", "20001")])
+        self.assertEqual(fake.calls, ["100", "200"])
+        self.assertEqual(fake.foreign, [])
+
+    async def test_missing_top_seed_settles_admitted_reply_before_skip(self):
+        class ReplyOnly(FakeSite):
+            def html(self, video_id):
+                html = super().html(video_id)
+                if video_id == "100":
+                    # Admit a reply near the discovery deadline, with no top
+                    # response. Its body finishes after that deadline.
+                    html = html.replace("seed.send();", "")
+                    html = html.replace("reply.send();", "setTimeout(() => reply.send(), 1500);")
+                return html
+
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if kind:
+                    params = parse_qs(urlsplit(route.request.url).query)
+                    video = params[site.PARAM["video"]][0]
+                    if video == "100":
+                        self.calls.append((kind, video))
+                        await asyncio.sleep(1.2)
+                        await route.fulfill(status=200, content_type="application/json",
+                                            body=json.dumps(fixture_page([fixture_comment(10100)], 0, False, 1)))
+                        return
+                await super().deliver(route)
+
+        instances = []
+        def browser(*args, **kwargs):
+            instance = Browser(*args, timeout_ms=100, **kwargs)
+            instances.append(instance)
+            return instance
+
+        class CheckSettled(FastPacer):
+            async def between_videos(pacer):
+                self.assertFalse(instances[0].active)
+                self.assertFalse(instances[0].accepted)
+                self.assertFalse(instances[0].seeding)
+
+        args, fake = self.args(), ReplyOnly(reply_seed=True)
+        with patch("dyc.runner.Browser", side_effect=browser):
+            code, result = await fetch(args, backend=fake, pacer=CheckSettled())
+        self.assertEqual((code, result["exit_reason"]), (2, "partial"), result)
+        first, second = result["videos"]
+        self.assertEqual((first["reason"], first["reply_count"], first["pages"]),
+                         ("comment_template_missing", 1, 1))
+        self.assertEqual(second["status"], "complete")
+        self.assertEqual(result["requests"], 5)
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = [row for row in csv.DictReader(stream) if row["video_id"] == "100"]
+        self.assertEqual([row["comment_id"] for row in rows], ["10100"])
+        self.assertEqual(len(fake.calls), 5)
+        self.assertEqual(fake.foreign, [])
+
+    async def check_canonical_then_short_links(self, *, batch_limit=1500, daily_used=0):
+        fake = FakeSite()
+        args = self.args()
+        args.urls = [site.FAKE_ORIGIN + path for path in
+                     ("/video/100", "/short/synthetic-one", "/short/synthetic-two")]
+        counter = DailyCounter(args.state_dir)
+        from dyc.runtime import atomic_text
+        atomic_text(counter.state / "usage.json", json.dumps({"day": counter.today(), "count": daily_used}))
+        budget = Budget(counter, batch_limit=batch_limit)
+        with patch("dyc.runner.Budget", return_value=budget):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"], result["requests"]), (0, "complete", 4))
+        self.assertEqual(len(result["videos"]), 1)
+        video = result["videos"][0]
+        self.assertEqual((video["video_id"], video["top_count"], video["reply_count"]), ("100", 2, 21))
+        self.assertEqual(len(fake.calls), 4)
+        self.assertEqual(counter.usage(), daily_used + 4)
+        self.assertIn("/short/synthetic-one", fake.navigations)
+        self.assertIn("/short/synthetic-two", fake.navigations)
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), 23)
+        self.assertEqual({row["video_id"] for row in rows}, {"100"})
+        self.assertEqual(fake.foreign, [])
+
+    async def test_canonical_then_short_links_do_not_admit_duplicate_requests(self):
+        await self.check_canonical_then_short_links()
+
+    async def test_duplicate_short_links_at_batch_cap_keep_success(self):
+        await self.check_canonical_then_short_links(batch_limit=4)
+
+    async def test_duplicate_short_links_at_daily_cap_keep_success(self):
+        await self.check_canonical_then_short_links(daily_used=2996)
+
+    async def test_slow_initial_seed_is_exported_before_next_video(self):
+        class SlowSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url) and not self.calls:
+                    # Reproduce the real 15-second discovery / 22-second
+                    # request deadline gap without altering asyncio's clock.
+                    await asyncio.sleep(16)
+                await super().deliver(route)
+        fake = SlowSeed()
+        args = self.args()
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["requests"]), (0, 8))
+        self.assertEqual([(v["video_id"], v["status"], v["pages"], v["top_count"], v["reply_count"])
+                          for v in result["videos"]],
+                         [("100", "complete", 4, 2, 21), ("200", "complete", 4, 2, 21)])
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), 46)
+        self.assertIn(("100", "10001"), {(r["video_id"], r["comment_id"]) for r in rows})
+        self.assertEqual(len(fake.calls), 8)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_late_admitted_top_seed_can_complete_after_discovery_deadline(self):
+        class LateSeed(FakeSite):
+            def html(self, video_id):
+                return super().html(video_id).replace("seed.send();", "setTimeout(() => seed.send(), 1500);")
+
+            async def deliver(self, route):
+                if site.request_kind(route.request.url):
+                    self.calls.append(route.request.url)
+                    await asyncio.sleep(1.2)
+                    await route.fulfill(status=200, content_type="application/json",
+                                        body=json.dumps(fixture_page([fixture_comment(10001)], 0, False, 1)))
+                else:
+                    await super().deliver(route)
+
+        fake = LateSeed()
+        async with self.browser(fake, timeout_ms=100) as browser:
+            await browser.preflight(site.FAKE_ORIGIN)
+            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            self.assertFalse(browser.active)
+            self.assertFalse(browser.accepted)
+            self.assertFalse(browser.seeding)
+            video = Video("100", site.FAKE_ORIGIN + "/video/100")
+            await collect(video, browser)
+            self.assertEqual((video.status, video.pages), ("complete", 1))
+            self.assertEqual(list(video.comments), ["10001"])
+            self.assertEqual(browser.budget.used, 1)
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.foreign, [])
+
+    async def test_unsettled_seed_stops_batch_without_starting_next_video(self):
+        cancelled = asyncio.Event()
+
+        class HungSeed(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url):
+                    self.calls.append(route.request.url)
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                else:
+                    await super().deliver(route)
+
+        def browser(*args, **kwargs):
+            return Browser(*args, timeout_ms=100, **kwargs)
+
+        args, fake = self.args(), HungSeed()
+        with patch("dyc.runner.Browser", side_effect=browser):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["exit_reason"], result["requests"]), (3, "unsettled_request", 1))
+        self.assertTrue(cancelled.is_set())
+        self.assertNotIn("/video/200", fake.navigations)
+        self.assertTrue(all(v["top_count"] == 0 and v["status"] == "partial" for v in result["videos"]))
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.foreign, [])
+
     async def test_page_cap_counts_initial_seed(self):
         fake = FakeSite()
         args = self.args()

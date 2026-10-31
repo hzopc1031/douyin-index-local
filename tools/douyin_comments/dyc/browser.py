@@ -119,12 +119,16 @@ def _kill_owned(records):
 
 class Browser:
     def __init__(self, profile, control, budget, pacer, *, display=None,
-                 backend=None, memory_minimum=2 * 1024**3, timeout_ms=20000):
+                 backend=None, memory_minimum=2 * 1024**3, timeout_ms=20000,
+                 skip_video_ids=()):
         self.profile = Profile(profile)
         self.control, self.budget, self.pacer = control, budget, pacer
         self.display = Display(display)
         self.backend = backend
         self.memory_minimum, self.timeout_ms = memory_minimum, timeout_ms
+        self.request_timeout = timeout_ms / 1000 + 2
+        # Keep the runner's set by reference as it records processed videos.
+        self.skip_video_ids = skip_video_ids
         self.context = self.page = self.playwright = None
         self.driver_pid = None
         self.gate = asyncio.Lock()
@@ -290,7 +294,8 @@ class Browser:
             if self.expected is not None and self.expected == (actual, marker):
                 self.expected = None
                 admission = "replay"
-            elif self.seeding and not marker and kind not in self.seeded:
+            elif (self.seeding and not marker and kind not in self.seeded
+                  and actual[1] not in self.skip_video_ids):
                 self.seeded.add(kind)
                 admission = "seed"
             else:
@@ -315,14 +320,15 @@ class Browser:
             self.active[request] = done
             self.accepted[request] = admission, actual
             try:
-                if self.backend:
-                    await self.backend.deliver(route)
-                else:
-                    # This one-use marker is local admission metadata, never
-                    # a header sent to the site or retained in a template.
-                    await route.continue_(headers={key: value for key, value in request.headers.items()
-                                                   if key.lower() != REPLAY_HEADER})
-                await asyncio.wait_for(done.wait(), self.timeout_ms / 1000 + 2)
+                async with asyncio.timeout(self.request_timeout):
+                    if self.backend:
+                        await self.backend.deliver(route)
+                    else:
+                        # This one-use marker is local admission metadata, never
+                        # a header sent to the site or retained in a template.
+                        await route.continue_(headers={key: value for key, value in request.headers.items()
+                                                       if key.lower() != REPLAY_HEADER})
+                    await done.wait()
             except asyncio.TimeoutError:
                 self.control.stop(3, "unsettled_request")
             except Exception:
@@ -383,6 +389,12 @@ class Browser:
                 raise Stop(4, "login_signal_missing")
             await self.control.run(asyncio.sleep(0.1))
 
+    async def finish_seeding(self):
+        # FIFO gate: admitted/queued seeds settle before admission closes.
+        # Later page requests see seeding=False and cannot outlive this video.
+        async with self.gate:
+            self.seeding = False
+
     async def open_video(self, url):
         self.templates.clear()
         self.seeded.clear()
@@ -391,26 +403,33 @@ class Browser:
         self.video_id = site.parse_url(url, fake=self.backend is not None).video_id
         self.budget.new_video()
         self.armed = self.seeding = True
-        await self.control.run(self.page.goto(url, wait_until="domcontentloaded"))
-        resolved = site.parse_url(self.page.url, fake=self.backend is not None)
-        if not resolved.video_id:
-            for _ in range(150):
-                await self.control.run(asyncio.sleep(0.1))
-                resolved = site.parse_url(self.page.url, fake=self.backend is not None)
-                if resolved.video_id:
-                    break
-            else:
-                raise Stop(2, "short_link_unresolved")
-        self.video_id = resolved.video_id
         try:
-            await self.control.run(asyncio.wait_for(self.seed_ready.wait(), 15))
-        except asyncio.TimeoutError:
-            raise Stop(2, "comment_template_missing") from None
-        await self.control.run(self.gate.acquire())
-        try:
-            self.seeding = False
+            await self.control.run(self.page.goto(url, wait_until="domcontentloaded"))
+            resolved = site.parse_url(self.page.url, fake=self.backend is not None)
+            if not resolved.video_id:
+                for _ in range(150):
+                    await self.control.run(asyncio.sleep(0.1))
+                    resolved = site.parse_url(self.page.url, fake=self.backend is not None)
+                    if resolved.video_id:
+                        break
+                else:
+                    raise Stop(2, "short_link_unresolved")
+            self.video_id = resolved.video_id
+            if self.video_id in self.skip_video_ids:
+                return resolved, "", ""
+            try:
+                await self.control.run(asyncio.wait_for(self.seed_ready.wait(), self.request_timeout))
+            except asyncio.TimeoutError:
+                # A seed admitted late still has its own bounded request time.
+                # Settle it before deciding whether to skip or collect.
+                pass
         finally:
-            self.gate.release()
+            try:
+                await self.control.run(self.finish_seeding())
+            finally:
+                self.seeding = False
+        if not self.seed_ready.is_set():
+            raise Stop(2, "comment_template_missing")
         async def text_at(selector):
             locator = self.page.locator(selector)
             return await locator.first.text_content() if await locator.count() else ""

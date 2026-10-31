@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from dyc.cli import check_env, defaults, parser
-from dyc.models import Comment, Thread, Video
+from dyc.models import Comment, Thread, Video, normalize
 from dyc.output import COLUMNS, Log, export, ranking
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +64,20 @@ class OutputTests(unittest.TestCase):
         self.assertNotIn("<script>", md)
         self.assertNotIn("[x]", md)
         self.assertIn("&lt;script&gt;", md)
+
+    def test_normalized_null_media_flags_export_as_blank(self):
+        video = Video("100", "https://dyc.invalid/video/100")
+        fields = [{}, {"image_list": None, "sticker": None},
+                  {"image_list": [], "sticker": {}},
+                  {"image_list": [{"id": "synthetic-image"}], "sticker": {"id": "synthetic-sticker"}}]
+        for cid, media in enumerate(fields, 1):
+            item = normalize({"cid": str(cid), **media})
+            video.comments[item.comment_id] = item
+        export(self.out, "synthetic-run", [video], 0, "complete", 1)
+        with (self.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([(r["has_image"], r["has_sticker"]) for r in rows],
+                         [("", ""), ("", ""), ("0", "0"), ("1", "1")])
 
     def test_ranking_ties_and_missing(self):
         items = [Comment("2", 1, "2", "", like_count=1, created_at="2026-01-01"),

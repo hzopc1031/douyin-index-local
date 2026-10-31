@@ -167,6 +167,16 @@ class SchemaTests(unittest.TestCase):
         self.assertIsNone(item.reply_count_reported)
         self.assertIsNone(item.has_image)
 
+    def test_media_flags_distinguish_missing_empty_and_present(self):
+        for fields, expected in (({}, None), ({"image_list": None, "sticker": None}, None),
+                                 ({"image_list": [], "sticker": {}}, False),
+                                 ({"image_list": [{"id": "synthetic-image"}],
+                                   "sticker": {"id": "synthetic-sticker"}}, True)):
+            with self.subTest(fields=fields):
+                item = normalize({"cid": "1", **fields})
+                self.assertIs(item.has_image, expected)
+                self.assertIs(item.has_sticker, expected)
+
     def test_suspicious_json_and_verification(self):
         for body in ('{"status_code":0,"status_code":0}', '[]', '{"status_code":0,"captcha":true}',
                      '{"status_code":0,"data":{"verify_info":"challenge"}}', 'null'):

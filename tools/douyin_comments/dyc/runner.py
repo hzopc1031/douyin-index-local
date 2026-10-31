@@ -63,7 +63,7 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
         pacing = pacer or Pacer()
         log.event("batch_started")
         async with Browser(args.profile_dir, control, budget, pacing, display=args.display,
-                           backend=backend) as browser:
+                           backend=backend, skip_video_ids=completed) as browser:
             await browser.preflight(site.FAKE_ORIGIN + "/" if backend else None)
             for index, (target, video) in enumerate(zip(targets, videos)):
                 control.check()
