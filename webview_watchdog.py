@@ -39,12 +39,18 @@ def watch_startup(loaded, release, *, timeout=90, max_rss_mb=2500,
     deadline = clock() + timeout
     while not loaded.is_set():
         if clock() >= deadline:
+            if loaded.is_set():
+                return
             log.error('official window failed to load within %ss; exiting for systemd restart', timeout)
             break
         if rss() > max_rss_mb:
+            # Qt may finish loading while /proc is being sampled.
+            if loaded.is_set():
+                return
             log.error('webview startup RSS exceeded %s MB; exiting for systemd restart', max_rss_mb)
             break
-        loaded.wait(min(0.2, max(0, deadline - clock())))
+        if loaded.wait(min(0.2, max(0, deadline - clock()))):
+            return
     else:
         return
     try:

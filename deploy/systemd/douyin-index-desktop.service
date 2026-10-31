@@ -15,7 +15,7 @@ Restart=on-failure
 RestartSec=15
 RestartSteps=4
 RestartMaxDelaySec=120
-MemoryHigh=2500M
+MemoryHigh=2800M
 MemoryMax=3G
 MemorySwapMax=0
 Environment=INDEX_HUB_STATE_DIR=/var/lib/douyin-index
