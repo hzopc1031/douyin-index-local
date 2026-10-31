@@ -3,6 +3,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8');
 const source=html.slice(html.indexOf('// SMS login:'),html.indexOf('// End SMS login.'));
 const tests=[];function test(name,run){tests.push({name,run})}
+function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject}}
 function fixture(){
  const nodes={},calls=[],timers=new Map(),revoked=[],notices=[];let serial=0,blobs=0;
  const $=id=>nodes[id]??=(function(){let src='';const node={hidden:false,disabled:false,value:'',textContent:'',style:{},captured:null,getBoundingClientRect:()=>({left:10,top:20,width:200,height:100}),setPointerCapture(id){this.captured=id},hasPointerCapture(id){return this.captured===id},releasePointerCapture(){this.captured=null},getAttribute(key){return key==='src'?src:null},removeAttribute(key){if(key==='src')src=''}};Object.defineProperty(node,'src',{get:()=>src,set:value=>{src=value;queueMicrotask(()=>node.onload?.())}});return node})();
@@ -12,7 +13,7 @@ function fixture(){
    setTimeout(fn,delay){const id=++serial;timers.set(id,{fn,delay});return id},clearTimeout(id){timers.delete(id)},
    localStorage:{setItem(){throw Error('storage write')}},sessionStorage:{setItem(){throw Error('storage write')}},
    toast(message){notices.push(message)},openDesktop(){f.desktop=true},
-   async api(path,options){calls.push({path,body:options?.body});if(f.error&&options){const e=f.error;f.error=null;throw e}return {...state}},
+   async api(path,options){calls.push({path,body:options?.body});if(f.error&&options){const e=f.error;f.error=null;throw e}return f.respond?f.respond(path,options):{...state}},
    async fetch(path,options){calls.push({path,options});if(f.frameError)return {ok:false,json:async()=>({error:{code:'stale_frame',message:'画面已更新，请重新操作'}})};return {ok:true,blob:async()=>({synthetic:true})}}
  });vm.runInContext(source,ctx);
  f.run=code=>vm.runInContext(code,ctx);f.render=async changes=>{Object.assign(state,changes);ctx.data={...state};f.run('renderSms(data)');await new Promise(resolve=>setImmediate(resolve))};
@@ -59,6 +60,50 @@ test('submitted sensitive inputs clear immediately even on failure',async()=>{
   const call=f.calls.find(c=>c.path==='login/sms/'+path);assert.equal(call.body[key],value);assert(!call.path.includes(value));assert.equal(f.$('#'+input).value,'');
  }
  assert(!/localStorage|sessionStorage|URLSearchParams/.test(source));
+});
+for(const order of ['before action response','after action response','error after action response'])test('pre-action status is discarded: '+order,async()=>{
+ const f=fixture();f.run('smsEnabled=true');const old=deferred(),action=deferred(),fresh=deferred();let reads=0;
+ const idle={...f.state},opening={...idle,state:'opening',message:'opening fixture'};
+ f.respond=(path,options)=>options?action.promise:(++reads===1?old.promise:fresh.promise);
+ const status=f.run('loadSms()');f.$('#smsPhone').value='13800138000';
+ const start=f.$('#smsPhoneForm').onsubmit({preventDefault(){}});
+ if(order==='before action response'){old.resolve(idle);await status;assert.equal(f.run('smsSnapshot'),null)}
+ action.resolve(opening);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.run('smsSnapshot.state'),'opening');assert(!f.$('#smsCancel').hidden);
+ if(order==='error after action response')old.reject(Error('obsolete status failure'));
+ else old.resolve(idle);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.run('smsSnapshot.state'),'opening');assert.equal(f.$('#smsState').textContent,'opening fixture');
+ assert(f.$('#smsPhoneForm').hidden);assert(!f.$('#smsCancel').hidden);assert.equal(reads,2);
+ fresh.resolve({...opening,state:'code_sent',attempts_left:3,resend_in:60});
+ await Promise.all([status,start]);assert(!f.$('#smsCodeForm').hidden);assert(!f.$('#smsSubmit').disabled);
+ assert(f.run('smsTimer!==null'));assert.equal(f.notices.length,0);
+});
+for(const outcome of ['late success','late error','completion before cancel response'])test('cancel interrupts pending pointer: '+outcome,async()=>{
+ const f=fixture();await f.manual();const pointer=deferred(),cancel=deferred(),refresh=deferred(),previous={...f.state};
+ f.respond=(path,options)=>path==='login/sms/pointer'?pointer.promise:path==='login/sms/cancel'?cancel.promise:refresh.promise;
+ const image=f.$('#smsImage');image.onpointerdown(f.event(10,20,0));image.onpointermove(f.event(80,30,4000));
+ const replay=image.onpointerup(f.event(110,40,8000));
+ assert(!f.$('#smsCancel').disabled);assert(!f.$('#smsCancel').hidden);
+ const cancellation=f.$('#smsCancel').onclick();
+ assert.equal(f.calls.filter(c=>c.path==='login/sms/cancel').length,1);assert(f.$('#smsCancel').disabled);
+ await f.$('#smsCancel').onclick();await f.run("smsAction('resend')");
+ assert.equal(f.calls.filter(c=>c.path==='login/sms/cancel').length,1);
+ assert(!f.calls.some(c=>c.path==='login/sms/resend'));
+ if(outcome==='completion before cancel response'){
+  pointer.resolve(previous);await replay;assert(f.$('#smsCancel').disabled);
+  await f.run("smsAction('start',{phone:'13800138000'})");assert(!f.calls.some(c=>c.path==='login/sms/start'));
+ }
+ Object.assign(f.state,{state:'cancelled',verification_mode:null,frame_id:0,message:'cancelled fixture'});
+ cancel.resolve({...f.state});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.run('smsSnapshot.state'),'cancelled');assert(f.$('#smsCancel').hidden);assert(image.hidden);
+ if(outcome==='late error')pointer.reject(Object.assign(Error('obsolete pointer failure'),{code:'stale_frame'}));
+ else pointer.resolve(previous);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.run('smsSnapshot.state'),'cancelled');assert(f.$('#smsVerification').hidden);
+ assert.equal(f.$('#smsState').textContent,'cancelled fixture');assert.equal(f.notices.length,0);
+ refresh.resolve({...f.state});await Promise.all([replay,cancellation]);
+ assert(!f.$('#smsStart').disabled);assert.equal(f.run('smsTimer'),null);
 });
 test('tap maps mobile CSS rectangle to normalized coordinates',async()=>{
  const f=fixture();await f.manual();f.$('#smsImage').onpointerdown(f.event(60,45,100));await f.$('#smsImage').onpointerup(f.event(60,45,180));

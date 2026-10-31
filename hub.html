@@ -128,30 +128,31 @@ async function qrAction(action){clearTimeout(qrTimer);try{await api('login/qr/'+
 $('#qrStart').onclick=()=>qrAction('start');$('#qrRefresh').onclick=()=>qrAction('start');$('#qrCancel').onclick=()=>qrAction('cancel');
 // SMS login: sensitive input and image blobs live only in this page's memory.
 let smsTimer=null,smsEnabled=false,smsInitialized=false,smsLoading=false,smsActing=false;
+let smsCancelling=false,smsRevision=0;
 let smsSnapshot=null,smsFrame=null,smsFrameLoading=false,smsFrameRequest=0,smsGesture=null;
 const smsActive=s=>['opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login'].includes(s);
 const smsManual=d=>['verify_send','verify_login'].includes(d?.state)&&d.verification_mode==='manual';
 function resetSmsGesture(){const g=smsGesture;smsGesture=null;if(g){clearTimeout(g.timer);const image=$('#smsImage');if(image.hasPointerCapture?.(g.pointer))image.releasePointerCapture(g.pointer)}$('#smsFinger').hidden=true}
 function clearSmsFrame(){resetSmsGesture();smsFrameRequest++;smsFrameLoading=false;const image=$('#smsImage');if(image.getAttribute('src'))URL.revokeObjectURL(image.src);if(smsFrame&&smsFrame.url!==image.src)URL.revokeObjectURL(smsFrame.url);smsFrame=null;image.onload=null;image.onerror=null;image.hidden=true;image.removeAttribute('src')}
-function setSmsMode(mode){smsEnabled=mode==='sms';$('#smsLoginCard').hidden=!smsEnabled;if(smsEnabled&&!smsInitialized){smsInitialized=true;loadSms()}if(!smsEnabled){smsInitialized=false;clearTimeout(smsTimer);clearSmsFrame();for(const id of ['#smsPhone','#smsCode','#smsText'])$(id).value=''}}
+function setSmsMode(mode){smsEnabled=mode==='sms';$('#smsLoginCard').hidden=!smsEnabled;if(smsEnabled&&!smsInitialized){smsInitialized=true;loadSms()}if(!smsEnabled){smsRevision++;smsInitialized=false;clearTimeout(smsTimer);clearSmsFrame();for(const id of ['#smsPhone','#smsCode','#smsText'])$(id).value=''}}
 function renderSms(data){
- const active=smsActive(data.state),verify=['verify_send','verify_login'].includes(data.state),manual=smsManual(data),canCode=['code_sent','code_invalid'].includes(data.state);
+ const active=smsActive(data.state),verify=['verify_send','verify_login'].includes(data.state),manual=smsManual(data),canCode=['code_sent','code_invalid'].includes(data.state),busy=Boolean(smsActing||smsCancelling);
  if(!manual||smsSnapshot?.challenge_epoch!==data.challenge_epoch)clearSmsFrame();
  smsSnapshot=data;clearTimeout(smsTimer);smsTimer=null;
  $('#smsState').textContent=verify&&data.verification_mode==='auto'?'自动验证中…':data.message||'尚未开始短信登录';
  $('#smsNumber').textContent=/^1[3-9][0-9]\*{4}[0-9]{4}$/.test(data.phone||'')?data.phone:'';
- $('#smsPhoneForm').hidden=active;$('#smsStart').disabled=smsActing;
- $('#smsCodeForm').hidden=!canCode;$('#smsSubmit').disabled=smsActing||!canCode||data.attempts_left<1;
- $('#smsResend').disabled=smsActing||!canCode||data.resend_in>0;$('#smsResend').textContent=data.resend_in>0?data.resend_in+' 秒后重发':'重新发送';
+ $('#smsPhoneForm').hidden=active;$('#smsStart').disabled=busy;
+ $('#smsCodeForm').hidden=!canCode;$('#smsSubmit').disabled=busy||!canCode||data.attempts_left<1;
+ $('#smsResend').disabled=busy||!canCode||data.resend_in>0;$('#smsResend').textContent=data.resend_in>0?data.resend_in+' 秒后重发':'重新发送';
  $('#smsCountdown').textContent=active&&data.resend_in>0?'发送倒计时：'+data.resend_in+' 秒':'';
  $('#smsVerification').hidden=!verify;$('#smsVerifyHint').textContent=data.verification_mode==='desktop'?'请改用远程桌面接着完成当前验证。':data.verification_mode==='auto'?'正在本机尝试验证，请稍候。':'请在截图中点击或拖动完成验证。';
- $('#smsRefresh').hidden=!manual;$('#smsRefresh').disabled=smsActing;$('#smsTextPanel').hidden=!manual;$('#smsTextSend').disabled=smsActing;
- $('#smsCancel').hidden=!active;$('#smsCancel').disabled=smsActing;
- if(manual&&data.frame_id&&!smsGesture&&!smsActing)loadSmsFrame(data);
+ $('#smsRefresh').hidden=!manual;$('#smsRefresh').disabled=busy;$('#smsTextPanel').hidden=!manual;$('#smsTextSend').disabled=busy;
+ $('#smsCancel').hidden=!active;$('#smsCancel').disabled=smsCancelling||Boolean(smsActing&&smsActing!=='pointer');
+ if(manual&&data.frame_id&&!smsGesture&&!busy)loadSmsFrame(data);
  if(active&&smsEnabled)smsTimer=setTimeout(loadSms,1000);
 }
 async function loadSmsFrame(data,force=false){
- if(!smsManual(data)||!data.frame_id||smsGesture||smsActing||smsFrameLoading||(!force&&smsFrame?.id===data.frame_id))return;
+ if(!smsManual(data)||!data.frame_id||smsGesture||smsActing||smsCancelling||smsFrameLoading||(!force&&smsFrame?.id===data.frame_id))return;
  smsFrameLoading=true;const request=++smsFrameRequest;let url=null;
  try{
   const response=await fetch('/api/v1/login/sms/frame?v='+encodeURIComponent(data.frame_id),{cache:'no-store'});
@@ -165,12 +166,26 @@ async function loadSmsFrame(data,force=false){
  }catch(e){if(request===smsFrameRequest){smsFrameLoading=false;$('#smsVerifyHint').textContent=e.message;if(e.code==='stale_frame')smsTimer=setTimeout(loadSms,200)}}
  finally{if(url)URL.revokeObjectURL(url)}
 }
-async function loadSms(){if(!smsEnabled||smsLoading)return;if(smsActing){smsTimer=setTimeout(loadSms,1000);return}smsLoading=true;try{renderSms(await api('login/sms'))}catch(e){$('#smsState').textContent=e.message;clearTimeout(smsTimer);smsTimer=setTimeout(loadSms,2000)}finally{smsLoading=false}}
+async function loadSms(){
+ if(!smsEnabled||smsLoading)return;if(smsActing||smsCancelling){clearTimeout(smsTimer);smsTimer=setTimeout(loadSms,1000);return}
+ smsLoading=true;const revision=smsRevision;
+ try{const data=await api('login/sms');if(smsEnabled&&revision===smsRevision)renderSms(data)}
+ catch(e){if(smsEnabled&&revision===smsRevision){$('#smsState').textContent=e.message;clearTimeout(smsTimer);smsTimer=setTimeout(loadSms,2000)}}
+ finally{
+  smsLoading=false;
+  // An action may have tried to refresh while this obsolete read was pending.
+  if(smsEnabled&&revision!==smsRevision)await loadSms();
+ }
+}
 async function smsAction(action,body={}){
- if(smsActing)return;smsActing=true;clearTimeout(smsTimer);if(smsSnapshot)renderSms(smsSnapshot);
- try{renderSms(await api('login/sms/'+action,{method:'POST',body}))}
- catch(e){toast(e.code==='stale_frame'?'画面已更新，请重新操作':e.message);if(e.code==='stale_frame')clearSmsFrame()}
- finally{body=null;smsActing=false;await loadSms()}
+ const cancelling=action==='cancel';
+ if(smsCancelling||(smsActing&&!(cancelling&&smsActing==='pointer')))return;
+ if(cancelling)smsCancelling=true;else smsActing=action;
+ // Invalidate older status reads and any pointer response overtaken by cancel.
+ const revision=++smsRevision;clearTimeout(smsTimer);if(smsSnapshot)renderSms(smsSnapshot);
+ try{const data=await api('login/sms/'+action,{method:'POST',body});if(smsEnabled&&revision===smsRevision)renderSms(data)}
+ catch(e){if(smsEnabled&&revision===smsRevision){toast(e.code==='stale_frame'?'画面已更新，请重新操作':e.message);if(e.code==='stale_frame')clearSmsFrame()}}
+ finally{body=null;if(cancelling)smsCancelling=false;else smsActing=false;await loadSms()}
 }
 function smsInput(form,input,action,key){$(form).onsubmit=e=>{e.preventDefault();const value=$(input).value;$(input).value='';return smsAction(action,{[key]:value})}}
 smsInput('#smsPhoneForm','#smsPhone','start','phone');smsInput('#smsCodeForm','#smsCode','code','code');smsInput('#smsTextForm','#smsText','text','text');
@@ -179,7 +194,7 @@ $('#smsRefresh').onclick=async()=>{await loadSms();if(smsSnapshot)await loadSmsF
 function smsPoint(event,stamp){const r=$('#smsImage').getBoundingClientRect();return [Math.max(0,Math.min(1,(event.clientX-r.left)/r.width)),Math.max(0,Math.min(1,(event.clientY-r.top)/r.height)),stamp]}
 function smsFeedback(point){const dot=$('#smsFinger');dot.hidden=false;dot.style.left=point[0]*100+'%';dot.style.top=point[1]*100+'%'}
 $('#smsImage').onpointerdown=e=>{
- if(e.isPrimary===false||(e.button!==undefined&&e.button!==0)||smsGesture||smsActing||smsFrameLoading||!smsFrame||!smsManual(smsSnapshot))return;
+ if(e.isPrimary===false||(e.button!==undefined&&e.button!==0)||smsGesture||smsActing||smsCancelling||smsFrameLoading||!smsFrame||!smsManual(smsSnapshot))return;
  e.preventDefault();const first=smsPoint(e,0);smsGesture={pointer:e.pointerId,started:e.timeStamp,frame:smsFrame.id,epoch:smsFrame.epoch,points:[first],moved:false,timer:setTimeout(resetSmsGesture,10000)};
  $('#smsImage').setPointerCapture(e.pointerId);smsFeedback(first);
 };

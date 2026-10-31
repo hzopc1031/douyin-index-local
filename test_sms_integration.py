@@ -365,6 +365,59 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             await self.post('start', {'phone': PHONE}, 503)
         self.assertEqual(self.hub.store.get('paused'), {'code': 'login_in_progress'})
 
+    async def test_rejected_start_preserves_inflight_workers_safety_pause(self):
+        query_entered, query_release = threading.Event(), threading.Event()
+        start_entered, start_release = threading.Event(), threading.Event()
+        queries = []
+
+        def bridge(command, payload, timeout):
+            if command == 'status':
+                return {'ok': True, 'state': 'browser_ready'}
+            if command == 'query':
+                queries.append(payload)
+                query_entered.set()
+                if not query_release.wait(5):
+                    raise AssertionError('query fixture deadline exceeded')
+                return {'ok': False, 'code': 'rate_limited'}
+            if command == 'sms_start':
+                start_entered.set()
+                if not start_release.wait(5):
+                    raise AssertionError('start fixture deadline exceeded')
+                return {'ok': False, 'code': 'busy_fetching'}
+            raise AssertionError('unexpected fixture command')
+
+        self.hub.bridge = bridge
+        running, _ = self.hub.store.submit(test_hub.QUERY, 'admin', 'inflight-pause')
+        queued, _ = self.hub.store.submit(test_hub.QUERY, 'admin', 'queued-pause')
+        worker = asyncio.create_task(self.hub.run_one())
+        start = None
+        try:
+            self.assertTrue(await asyncio.to_thread(query_entered.wait, 2))
+            start = asyncio.create_task(self.post('start', {'phone': PHONE}, 409))
+            self.assertTrue(await asyncio.to_thread(start_entered.wait, 2))
+            self.assertEqual(self.hub.store.get('paused'), {'code': 'login_in_progress'})
+            query_release.set()
+            self.assertTrue(await asyncio.wait_for(worker, 2))
+            paused = self.hub.store.get('paused')
+            self.assertEqual(paused['code'], 'rate_limited')
+            self.assertIn('since', paused)
+            start_release.set()
+            result = await asyncio.wait_for(start, 2)
+            self.assertEqual(result['error']['code'], 'busy_fetching')
+            self.assertEqual(self.hub.store.get('paused'), paused)
+            self.assertEqual(self.hub.store.job(running['id'])['status'], 'failed')
+            # Remove the interval guard so only the preserved safety pause can
+            # prevent the next queued job from attempting collection.
+            self.hub.store.set('last_attempt_at', 0)
+            self.assertFalse(await self.hub.run_one())
+            self.assertEqual(self.hub.store.job(queued['id'])['status'], 'queued')
+            self.assertEqual(len(queries), 1)
+            self.assertEqual(self.hub.store.get('daily')['count'], 1)
+        finally:
+            query_release.set()
+            start_release.set()
+            await asyncio.gather(worker, *([start] if start else []), return_exceptions=True)
+
     async def test_all_error_status_mappings_and_no_exception_echo(self):
         for code, (status, _) in SMS_ERRORS.items():
             with patch.object(self.hub, 'bridge', return_value={'ok': False, 'code': code, 'message': PHONE+' '+CODE}):

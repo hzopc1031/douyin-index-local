@@ -433,13 +433,17 @@ def mount(app, hub):
         if action == 'start':
             async with hub._sms_lock:
                 previous = s.get('paused')
-                s.set('paused', {'code': 'login_in_progress'})
+                provisional = {'code': 'login_in_progress'}
+                s.set('paused', provisional)
                 try:
                     result = await hub.sms_call(action, body)
                 except HubError as exc:
                     # A timeout is ambiguous: keep paused until status resolves
                     # it. Known admission failures did not start a new round.
-                    if exc.status != 503 and exc.code != 'login_busy':
+                    # Collection may have set a safety pause while the bridge
+                    # was awaited. Roll back only our still-current pause.
+                    if (exc.status != 503 and exc.code != 'login_busy'
+                            and s.get('paused') == provisional):
                         s.set('paused', previous)
                     raise
                 hub._sms_pause(result)
