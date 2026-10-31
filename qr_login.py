@@ -14,6 +14,7 @@ from pathlib import Path
 from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy, clear_stale_singleton
 
 import client
+from sms_login import LOGIN_COORDINATOR
 
 LOGIN_URL = client.PAGE_URL
 POLL_INTERVAL = 1
@@ -26,7 +27,7 @@ _mode_lock = threading.Lock()
 def login_mode():
     global _mode_warned
     value = os.environ.get('INDEX_HUB_LOGIN_MODE', 'desktop')
-    if value in ('desktop', 'qr'):
+    if value in ('desktop', 'qr', 'sms'):
         return value
     with _mode_lock:
         if not _mode_warned:
@@ -61,9 +62,11 @@ def _timeout(value):
 
 
 QR_TIMEOUT_SECONDS = _timeout(os.environ.get('INDEX_HUB_QR_TIMEOUT'))
-# 上线后需按真实页面校准。
+# QR DOM calibrated from the public page on 2026-10-31; live login still pending.
 SELECTORS = {
-    'qr_image': 'img[class*=qrcode], img[src^="data:image"]',
+    'qr_image': 'div#animate_qrcode_container img[aria-label="二维码"], '
+                'div#douyin_login_comp_scan_code img[aria-label="二维码"], '
+                'img[class*=qrcode], img[src^="data:image"]',
     'expired': ('二维码已失效', '二维码已过期', '已过期'),
     'verification': 'iframe[src*=captcha], #captcha_container, .captcha_verify_container',
     'verification_text': ('安全验证', '滑块'),
@@ -264,7 +267,8 @@ def _playwright():
 class QrLoginManager:
     def __init__(self, browser_factory=None, *, allowed_origin='https://creator.douyin.com',
                  login_url=LOGIN_URL, cookie_url=client.TREND_URL,
-                 clock=time.monotonic, timeout=None, allow_insecure=False, browser_mode=None, profile_dir=None):
+                 clock=time.monotonic, timeout=None, allow_insecure=False, browser_mode=None, profile_dir=None,
+                 coordinator=None, fetch_lock=None):
         self._origin = urlsplit(allowed_origin)
         if (self._origin.hostname is None or self._origin.username or self._origin.password
                 or self._origin.path not in ('', '/') or self._origin.query or self._origin.fragment
@@ -289,6 +293,8 @@ class QrLoginManager:
         self._browser = None
         self._last_browser = None
         self.holder = SessionHolder(clock)
+        self.coordinator = coordinator if coordinator is not None else LOGIN_COORDINATOR
+        self._fetch_lock = fetch_lock
 
     def _allowed(self, url):
         parsed = urlsplit(url)
@@ -302,14 +308,26 @@ class QrLoginManager:
             if self._browser_mode == 'headed' and not os.environ.get('DISPLAY'):
                 raise QrNoDisplay('有头扫码需要桌面显示环境（DISPLAY）')
             if self._session and (self._session.snapshot()['state'] in ('starting', 'qr_ready')
-                                  or self._session.thread.is_alive()):
+                                  or (self._session.thread is not None and self._session.thread.is_alive())):
                 raise QrBusy('扫码登录正在进行')
+            lease = self.coordinator.acquire(self._fetch_lock)
             session = QrLoginSession(self._clock, self._timeout)
             session._set('starting')
             self._session = session
-            session.thread = threading.Thread(target=self._run, args=(session,), daemon=True)
-            session.thread.start()
+            try:
+                session.thread = threading.Thread(target=self._run_coordinated, args=(session, lease), daemon=True)
+                session.thread.start()
+            except Exception:
+                session._set('failed')
+                self.coordinator.release(lease)
+                raise
             return session
+
+    def _run_coordinated(self, session, lease):
+        try:
+            self._run(session)
+        finally:
+            self.coordinator.release(lease)
 
     def holder_info(self):
         return self.holder.info()

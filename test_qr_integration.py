@@ -20,7 +20,7 @@ class WiringTests(unittest.TestCase):
     def test_mode(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(qr_login.login_mode(), 'desktop')
-            for value in ('desktop', 'qr'):
+            for value in ('desktop', 'qr', 'sms'):
                 os.environ['INDEX_HUB_LOGIN_MODE'] = value
                 self.assertEqual(qr_login.login_mode(), value)
             os.environ['INDEX_HUB_LOGIN_MODE'] = 'invalid'
@@ -181,7 +181,7 @@ class DirectRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(image.headers['Cache-Control'], 'no-store')
             self.assertEqual(image.body, b'PNG')
             await call('POST', '/api/v1/login/qr/cancel')
-            for code, status in [('qr_not_ready',404), ('qr_busy',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('qr_no_display',409), ('browser_unavailable',503)]:
+            for code, status in [('qr_not_ready',404), ('qr_busy',409), ('login_busy',409), ('busy_fetching',409), ('qr_disabled',409), ('qr_unsafe_debug',409), ('qr_no_display',409), ('browser_unavailable',503)]:
                 bridge.return_value = {'ok': False, 'code': code}
                 response = await call('GET', '/api/v1/login/qr/image')
                 self.assertEqual(response.status, status)
@@ -208,7 +208,7 @@ class HandlerTests(unittest.TestCase):
                 pass
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {'INDEX_HUB_LOGIN_MODE': 'qr'}), \
                 patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), \
-                patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
+                patch.object(hub_bridge.socketserver, 'ThreadingUnixStreamServer', Server), \
                 patch.object(hub_bridge.os, 'chmod'):
             api = Mock()
             manager = api._qr_manager.return_value

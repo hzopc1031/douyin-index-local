@@ -48,6 +48,40 @@ the HTTP API never receives or returns cookies. API keys are separate random
 secrets, returned once and stored only as SHA-256 hashes. Do not commit keys,
 SQLite state, TLS private keys, real data or browser profiles.
 
+2026-10-31 SMS login scope change: the hub may relay the owner's phone number
+and SMS codes in memory only; never log/persist them, mask phone numbers in
+responses, and never echo codes. No phone whitelist. Keep the SMS start/send,
+pointer/text/code, round/idle deadlines, per-send nonce and consumption guards:
+start once per 10s; resend countdown at least 60s; at most 3 sends/hour and
+6/Shanghai calendar day (counts only, no numbers); pointer at most 3/s;
+text and code each at most 5/round; round at most 10min; code_sent idle at most
+5min; at most 3 code submissions/send. Hub scripts/systemd default to sms;
+INDEX_HUB_LOGIN_MODE=qr or desktop preserves the fallback, and 8443 is unchanged.
+2026-10-31 16:53 user-authorized verification scope change: ordinary gap sliders
+only may use a local MIT-licensed library (captcha-recognizer 1.0.2), at most
+3 automatic submissions per entire login round across send/login verification.
+No paid/third-party solving services or solver network calls. Tests use only
+synthetic offline images. Missing dependency/model, low confidence or failure
+falls back to manual screenshot input, then remote desktop; rotation goes
+directly to remote desktop. Automatic/manual drags share the Qt replayer.
+SMS login/QR DOM selectors are calibrated from the public page captured on
+2026-10-31 (no phone entered or SMS sent): header 登录 opens a top-level dialog,
+possibly after /jingxuan navigation; SMS is active by default, +86 is unchanged,
+get-code is a span and submit a div, with implicit agreement and no checkbox.
+Prefer stable IDs/name/placeholder/aria/text and the login-full-panel- prefix.
+Ignore hidden verifycenter helpers; detect visible verifycenter overlays/iframes
+alongside existing CAPTCHA selectors. Slider geometry/identity selectors have
+not been seen live; solver logic is unchanged. Screenshot animation alone must
+not invalidate input. SMS input trusts only HTTPS creator.douyin.com and
+www.douyin.com on the default TLS port; collection's origin guard is unchanged.
+`fake_sms_page.py` / `test_sms_browser.py` exercise the real Qt/HTTP/Unix bridge
+flow only on 127.0.0.1, with synthetic inputs and an off-record browser. Browser
+tests require INDEX_HUB_REQUIRE_BROWSER_TESTS=1 under Xvfb; missing optional
+solver/model must fail with INDEX_HUB_REQUIRE_SOLVER_TESTS=1. Leak scans cover
+test-owned logs (including native Qt/Chromium), temp files, SQLite and responses.
+`measure_solver_rss.py --qt` reports app/SMS/model process peak and sampled
+process-tree RSS; synthetic page memory is not the deployed cgroup peak.
+
 - Search index is `search_hot_list[].index`; composite index is a separate metric. Never label either as actual search counts.
 - Current scope: 1–5 unique keywords, past two calendar years (maximum 731 inclusive days) for cloud (desktop default 7), nationwide, aweme. Latest available day must come from the official page.
 - Keep TLS validation, the fixed endpoint, no redirects, no automatic retries, and the per-launch single online attempt. Change these only as part of an explicit scope change with an explained design.

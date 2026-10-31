@@ -14,10 +14,11 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import requests
+from login_driver import CREATOR_PAGE
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "results"
-PAGE = "https://creator.douyin.com/creator-micro/creator-count/arithmetic-index"
+PAGE = CREATOR_PAGE
 TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -89,11 +90,14 @@ class Api:
     def __init__(self):
         from browser_login import BrowserLoginState
         from storage import ResultStore
+        from sms_login import LoginCoordinator
         self._browser_login = BrowserLoginState()
         self._fetch_cookie_fingerprint = None
         self._qr_lock = threading.Lock()
+        self._sms_lock = threading.Lock()
         self._page = None
         self._lock = threading.Lock()
+        self._login_coordinator = LoginCoordinator()
         self._result = None
         self._folder = None
         self._attempted = False
@@ -111,7 +115,7 @@ class Api:
         if not hasattr(self, '_qr'):
             with self._qr_lock:
                 if not hasattr(self, '_qr'):
-                    self._qr = QrLoginManager()
+                    self._qr = QrLoginManager(coordinator=self._login_coordinator, fetch_lock=self._lock)
         return self._qr
 
     def _on_auth_failed(self):
@@ -123,6 +127,27 @@ class Api:
         self._fetch_cookie_fingerprint = None
         if login_mode() == 'qr' and hasattr(self, '_qr'):
             self._qr.holder.clear()
+
+    def _sms_manager(self):
+        from login_driver import QtLoginDriver
+        from sms_login import SmsLoginManager, SmsLoginError
+        if not hasattr(self, '_sms'):
+            with self._sms_lock:
+                if not hasattr(self, '_sms'):
+                    native = getattr(self._page, 'native', None)
+                    view = getattr(native, 'webview', None)
+                    if view is None:
+                        raise SmsLoginError('browser_unavailable')
+                    # Qt's get_cookies reads its memory mirror, without the
+                    # pywebview Window's unbounded loaded-event wait.
+                    def session_present():
+                        return self._browser_login.read(native) == 'cookie_present'
+                    def succeeded():
+                        if hasattr(self, '_qr'):
+                            self._qr.holder.clear()
+                    self._sms = SmsLoginManager(QtLoginDriver(view, session_present=session_present),
+                        self._lock, coordinator=self._login_coordinator, on_success=succeeded)
+        return self._sms
 
     def _login_state(self, *, _test_cookie_host=None):
         from webview_cookies import cookie_domains

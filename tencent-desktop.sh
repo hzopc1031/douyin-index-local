@@ -12,6 +12,7 @@ export XDG_RUNTIME_DIR="$HOME/run"
 export DISPLAY=:107
 export PYWEBVIEW_GUI=qt
 export INDEX_HUB_ENABLED=1
+export INDEX_HUB_LOGIN_MODE="${INDEX_HUB_LOGIN_MODE:-sms}"
 export QT_API=pyside6
 export QT_LOGGING_RULES="js=false"
 export LD_LIBRARY_PATH="$PWD/.runtime/qt-libs/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"

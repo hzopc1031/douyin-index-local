@@ -460,7 +460,7 @@ class DiagnosticTests(unittest.TestCase):
                 pass
         with tempfile.TemporaryDirectory() as root:
             with patch.object(hub_bridge, 'SOCKET', Path(root) / 'browser.sock'), \
-                    patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
+                    patch.object(hub_bridge.socketserver, 'ThreadingUnixStreamServer', Server), \
                     patch.object(hub_bridge.os, 'chmod'):
                 api = unittest.mock.Mock()
                 api._login_state.side_effect = RuntimeError('cookie=' + SECRET)
