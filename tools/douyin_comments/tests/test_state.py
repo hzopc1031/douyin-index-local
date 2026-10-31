@@ -109,6 +109,43 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.calls, [])
         self.assertEqual(fake.foreign, [])
 
+    async def test_preflight_missing_login_signal_expires_without_renderer_failure(self):
+        class NoLoginSignal(FakeSite):
+            def html(self, video_id):
+                return '<!doctype html><p>synthetic page without login signals</p>'
+
+        fake = NoLoginSignal()
+        async with self.browser(fake) as browser:
+            with self.assertRaises(Stop) as caught:
+                await asyncio.wait_for(browser.preflight(site.FAKE_ORIGIN, wait_seconds=0.25), 2)
+            self.assertEqual((caught.exception.code, caught.exception.reason), (4, "login_signal_missing"))
+            self.assertFalse(self.control.event.is_set())
+            self.assertEqual(await browser.state(), dict(risk=False, out=False, inside=False))
+            self.assertEqual(browser.budget.used, 0)
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(fake.foreign, [])
+
+    async def test_preflight_expired_window_does_not_start_state_scan(self):
+        fake = FakeSite()
+        async with self.browser(fake) as browser:
+            original = browser.state
+            foreground_scans = []
+
+            async def state(**kwargs):
+                if "deadline" in kwargs:
+                    foreground_scans.append(kwargs["deadline"])
+                return await original(**kwargs)
+
+            with patch.object(browser, "state", side_effect=state):
+                with self.assertRaises(Stop) as caught:
+                    await asyncio.wait_for(browser.preflight(site.FAKE_ORIGIN, wait_seconds=0), 2)
+            self.assertEqual((caught.exception.code, caught.exception.reason), (4, "login_signal_missing"))
+            self.assertEqual(foreground_scans, [])
+            self.assertFalse(self.control.event.is_set())
+            self.assertEqual(browser.budget.used, 0)
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(fake.foreign, [])
+
     async def test_login_deadline_bounds_pending_state_and_deletes_qr(self):
         fake = FakeSite("login-expired")
         original = Frame.evaluate

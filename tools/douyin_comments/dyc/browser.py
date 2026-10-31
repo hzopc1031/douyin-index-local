@@ -396,6 +396,8 @@ class Browser:
         end = asyncio.get_running_loop().time() + wait_seconds
         while True:
             self.control.check()
+            if asyncio.get_running_loop().time() >= end:
+                raise Stop(4, "login_signal_missing")
             state = await self.state(deadline=end)
             if state["risk"]:
                 raise Stop(3, "verification_widget")

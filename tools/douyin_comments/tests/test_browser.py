@@ -771,6 +771,89 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_reply_root_consumes_final_empty_seed_at_nonzero_cursor(self):
         await self.check_empty_reply_seed(False, "19")
 
+    async def check_off_path_reply_seed(self, reported, seed, replays, reason, reply_count):
+        class OffPathReplySeed(FakeSite):
+            def html(self, video_id):
+                return super().html(video_id).replace(
+                    "u.pathname = cfg.reply;",
+                    "u.pathname = cfg.reply; u.searchParams.set(cfg.params.cursor, '19');")
+
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if not kind:
+                    await super().deliver(route)
+                    return
+                cursor = parse_qs(urlsplit(route.request.url).query)[site.PARAM["cursor"]][0]
+                self.calls.append((kind, cursor))
+                if kind == "top":
+                    data = fixture_page([fixture_comment(10001, reported)], 0)
+                else:
+                    data = seed if cursor == "19" else replays[cursor]
+                await route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+        args, fake = self.args(), OffPathReplySeed(reply_seed=True)
+        args.urls = args.urls[:1]
+        code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        complete = reason == "exhausted"
+        status = "complete" if complete else "partial"
+        self.assertEqual((code, result["exit_reason"]), (0, "complete") if complete else (2, "partial"))
+        video, = result["videos"]
+        self.assertEqual((video["status"], video["top_count"], video["reply_count"]),
+                         (status, 1, reply_count))
+        if complete:
+            self.assertEqual(video["partial_threads"], [])
+        else:
+            thread, = video["partial_threads"]
+            self.assertEqual((thread["reason"], thread["reported"], thread["collected"]),
+                             (reason, reported, reply_count))
+            self.assertIn(reason, (args.out / "summary.md").read_text())
+        with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual(len(rows), 1 + reply_count)
+        self.assertTrue(all(row["thread_status"] == status for row in rows))
+        self.assertEqual(json.loads((args.out / "run.json").read_text()), result)
+        self.assertEqual(fake.calls, [("top", "0"), ("reply", "19")] +
+                         [("reply", cursor) for cursor in replays])
+        self.assertEqual((video["pages"], result["requests"]), (len(fake.calls), len(fake.calls)))
+        self.assertEqual(fake.foreign, [])
+
+    async def test_nonzero_reply_root_validates_off_path_empty_seed_with_more(self):
+        await self.check_off_path_reply_seed(
+            1, fixture_page([], 23, True),
+            {"0": fixture_page([fixture_comment(10100)], 7)}, "empty_with_more", 1)
+
+    async def test_unknown_reply_count_validates_off_path_empty_seed_with_more(self):
+        await self.check_off_path_reply_seed(
+            None, fixture_page([], 23, True),
+            {"0": fixture_page([fixture_comment(10100)], 7)}, "empty_with_more", 1)
+
+    async def test_off_path_reply_seed_validates_unchanged_cursor(self):
+        await self.check_off_path_reply_seed(
+            1, fixture_page([fixture_comment(10100)], 19, True),
+            {"0": fixture_page([fixture_comment(10100)], 7)}, "cursor_unchanged", 1)
+
+    async def test_off_path_reply_seed_validates_duplicate_continuation(self):
+        await self.check_off_path_reply_seed(
+            1, fixture_page([fixture_comment(10100)], 23, True),
+            {"0": fixture_page([fixture_comment(10100)], 7),
+             "23": fixture_page([fixture_comment(10100)], 29)}, "duplicate_page", 1)
+
+    async def test_off_path_reply_seed_follows_valid_continuation(self):
+        await self.check_off_path_reply_seed(
+            None, fixture_page([fixture_comment(10100)], 23, True),
+            {"0": fixture_page([fixture_comment(10100)], 7),
+             "23": fixture_page([fixture_comment(10101)], 29)}, "exhausted", 2)
+
+    async def test_final_off_path_reply_seed_allows_completion(self):
+        await self.check_off_path_reply_seed(
+            1, fixture_page([], 23),
+            {"0": fixture_page([fixture_comment(10100)], 7)}, "exhausted", 1)
+
+    async def test_final_off_path_reply_seed_keeps_main_walk_failure(self):
+        await self.check_off_path_reply_seed(
+            1, fixture_page([], 23),
+            {"0": fixture_page([fixture_comment(10100)], 0, True)}, "cursor_unchanged", 1)
+
     async def test_reply_page_total_shortfall_is_exported_as_partial_batch(self):
         class Shortfall(FakeSite):
             async def deliver(self, route):

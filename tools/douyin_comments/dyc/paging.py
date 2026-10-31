@@ -110,16 +110,20 @@ async def collect(video, transport, page_budget=1500):
             # Zero replies permits skipping a new request, never validation of
             # an already received seed (including an empty page with more=1).
             # Unknown reported counts still require independent pagination.
-            if thread.reported == 0 and not thread.ids:
-                seed_cursors = getattr(transport, "seed_cursors", None)
-                cursors = seed_cursors(video.video_id, root) if seed_cursors else ()
-                reason = "exhausted"
-                for cursor in cursors:
-                    observed = await walk(root, cursor)
-                    if observed != "exhausted":
-                        reason = observed
-            else:
+            reason = "exhausted"
+            if thread.reported != 0 or thread.ids:
                 reason = await walk(root)
+            # The cursor-0 walk may never reach an observed seed. Validate its
+            # pagination too, regardless of the reported count, before declaring
+            # completion. A successful extra walk cannot erase an earlier fault.
+            seed_cursors = getattr(transport, "seed_cursors", None)
+            while seed_cursors:
+                cursors = seed_cursors(video.video_id, root)
+                if not cursors:
+                    break
+                observed = await walk(root, cursors[0])
+                if reason == "exhausted":
+                    reason = observed
             if thread.reported is not None and len(thread.ids) < thread.reported:
                 reason = "reply_shortfall" if reason == "exhausted" else reason
             thread.reason = reason
