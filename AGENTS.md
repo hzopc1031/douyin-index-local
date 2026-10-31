@@ -48,6 +48,20 @@ the HTTP API never receives or returns cookies. API keys are separate random
 secrets, returned once and stored only as SHA-256 hashes. Do not commit keys,
 SQLite state, TLS private keys, real data or browser profiles.
 
+2026-10-31 SMS login scope change: the hub may relay the owner's phone number
+and SMS codes in memory only; never log/persist them, mask phone numbers in
+responses, and never echo codes. No phone whitelist. Keep the SMS start/send,
+pointer/text/code, round/idle deadlines, per-send nonce and consumption guards.
+2026-10-31 16:53 user-authorized verification scope change: ordinary gap sliders
+only may use a local MIT-licensed library (captcha-recognizer 1.0.2), at most
+3 automatic submissions per entire login round across send/login verification.
+No paid/third-party solving services or solver network calls. Tests use only
+synthetic offline images. Missing dependency/model, low confidence or failure
+falls back to manual screenshot input, then remote desktop; rotation goes
+directly to remote desktop. Automatic/manual drags share the Qt replayer.
+All SMS selectors remain uncalibrated in SMS_SELECTORS until user-assisted
+real-page calibration. Screenshot animation alone must not invalidate input.
+
 - Search index is `search_hot_list[].index`; composite index is a separate metric. Never label either as actual search counts.
 - Current scope: 1–5 unique keywords, past two calendar years (maximum 731 inclusive days) for cloud (desktop default 7), nationwide, aweme. Latest available day must come from the official page.
 - Keep TLS validation, the fixed endpoint, no redirects, no automatic retries, and the per-launch single online attempt. Change these only as part of an explicit scope change with an explained design.

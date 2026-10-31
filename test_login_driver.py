@@ -1,9 +1,11 @@
 """Synthetic geometry/dispatcher tests. Qt tests are opt-in under Xvfb."""
 import math
+import json
 import os
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 
 from login_driver import (Capture, DriverError, DriverTimeout, FakeDriver, FrameMetadata,
                           QtDispatcher, css_to_view, interpolate, probe_script, validate_points)
@@ -22,6 +24,9 @@ class GeometryTests(unittest.TestCase):
                     self.assertEqual(meta.css_point(0, 0), (16, 32))
         downsampled = FrameMetadata(16, 32, 120, 60, 2, 2, .5)
         self.assertEqual(downsampled.css_point(.5, .5), (46, 47))
+        rounded = FrameMetadata(16, 32, 77, 47, 1.25, 1.5, 1, 51, 31)
+        for actual, expected in zip(rounded.css_point(1, 1), (16+51/1.25, 32+31/1.25)):
+            self.assertAlmostEqual(actual, expected)
 
     def test_nonfinite_and_out_of_bounds_rejected(self):
         frame = FrameMetadata(0, 0, 100, 100)
@@ -70,6 +75,34 @@ class GeometryTests(unittest.TestCase):
         self.assertNotIn('246810', output)
         self.assertNotIn('.value', probe_script(SMS_SELECTORS))
         self.assertNotIn('document.cookie', probe_script(SMS_SELECTORS))
+
+    def test_json_transport_for_nested_objects_arrays_null_and_invalid_results(self):
+        from login_driver import QtLoginDriver
+        calls = []
+        values = [dict(found={'phone': True}, rects={'phone': dict(x=1, y=2, width=30, height=40)}),
+                  None, [dict(x=1, y=2, width=3, height=4)], 'invalid']
+        def js(script, callback):
+            calls.append(script)
+            # Reproduce bindings which cannot marshal raw JS object results.
+            value = values.pop(0)
+            callback(json.dumps(value) if script.startswith('JSON.stringify(') and value != 'invalid' else '')
+        class Immediate:
+            def call_async(self, function):
+                result = []
+                def finish(value=None, error=None):
+                    if error:
+                        raise error
+                    result.append(value)
+                function(finish)
+                return result[0]
+        page = SimpleNamespace(runJavaScript=js)
+        driver = QtLoginDriver(SimpleNamespace(page=lambda: page), dispatcher=Immediate())
+        self.assertEqual(driver.probe()['rects']['phone']['width'], 30)
+        self.assertIsNone(driver.element_rect('verification'))
+        self.assertEqual(driver._read_json('[]', 'capture_failed')[0]['width'], 3)
+        with self.assertRaisesRegex(DriverError, 'probe_failed'):
+            driver.probe()
+        self.assertTrue(all(s.startswith('JSON.stringify(') for s in calls))
 
 
 @unittest.skipUnless(os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1', 'Qt tests require explicit Xvfb opt-in')
@@ -162,7 +195,11 @@ class DispatcherTests(unittest.TestCase):
                 # A read-only geometry callback; no input text enters JS.
                 if 'private_fields' in script:
                     raise AssertionError('expected selector value')
-                finish([dict(x=0, y=0, width=100, height=40)])
+                self.assert_json(script)
+                finish(json.dumps([dict(x=0, y=0, width=100, height=40)]))
+            @staticmethod
+            def assert_json(script):
+                assert script.startswith('JSON.stringify(')
         class View(QWidget):
             def zoomFactor(self):
                 return 2
@@ -199,6 +236,39 @@ class DispatcherTests(unittest.TestCase):
         meta = captures[0].metadata
         pixel = QImage.fromData(captures[0].png).pixelColor(int(50*meta.scale), int(20*meta.scale))
         self.assertEqual(pixel.name(), '#202020')
+
+    def test_qtimer_drag_cancellation_releases_button_on_gui_thread(self):
+        from PySide6.QtCore import QEvent, QThread, QTimer
+        from PySide6.QtWidgets import QWidget
+        from login_driver import QtLoginDriver
+        cancel = threading.Event()
+        events, errors = [], []
+        class View(QWidget):
+            def zoomFactor(self):
+                return 1
+            def event(self, event):
+                if event.type() in (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease):
+                    events.append((event.type(), QThread.currentThread() == self.thread()))
+                    if event.type() == QEvent.MouseButtonPress:
+                        QTimer.singleShot(40, cancel.set)
+                return super().event(event)
+        view = View()
+        view.resize(400, 200)
+        view.show()
+        self.addCleanup(view.close)
+        driver = QtLoginDriver(view)
+        def work():
+            try:
+                driver.drag([(20, 50, 0), (200, 50, 900)], cancel=cancel)
+            except DriverError as exc:
+                errors.append(exc.code)
+        worker = threading.Thread(target=work)
+        worker.start()
+        self.pump(worker)
+        self.assertEqual(errors, ['cancelled'])
+        self.assertEqual(events[0][0], QEvent.MouseButtonPress)
+        self.assertEqual(events[-1][0], QEvent.MouseButtonRelease)
+        self.assertTrue(all(on_gui for _, on_gui in events))
 
 
 @unittest.skipUnless(os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1', 'Qt tests require explicit Xvfb opt-in')
@@ -269,8 +339,7 @@ class QtInputTests(unittest.TestCase):
         return output[0]
 
     def js(self, script):
-        return self.work(lambda: self.driver.dispatcher.call_async(
-            lambda finish: self.view.page().runJavaScript(script, finish)))
+        return self.work(lambda: self.driver._read_json(script, 'fixture_js_failed'))
 
     def test_real_probe_capture_key_events_and_manual_drag(self):
         from PySide6.QtGui import QImage
@@ -316,6 +385,16 @@ class QtInputTests(unittest.TestCase):
             with self.assertRaisesRegex(DriverError, 'out_of_bounds'):
                 self.driver.click(10000, 20)
         self.work(rejected)
+
+    def test_real_probe_identity_ignores_animation_but_detects_new_challenge(self):
+        before = self.work(self.driver.probe)
+        self.js("(() => { document.querySelector('#captcha_container').style.background='#123'; return true; })()")
+        animated = self.work(self.driver.probe)
+        self.assertEqual(before['challenge_key'], animated['challenge_key'])
+        self.js("(() => { document.querySelector('#captcha_container').setAttribute('data-challenge-id','synthetic-new'); return true; })()")
+        refreshed = self.work(self.driver.probe)
+        self.assertNotEqual(before['challenge_key'], refreshed['challenge_key'])
+        self.assertNotIn('synthetic-new', repr(refreshed))
 
 
 if __name__ == '__main__':

@@ -37,20 +37,34 @@ class FrameMetadata:
     zoom: float = 1
     dpr: float = 1
     image_scale: float = 1  # Optional PNG downsampling, independent of Qt zoom.
+    logical_width: float | None = None  # Actual cropped Qt extent, including pixel rounding.
+    logical_height: float | None = None
 
     def __post_init__(self):
         if (not all(_number(v) for v in (self.x0, self.y0, self.width, self.height, self.zoom, self.dpr, self.image_scale))
                 or min(self.x0, self.y0) < 0 or min(self.width, self.height, self.zoom, self.dpr, self.image_scale) <= 0):
+            raise DriverError('invalid_frame')
+        if ((self.logical_width is None) != (self.logical_height is None)
+                or any(v is not None and (not _number(v) or v <= 0)
+                       for v in (self.logical_width, self.logical_height))):
             raise DriverError('invalid_frame')
 
     @property
     def scale(self):
         return self.zoom * self.dpr * self.image_scale
 
+    @property
+    def x_scale(self):
+        return self.width*self.zoom/self.logical_width if self.logical_width else self.scale
+
+    @property
+    def y_scale(self):
+        return self.height*self.zoom/self.logical_height if self.logical_height else self.scale
+
     def css_point(self, u, v):
         if not all(_number(n) and 0 <= n <= 1 for n in (u, v)):
             raise DriverError('out_of_bounds')
-        return self.x0 + u * self.width / self.scale, self.y0 + v * self.height / self.scale
+        return self.x0 + u * self.width / self.x_scale, self.y0 + v * self.height / self.y_scale
 
 
 @dataclass(frozen=True)
@@ -89,10 +103,9 @@ def validate_points(kind, points):
 
 
 def interpolate(points, max_step=8):
-    """Densify a supplied human trajectory; retain its endpoints and timestamps.
+    """Densify a manual or solver trajectory, preserving endpoints/timing.
 
-    This is replay only: no trajectory is inferred from a CAPTCHA or generated
-    from a target. Coordinates here are Qt logical pixels.
+    Coordinates here are Qt logical pixels. Recognition lives outside the driver.
     """
     if not _number(max_step) or max_step <= 0 or not points:
         raise DriverError('invalid_pointer')
@@ -203,10 +216,20 @@ def probe_script(selectors):
       const has = key => s[key].some(t => text.includes(t));
       const countdown = find('countdown');
       const match = countdown && countdown.textContent.match(new RegExp(s.countdown_pattern));
+      const verification = find('verification');
+      // Hash identity attributes in-page. Never return image URLs/IDs, which
+      // can contain opaque tokens. Animated pixels do not change this identity.
+      const assets = verification ? [verification, ...verification.querySelectorAll(s.challenge_assets)] : [];
+      const identity = assets.map(e => s.challenge_attributes.map(a => e.getAttribute(a) || '').join('|')).join(';');
+      let hash = 2166136261;
+      for (let i=0; i<identity.length; i++) hash = Math.imul(hash ^ identity.charCodeAt(i), 16777619);
       return {url:location.origin + location.pathname, found, rects,
         login_page:s.login_paths.some(p => location.pathname.toLowerCase().includes(p)),
         login_form:found.login_form, verification:found.verification || has('verification_text'),
         rate_limited:has('rate_text'), code_invalid:has('code_error_text'), error:has('error_text'),
+        blocked:has('blocked_text'), verification_failed:has('verification_error_text'),
+        challenge_key:String(hash >>> 0),
+        challenge_kind:has('rotation_text') ? 'rotation' : has('gap_text') ? 'gap_slider' : 'unknown',
         countdown:match ? Number(match[1]) : null};
     })()''' % json.dumps(selectors, ensure_ascii=True)
 
@@ -224,17 +247,28 @@ class QtLoginDriver:
         self.dispatcher = dispatcher or QtDispatcher()
 
     def probe(self):
+        value = self._read_json(self._script, 'probe_failed')
+        if not isinstance(value, dict):
+            raise DriverError('probe_failed')
+        try:
+            value['session_present'] = bool(self._session_present())
+        except Exception:
+            raise DriverError('probe_failed') from None
+        return value
+
+    def _read_json(self, script, error, transform=None):
+        # PySide's runJavaScript callback conversion is not a portable transport
+        # for JS objects/arrays (some bindings deliver an empty string). Use a
+        # JSON string across the Qt boundary, including nested geometry arrays.
+        # Only our read-only summaries enter this path, never field values.
         def run(finish):
             def receive(value):
-                if not isinstance(value, dict):
-                    finish(error=DriverError('probe_failed'))
-                    return
                 try:
-                    value['session_present'] = bool(self._session_present())
-                    finish(value)
+                    decoded = json.loads(value)
+                    finish(transform(decoded) if transform else decoded)
                 except Exception:
-                    finish(error=DriverError('probe_failed'))
-            self._view.page().runJavaScript(self._script, receive)
+                    finish(error=DriverError(error))
+            self._view.page().runJavaScript('JSON.stringify(' + script + ')', receive)
         return self.dispatcher.call_async(run)
 
     def element_rect(self, key):
@@ -247,7 +281,7 @@ class QtLoginDriver:
               && (!rule.text || rule.text.some(t => e.textContent.includes(t))); });
           if (!e) return null; const r = e.getBoundingClientRect();
           return {x:r.x,y:r.y,width:r.width,height:r.height}; })()''' % json.dumps(self._selectors[key])
-        return self.dispatcher.call_async(lambda finish: self._view.page().runJavaScript(script, finish))
+        return self._read_json(script, 'probe_failed')
 
     def grab(self, rect=None):
         from PySide6.QtCore import QBuffer, QIODevice, QRect, Qt
@@ -289,21 +323,17 @@ class QtLoginDriver:
                     raise DriverError('capture_failed')
                 png = bytes(buffer.data())
                 if len(png) <= 300*1024:
-                    return Capture(png, FrameMetadata(left/zoom, top/zoom, w, h, zoom, dpr, 1/factor))
+                    return Capture(png, FrameMetadata(left/zoom, top/zoom, w, h, zoom, dpr, 1/factor,
+                        (right-left)*w*factor/bitmap.width(), (bottom-top)*h*factor/bitmap.height()))
                 factor *= 2
         script = '''Array.from(document.querySelectorAll(%s)).map(e => {
           const r = e.getBoundingClientRect();
           return {x:r.x,y:r.y,width:r.width,height:r.height}; })''' % json.dumps(self._selectors['private_fields'])
-        def run(finish):
-            def receive(rectangles):
-                try:
-                    if not isinstance(rectangles, list):
-                        raise DriverError('capture_failed')
-                    finish(capture(rectangles))
-                except Exception:
-                    finish(error=DriverError('capture_failed'))
-            self._view.page().runJavaScript(script, receive)
-        return self.dispatcher.call_async(run)
+        def masked_capture(rectangles):
+            if not isinstance(rectangles, list):
+                raise DriverError('capture_failed')
+            return capture(rectangles)
+        return self._read_json(script, 'capture_failed', masked_capture)
 
     def _point(self, x, y, frame=None):
         from PySide6.QtCore import QPointF
@@ -342,25 +372,67 @@ class QtLoginDriver:
                 or any(b[2]-a[2] < 16 for a, b in zip(points, points[1:]))):
             raise DriverError('invalid_pointer')
         def convert():
-            return [(p.x(), p.y(), t) for x, y, t in points for p in (self._point(x, y, frame),)]
-        path = interpolate(self.dispatcher.call(convert, cancel=cancel))
-        from PySide6.QtCore import QPointF
-        last = path[0]
-        pressed = False
-        def press():
-            self._mouse('press', QPointF(*last[:2]))
-            return time.monotonic()
+            return ([(p.x(), p.y(), t) for x, y, t in points for p in (self._point(x, y, frame),)],
+                    self._view.zoomFactor(), self._view.devicePixelRatioF())
+        path, zoom, dpr = self.dispatcher.call(convert, cancel=cancel)
+        path = interpolate(path)
+        from PySide6.QtCore import QPointF, QTimer
+        done = threading.Event()
+        replay = dict(last=path[0], index=1, pressed=False, error=None, timer=None)
+        def stop(error=None):
+            if replay['timer'] is not None:
+                replay['timer'].stop()
+                replay['timer'].deleteLater()
+                replay['timer'] = None
+            if replay['pressed']:
+                self._mouse('release', QPointF(*replay['last'][:2]))
+                replay['pressed'] = False
+            replay['error'] = error
+            done.set()
+        def start():
+            # One GUI-owned timer, with a short cancellation heartbeat. The
+            # worker waits for replay, never blocks the GUI with sleep/wait.
+            timer = replay['timer'] = QTimer(self._view)
+            timer.setSingleShot(True)
+            started = time.monotonic()
+            def tick():
+                try:
+                    if cancel is not None and cancel.is_set():
+                        stop(DriverError('cancelled'))
+                        return
+                    if self._view.zoomFactor() != zoom or self._view.devicePixelRatioF() != dpr:
+                        stop(DriverError('stale_frame'))
+                        return
+                    elapsed = (time.monotonic()-started)*1000
+                    while replay['index'] < len(path) and path[replay['index']][2] <= elapsed:
+                        point = path[replay['index']]
+                        # Recheck the current transform/bounds throughout replay.
+                        self._point(point[0]/zoom, point[1]/zoom, frame)
+                        self._mouse('move', QPointF(*point[:2]))
+                        replay['last'] = point
+                        replay['index'] += 1
+                    if replay['index'] == len(path):
+                        stop()
+                    else:
+                        timer.start(max(1, min(50, math.ceil(path[replay['index']][2]-elapsed))))
+                except Exception:
+                    stop(DriverError('driver_failed'))
+            timer.timeout.connect(tick)
+            if cancel is not None and cancel.is_set():
+                stop(DriverError('cancelled'))
+                return
+            self._mouse('press', QPointF(*path[0][:2]))
+            replay['pressed'] = True
+            tick()
         try:
-            started = self.dispatcher.call(press, cancel=cancel)
-            pressed = True
-            for point in path[1:]:
-                self._wait(max(0, started + point[2]/1000 - time.monotonic()), cancel)
-                self.dispatcher.call(lambda p=point: self._mouse('move', QPointF(*p[:2])), cancel=cancel)
-                last = point
+            self.dispatcher.call(start, cancel=cancel)
+            if not done.wait(points[-1][2]/1000+1):
+                raise DriverTimeout()
+            if replay['error'] is not None:
+                raise replay['error']
         finally:
-            if pressed:
-                # Always release even on cancellation; no stuck mouse button.
-                self.dispatcher.call(lambda: self._mouse('release', QPointF(*last[:2])))
+            if not done.is_set():
+                self.dispatcher.call(lambda: stop(DriverError('cancelled')))
 
     @staticmethod
     def _wait(seconds, cancel):

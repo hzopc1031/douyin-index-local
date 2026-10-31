@@ -446,30 +446,183 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(DriverError, 'frame_too_large'):
             self.manager._capture(self.manager._session)
 
-    def test_solver_absent_false_exception_and_true_all_require_page_evidence(self):
-        for mode in ('absent', 'false', 'exception', 'true'):
+    def gap(self, key='synthetic-challenge'):
+        return page(verification=True, challenge_kind='gap_slider', challenge_key=key)
+
+    def enter_gap(self, key='synthetic-challenge'):
+        self.step(self.gap(key))
+        self.step(self.gap(key))  # A stable challenge epoch, not just animated pixels.
+
+    def test_solver_absent_none_exception_and_path_require_page_evidence(self):
+        for mode in ('absent', 'none', 'exception', 'path'):
             with self.subTest(mode=mode):
                 solver = None if mode == 'absent' else Mock()
                 if solver:
-                    solver.solve.return_value = mode == 'true'
+                    solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]] if mode == 'path' else None
                     if mode == 'exception':
                         solver.solve.side_effect = RuntimeError(PHONE+CODE)
                 self.manager.solver = solver
-                self.sent(verify=True)
-                self.submitted()
-                self.step(page(verification=True))
-                self.state('verify_login')
-                if mode == 'true':
-                    self.assertEqual(self.manager.status()['frame_id'], 0)
-                    self.step(page(verification=True))
+                self.start()
+                self.step(page())
+                self.step()
+                self.enter_gap()
+                self.state('verify_send')
                 self.assertIsNotNone(self.manager.frame()['png'])
-                self.step(page(verification=True))
+                self.step(page(countdown=60))
+                self.submitted()
+                self.enter_gap('synthetic-login-challenge')
+                self.state('verify_login')
+                session = self.manager._session
                 if solver:
-                    self.assertEqual([c.args[1] for c in solver.solve.call_args_list], ['verify_send', 'verify_login'])
+                    phases = [c.args[1]['phase'] for c in solver.solve.call_args_list]
+                    self.assertEqual(phases, ['verify_send', 'verify_login'] if mode == 'path' else ['verify_send'])
+                if mode == 'path':
+                    self.assertEqual(session.auto_submissions, 2)
+                    self.step(self.gap('synthetic-login-challenge'), advance=3)
+                self.assertEqual(session.verification_mode, 'manual')
                 self.step(success())
                 self.state('succeeded')
                 self.cleanup()
                 self.now += 3600
+
+    def test_three_automatic_submissions_per_round_across_both_phases(self):
+        solver = Mock()
+        solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
+        self.manager.solver = solver
+        self.start()
+        self.step(page())
+        self.step()
+        self.enter_gap('synthetic-send')
+        self.step(page(countdown=60))
+        self.submitted()
+        self.enter_gap('synthetic-login-1')
+        self.enter_gap('synthetic-login-2')
+        self.enter_gap('synthetic-login-3')
+        session = self.manager._session
+        self.assertEqual(session.auto_submissions, 3)
+        self.assertEqual(solver.solve.call_count, 3)
+        self.assertEqual(sum(a[0] == 'drag' for a in self.driver.actions), 3)
+        self.assertEqual(session.verification_mode, 'manual')
+        self.state('verify_login')
+
+    def test_animation_updates_picture_without_invalidating_manual_input(self):
+        self.start()
+        self.step(page(verification=True, challenge_key='synthetic-one'))
+        session = self.manager._session
+        old = session.frame_id
+        epoch = session.challenge_epoch
+        self.driver.capture = Capture(b'animated-synthetic-png', self.driver.capture.metadata)
+        self.step(page(verification=True, challenge_key='synthetic-one'))
+        self.assertGreater(session.frame_id, old)
+        self.assertEqual(session.challenge_epoch, epoch)
+        self.assertTrue(self.manager._valid_frame(session, old))
+        # Retrieval still has picture-version semantics; gestures use epochs.
+        self.error('stale_frame', self.manager.frame, old)
+        from sms_login import _Action
+        action = _Action('pointer', (old, 'tap', [[.5, .5, 0]]))
+        self.manager._action(session, action)
+        self.assertFalse(action.error)
+        self.assertIn(('click', 150, 75), self.driver.actions)
+        self.step(page(verification=True, challenge_key='synthetic-two'))
+        self.error('stale_frame', self.manager.pointer, old, 'tap', [[.5, .5, 0]])
+
+    def test_fallback_order_auto_manual_then_remote_and_rotation_direct(self):
+        solver = Mock()
+        solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
+        self.manager.solver = solver
+        self.start()
+        self.enter_gap()
+        session = self.manager._session
+        self.assertEqual(session.verification_mode, 'auto')
+        self.step(self.gap(), advance=3)
+        self.assertEqual(session.verification_mode, 'manual')
+        from sms_login import _Action
+        action = _Action('pointer', (session.frame_id, 'drag', [[.1, .8, 0], [.7, .8, 800]]))
+        self.manager._action(session, action)
+        self.assertFalse(action.error)
+        self.step(self.gap(), advance=3)
+        self.assertEqual(session.verification_mode, 'desktop')
+        self.assertIn('远程桌面', self.manager.status()['message'])
+        self.error('remote_desktop_required', self.manager.frame)
+        self.step(success())  # Remote desktop continues in the same official page.
+        self.state('succeeded')
+        self.cleanup()
+        self.now += 10
+        solver.reset_mock()
+        self.start()
+        before = len(self.driver.actions)
+        self.step(page(verification=True, challenge_kind='rotation'))
+        self.assertEqual(self.manager._session.verification_mode, 'desktop')
+        solver.solve.assert_not_called()
+        self.assertEqual(len(self.driver.actions), before)
+
+    def test_unknown_challenges_use_manual_and_stop_signals_prevent_solver(self):
+        solver = Mock()
+        self.manager.solver = solver
+        self.start()
+        self.step(page(verification=True, challenge_kind='click'))
+        self.assertEqual(self.manager._session.verification_mode, 'manual')
+        solver.solve.assert_not_called()
+        self.step(page(verification=True, blocked=True))
+        self.state('failed')
+        solver.solve.assert_not_called()
+
+    def test_failed_automatic_replay_is_counted_and_never_retried(self):
+        solver = Mock()
+        solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
+        self.manager.solver = solver
+        self.start()
+        with patch.object(self.driver, 'drag', side_effect=DriverError('driver_failed')):
+            self.enter_gap()
+        session = self.manager._session
+        self.assertEqual(session.auto_submissions, 1)
+        self.assertEqual(session.verification_mode, 'manual')
+        self.enter_gap('synthetic-replacement')
+        solver.solve.assert_called_once()
+        self.assertEqual(session.verification_mode, 'manual')
+
+    def test_automatic_replay_blocks_manual_admission_and_refresh_does_not_retry(self):
+        solver = Mock()
+        solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
+        self.manager.solver = solver
+        self.start()
+        self.enter_gap()
+        self.error('verification_busy', self.manager.type_into_focused, 'A1')
+        self.error('verification_busy', self.manager.pointer, self.manager.status()['frame_id'], 'tap', [[.5, .5, 0]])
+        self.manager.refresh_frame()
+        self.step(self.gap(), advance=.7)
+        solver.solve.assert_called_once()
+
+    def test_layout_or_piece_motion_is_not_a_new_automatic_attempt(self):
+        solver = Mock()
+        solver.solve.return_value = [[.1, .8, 0], [.7, .8, 800]]
+        self.manager.solver = solver
+        self.start()
+        self.enter_gap()
+        changed = self.gap()
+        changed['rects']['slider_piece'] = dict(x=120, y=30, width=40, height=40)
+        self.step(changed)
+        self.step(changed)
+        solver.solve.assert_called_once()
+        self.assertEqual(self.manager._session.verification_mode, 'manual')
+
+    def test_page_changed_or_cancelled_during_inference_never_drags(self):
+        for changed in (self.gap('synthetic-new'), page(rate_limited=True), success(), 'cancel'):
+            self.start()
+            solver = Mock()
+            def solve(*args):
+                if changed == 'cancel':
+                    self.manager.cancel()
+                else:
+                    self.driver.probes.append(changed)
+                return [[.1, .8, 0], [.7, .8, 800]]
+            solver.solve.side_effect = solve
+            self.manager.solver = solver
+            before = sum(a[0] == 'drag' for a in self.driver.actions)
+            self.enter_gap()
+            self.assertEqual(sum(a[0] == 'drag' for a in self.driver.actions), before)
+            self.cleanup()
+            self.now += 10
 
     def test_queued_code_scrubbed_on_cancel_and_stale_nonce_never_types(self):
         self.sent()

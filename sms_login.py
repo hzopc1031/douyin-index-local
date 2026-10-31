@@ -24,7 +24,8 @@ from login_driver import DriverError, DriverTimeout, validate_points
 # UNCALIBRATED: all DOM selectors and text detection belong in this table.
 # Calibration must change this table only, never add page-specific driver logic.
 SMS_SELECTORS = {
-    'elements': ('tab', 'phone', 'send', 'countdown', 'code', 'submit', 'verification', 'login_form'),
+    'elements': ('tab', 'phone', 'send', 'countdown', 'code', 'submit', 'verification', 'login_form',
+                 'slider_handle', 'slider_track', 'slider_image', 'slider_piece'),
     'tab': {'css': 'button, [role=tab], span', 'text': ('验证码登录', '短信登录')},
     'phone': {'css': 'input[type=tel], input[placeholder*=手机号]'},
     'send': {'css': 'button, [role=button]', 'text': ('获取验证码', '发送验证码', '重新发送')},
@@ -33,10 +34,20 @@ SMS_SELECTORS = {
     'submit': {'css': 'button, [role=button]', 'text': ('登录',)},
     'verification': {'css': 'iframe[src*=captcha], #captcha_container, .captcha_verify_container'},
     'login_form': {'css': 'input[type=tel], input[placeholder*=手机号], input[autocomplete=one-time-code]'},
+    'slider_handle': {'css': '.secsdk-captcha-drag-icon'},
+    'slider_track': {'css': '.secsdk-captcha-drag-wrapper'},
+    'slider_image': {'css': '#captcha-verify-image'},
+    'slider_piece': {'css': '.captcha_verify_img_slide'},
+    'challenge_assets': 'img, canvas, iframe',
+    'challenge_attributes': ('src', 'data-challenge-id'),
+    'rotation_text': ('旋转', '转正'),
+    'gap_text': ('拖动滑块完成拼图', '拖动滑块使拼图完整'),
     'private_fields': 'input:not([type=button]):not([type=submit]), textarea, [contenteditable=true]',
     'countdown_pattern': r'(\d{1,3})\s*(?:秒|s后)',
     'verification_text': ('安全验证', '滑块', '身份验证'),
     'rate_text': ('发送频繁', '操作频繁', '发送次数过多'),
+    'blocked_text': ('账号异常', '拒绝访问', '访问被拒绝'),
+    'verification_error_text': ('验证失败', '请重试'),
     'code_error_text': ('验证码错误', '验证码已过期', '验证码失效'),
     'error_text': ('登录失败', '系统异常', '网络异常'),
     'login_paths': ('login',),
@@ -96,14 +107,17 @@ LOGIN_COORDINATOR = LoginCoordinator()
 
 
 class VerificationSolver(Protocol):
-    """Future app-side extension, invoked once on entering either verify state.
+    """Local screenshot-only extension; returns normalized drag points or None.
 
-    Return True only if handled. False or any exception falls back to manual
-    screenshot/input. Must be bounded and honor cancel; never log/copy secrets.
-    No solver is registered/shipped here. Even True still requires subsequent
-    official-page probes to confirm progress; it cannot declare login success.
+    No driver is exposed: the manager owns the three-submission round budget
+    and the SAME replayer as manual input. No network, logging or disk writes.
+    Must be bounded and honor cancel. None/exception falls back to manual;
+    a trajectory still requires official-page probes to confirm progress.
     """
-    def solve(self, driver, phase: str, cancel: threading.Event) -> bool: ...
+    def solve(self, capture, challenge: dict, cancel: threading.Event): ...
+
+
+_DEFAULT_SOLVER = object()
 
 
 @dataclass(repr=False)
@@ -140,24 +154,43 @@ class SmsLoginSession:
         self.frame = None
         self.frame_id = 0
         self.frame_hash = None
+        self.frame_floor = 0
+        self.challenge_key = None
+        self.challenge_epoch = 0
+        self.challenge = {}
+        self.challenge_since = now
+        self.auto_attempted_epoch = 0
+        self.auto_submissions = 0
+        self.auto_challenges = set()
+        self.auto_disabled = False
+        self.auto_pending = None
+        self.manual_pending = None
+        self.verification_mode = 'manual'
+        self.desktop_requested = False
         self.pointer_pending = False
-        self.manual_verification = True
 
     def __repr__(self):
         return '<SmsLoginSession>'
 
     def snapshot(self, now):
+        message = _MESSAGES[self.state]
+        if self.state in VERIFY:
+            message = {'auto': '正在尝试本地滑块验证', 'manual': message,
+                       'desktop': '请改用远程桌面完成验证'}[self.verification_mode]
         return dict(state=self.state, phone=self.masked_phone,
                     resend_in=max(0, math.ceil(self.resend_at-now)) if self.state not in TERMINAL else 0,
                     attempts_left=max(0, 3-self.submissions) if self.nonce and self.state not in TERMINAL else 0,
-                    frame_id=self.frame_id if self.frame else 0, message=_MESSAGES[self.state])
+                    frame_id=self.frame_id if self.frame else 0, message=message)
 
 
 class SmsLoginManager:
-    def __init__(self, driver, fetch_lock, *, coordinator=None, solver=None,
+    def __init__(self, driver, fetch_lock, *, coordinator=None, solver=_DEFAULT_SOLVER,
                  clock=time.monotonic, wall_clock=time.time, on_success=None):
         self.driver, self._fetch_lock = driver, fetch_lock
         self.coordinator = coordinator if coordinator is not None else LOGIN_COORDINATOR
+        if solver is _DEFAULT_SOLVER:
+            from slider_solver import LocalGapSolver
+            solver = LocalGapSolver()  # Heavy optional imports/model load only on solve.
         self.solver, self._on_success = solver, on_success
         self._clock, self._wall_clock = clock, wall_clock
         self._lock = threading.RLock()
@@ -298,9 +331,12 @@ class SmsLoginManager:
             raise SmsLoginError('invalid_text')
         with self._lock:
             session = self._verification()
+            if session.verification_mode == 'auto':
+                raise SmsLoginError('verification_busy')
             if session.text_count >= 5:
                 raise SmsLoginError('sms_rate_limited')
             session.text_count += 1
+            session.auto_disabled = True
             session.actions.append(_Action('text', text))
             session.wake.set()
             return self._snapshot()
@@ -308,14 +344,25 @@ class SmsLoginManager:
     def _verification(self):
         if self._session is None or self._session.state not in VERIFY:
             raise SmsLoginError('not_in_verification')
+        if self._session.verification_mode == 'desktop':
+            raise SmsLoginError('remote_desktop_required')
         return self._session
+
+    @staticmethod
+    def _valid_frame(session, frame_id):
+        # Every picture version in the current challenge/layout epoch has the
+        # same transform. Animation does not invalidate a human's gesture.
+        return (type(frame_id) is int and session.frame is not None
+                and session.frame_floor <= frame_id <= session.frame_id)
 
     def pointer(self, frame_id, kind, points):
         points = validate_points(kind, points)
         with self._lock:
             session = self._verification()
-            if type(frame_id) is not int or session.frame is None or frame_id != session.frame_id:
+            if not self._valid_frame(session, frame_id):
                 raise SmsLoginError('stale_frame')
+            if session.verification_mode == 'auto':
+                raise SmsLoginError('verification_busy')
             now = self._clock()
             while session.pointer_times and now-session.pointer_times[0] >= 1:
                 session.pointer_times.popleft()
@@ -323,6 +370,7 @@ class SmsLoginManager:
                 raise SmsLoginError('sms_rate_limited')
             session.pointer_times.append(now)
             session.pointer_pending = True
+            session.auto_disabled = True
             action = _Action('pointer', (frame_id, kind, points))
             session.actions.append(action)
             session.wake.set()
@@ -367,6 +415,9 @@ class SmsLoginManager:
         if state not in VERIFY:
             session.frame = None
             session.frame_hash = None
+            session.challenge_key = None
+            session.auto_pending = session.manual_pending = None
+            session.desktop_requested = False
         self._arm_deadline(session)
 
     def _finish(self, session, state):
@@ -396,7 +447,8 @@ class SmsLoginManager:
             while not session.cancelled.is_set():
                 self._step(session)
                 with self._lock:
-                    due = min(session.next_probe, session.next_frame if session.state in VERIFY else math.inf,
+                    due = min(session.next_probe, session.next_frame if session.state in VERIFY
+                              and session.verification_mode != 'desktop' else math.inf,
                               session.started+600,
                               session.entered+300 if session.state == 'code_sent' else math.inf)
                     delay = 0 if session.actions else max(0, due-self._clock())
@@ -444,7 +496,8 @@ class SmsLoginManager:
                 self._observe(session, probe)
             session.next_probe = self._clock()+1
         with self._lock:
-            capture = session.state in VERIFY and session.manual_verification and self._clock() >= session.next_frame
+            capture = (session.state in VERIFY and session.verification_mode != 'desktop'
+                       and self._clock() >= session.next_frame)
         if capture:
             self._capture(session)
 
@@ -457,7 +510,7 @@ class SmsLoginManager:
                 and probe.get('session_present') is True)
 
     def _observe(self, session, probe):
-        solver_phase = None
+        try_solver = False
         with self._lock:
             if session.state in TERMINAL:
                 return
@@ -471,17 +524,45 @@ class SmsLoginManager:
             if probe.get('rate_limited'):
                 self._finish(session, 'rate_limited')
                 return
+            if probe.get('blocked'):
+                self._finish(session, 'failed')
+                return
             if probe.get('verification'):
                 phase = 'verify_login' if state in ('submitting', 'verify_login', 'code_invalid') else 'verify_send'
-                if state != phase:
-                    self._set(session, phase)
+                self._set(session, phase)
+                kind = probe.get('challenge_kind', 'unknown')
+                rects = {k: probe.get('rects', {}).get(k) for k in
+                         ('verification', 'slider_handle', 'slider_track', 'slider_image', 'slider_piece')}
+                key = (phase, kind, probe.get('challenge_key'), repr(rects))
+                if key != session.challenge_key:
+                    session.challenge_key = key
+                    session.challenge_epoch += 1
+                    session.challenge_since = self._clock()
+                    session.frame = session.frame_hash = None
                     session.next_frame = 0
-                    session.manual_verification = self.solver is None
-                    solver_phase = phase
-                else:
-                    # A handled hook which leaves verification on the next
-                    # official probe also falls back to manual interaction.
-                    session.manual_verification = True
+                    session.challenge = dict(kind=kind, rects=rects, phase=phase,
+                                             identity=(phase, probe.get('challenge_key')))
+                    session.auto_pending = None
+                    session.verification_mode = ('auto' if kind == 'gap_slider' and self.solver is not None
+                                                 and not session.auto_disabled and session.auto_submissions < 3
+                                                 and session.challenge['identity'] not in session.auto_challenges else 'manual')
+                if kind == 'rotation' or session.desktop_requested:
+                    session.desktop_requested = True
+                    session.verification_mode = 'desktop'
+                    session.frame = session.frame_hash = None
+                elif session.manual_pending is not None:
+                    # Allow a short page-response interval. Taps may be part of
+                    # a multi-click puzzle; only a completed drag is a submission.
+                    if probe.get('verification_failed') or self._clock() >= session.manual_pending:
+                        session.desktop_requested = True
+                        session.verification_mode = 'desktop'
+                        session.frame = session.frame_hash = None
+                elif probe.get('verification_failed') or (session.auto_pending is not None
+                                                         and self._clock() >= session.auto_pending):
+                    self._manual(session)
+                try_solver = (session.verification_mode == 'auto' and session.auto_pending is None
+                              and session.auto_attempted_epoch != session.challenge_epoch
+                              and self._clock()-session.challenge_since >= .7)
             elif probe.get('error'):
                 self._finish(session, 'failed')
             elif probe.get('code_invalid') and state == 'submitting':
@@ -518,17 +599,54 @@ class SmsLoginManager:
                     self._finish(session, 'failed')
             elif state in ('sending', 'submitting') and self._clock()-session.entered >= 15:
                 self._finish(session, 'failed')
-        if solver_phase and self.solver is not None:
-            handled = False
-            try:
-                handled = self.solver.solve(self.driver, solver_phase, session.cancelled) is True
-            except Exception:
-                pass  # No exception payload logging; manual frame is next.
+        if try_solver:
+            self._try_solver(session)
+
+    @staticmethod
+    def _manual(session):
+        session.auto_disabled = True  # Any solver failure ends automation for this round.
+        session.auto_pending = None
+        session.verification_mode = 'manual'
+
+    def _try_solver(self, session):
+        try:
+            self._capture(session)
             with self._lock:
-                session.manual_verification = not handled
-                if handled:
-                    session.next_frame = session.next_probe = self._clock()+1
-        # No-op/absence/failure reach the manual capture path immediately.
+                if session.state not in VERIFY or session.cancelled.is_set():
+                    return
+                epoch, frame = session.challenge_epoch, session.frame
+                session.auto_attempted_epoch = epoch
+                challenge = session.challenge
+            points = self.solver.solve(frame, challenge, session.cancelled)
+            if points is None:
+                raise DriverError('not_handled')
+            points = validate_points('drag', points)
+            # Re-probe after inference: no input if the question/layout changed,
+            # or if a stop/success signal appeared while the model was working.
+            self._observe(session, self.driver.probe())
+            with self._lock:
+                if (session.state not in VERIFY or session.cancelled.is_set()
+                        or session.challenge_epoch != epoch or session.verification_mode != 'auto'
+                        or session.auto_submissions >= 3):
+                    raise DriverError('stale_frame')
+                session.auto_submissions += 1  # Count before pressing, including interrupted replays.
+                session.auto_challenges.add(challenge['identity'])
+            self._replay(session, 'drag', points, frame.metadata)
+            with self._lock:
+                session.auto_pending = self._clock()+3
+            self._capture(session)
+        except Exception:
+            # Model/driver payloads may contain input: never format/log them.
+            with self._lock:
+                if session.state in VERIFY and session.verification_mode != 'desktop':
+                    self._manual(session)
+
+    def _replay(self, session, kind, points, meta):
+        mapped = [(*meta.css_point(u, v), stamp) for u, v, stamp in points]
+        if kind == 'tap':
+            self.driver.click(*mapped[0][:2], cancel=session.cancelled, frame=meta)
+        else:
+            self.driver.drag(mapped, cancel=session.cancelled, frame=meta)
 
     def _click_element(self, session, key):
         rect = self.driver.element_rect(key)
@@ -558,23 +676,33 @@ class SmsLoginManager:
                 self.driver.type_text(action.value, cancel=session.cancelled)
             elif action.kind == 'pointer':
                 frame_id, kind, points = action.value
+                # A request can arrive just before the next scheduled probe.
+                # Validate the live challenge/layout before applying old pixels.
+                self._observe(session, self.driver.probe())
+                if session.state in VERIFY and session.verification_mode == 'manual':
+                    self._capture(session)
                 with self._lock:
                     if session.state not in VERIFY:
                         raise DriverError('not_in_verification')
-                    if not session.frame or frame_id != session.frame_id:
+                    if session.verification_mode != 'manual':
+                        raise DriverError('not_in_verification')
+                    if not self._valid_frame(session, frame_id):
                         raise DriverError('stale_frame')
                     meta = session.frame.metadata
-                mapped = [(*meta.css_point(u, v), stamp) for u, v, stamp in points]
-                if kind == 'tap':
-                    self.driver.click(*mapped[0][:2], cancel=session.cancelled, frame=meta)
-                else:
-                    self.driver.drag(mapped, cancel=session.cancelled, frame=meta)
+                self._replay(session, kind, points, meta)
+                if kind == 'drag':
+                    session.manual_pending = self._clock()+3
                 self._capture(session)
         except Exception as exc:
             action.error = exc.code if isinstance(exc, DriverError) else 'driver_failed'
             with self._lock:
                 if session.state not in TERMINAL and action.error not in ('stale_frame', 'not_in_verification', 'out_of_bounds'):
-                    self._finish(session, 'failed')
+                    if action.kind == 'pointer' and session.state in VERIFY:
+                        session.desktop_requested = True
+                        session.verification_mode = 'desktop'
+                        session.frame = session.frame_hash = None
+                    else:
+                        self._finish(session, 'failed')
         finally:
             action.value, action.nonce = None, b''
             with self._lock:
@@ -590,13 +718,16 @@ class SmsLoginManager:
         frame = self.driver.grab(rect)
         if len(frame.png) > 300*1024:
             raise DriverError('frame_too_large')
-        # A transform change must invalidate input even if its pixels match.
+        # Picture versions drive refresh; only a challenge/transform change
+        # invalidates coordinates. Do not reject gestures because of animation.
         digest = hashlib.sha256(frame.png).digest(), frame.metadata
         with self._lock:
             if session.state not in VERIFY:
                 return
             if digest != session.frame_hash:
                 self._frame_version += 1
+                if session.frame is None or session.frame.metadata != frame.metadata:
+                    session.frame_floor = self._frame_version
                 session.frame_id = self._frame_version
                 session.frame, session.frame_hash = frame, digest
             session.next_frame = self._clock()+.7
