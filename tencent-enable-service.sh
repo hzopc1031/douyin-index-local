@@ -25,6 +25,8 @@ ProtectHome=true
 ReadWritePaths=/srv/work-ecs-projects/douyin-index-local
 LimitCORE=0
 TasksMax=1024
+# Bash owns the session bus: 6s for Qt, 2s for children, then 1s for D-Bus.
+# Keep Bash as MainPID; do not wrap ExecStart in dbus-run-session.
 KillMode=mixed
 TimeoutStopSec=12
 [Install]
