@@ -3,6 +3,8 @@ import os
 import asyncio
 import base64
 import hmac
+import hashlib
+import secrets
 import json
 import ssl
 import time
@@ -18,7 +20,7 @@ ROOT = Path(__file__).resolve().parent
 HUB_KEY = web.AppKey('hub', Hub)
 
 
-def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_throttle=None):
+def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_throttle=None, vnc_port=5907, clock=time.monotonic):
     root = Path(root)
     state = state_dir(root)
     credentials = json.loads((state / 'access.json').read_text())
@@ -26,6 +28,21 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
     hub = Hub(root, bridge)
     throttle = auth_throttle if auth_throttle is not None else AuthThrottle()
     rates = {}
+    tickets = {}
+
+    async def desktop_ticket(request):
+        from hub_web import require
+        require(request, admin=True)
+        now = clock()
+        for digest, expiry in list(tickets.items()):
+            if expiry <= now:
+                del tickets[digest]
+        while len(tickets) >= 32:
+            del tickets[next(iter(tickets))]
+        ticket = secrets.token_urlsafe(32)
+        tickets[hashlib.sha256(ticket.encode()).digest()] = now + 60
+        return reply({'ticket': ticket, 'expires_in': 60})
+
 
     @web.middleware
     async def protected(request, handler):
@@ -34,7 +51,8 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
             now = time.monotonic()
             ip = request.remote or 'unknown'
             auth = request.headers.get('Authorization', '')
-            retry_after = throttle.remaining(ip) if 'Authorization' in request.headers else 0
+            ticket_auth = request.path == '/websockify' and 'ticket' in request.query
+            retry_after = throttle.remaining(ip) if 'Authorization' in request.headers or ticket_auth else 0
             if retry_after:
                 throttle.reject(ip)
                 raise HubError('authentication_throttled', '认证失败次数过多，请稍后再试。', 429)
@@ -43,9 +61,13 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
                 principal = {'id': 'admin', 'admin': True, 'scopes': ['read', 'query']}
             elif is_api and auth.startswith('Bearer '):
                 principal = hub.store.key_principal(auth[7:])
+            if principal is None and ticket_auth:
+                expiry = tickets.pop(hashlib.sha256(request.query['ticket'].encode()).digest(), 0)
+                if expiry > clock():
+                    principal = {'id': 'admin', 'admin': True, 'scopes': ['read']}
             if principal is None:
                 throttle.unauthorized(ip, request.method, request.path, 'api' if is_api else 'web')
-                if 'Authorization' in request.headers:
+                if 'Authorization' in request.headers or ticket_auth:
                     throttle.failure(ip)
                 response = reply({'error': {'code': 'unauthorized', 'message': '请提供有效的 API Key。'}}, 401) if is_api else web.Response(status=401, text='Authentication required')
                 response.headers['WWW-Authenticate'] = 'Bearer' if is_api else 'Basic realm="Douyin cloud"'
@@ -80,7 +102,7 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
     async def websocket(request):
         if not request[PRINCIPAL_KEY].get('admin') or request.headers.get('Origin') != 'https://' + request.host:
             raise web.HTTPForbidden()
-        reader, writer = await asyncio.open_connection('127.0.0.1', 5907)
+        reader, writer = await asyncio.open_connection('127.0.0.1', vnc_port)
         ws = web.WebSocketResponse(protocols=('binary',), max_msg_size=4 * 1024 * 1024, heartbeat=30)
         try:
             await ws.prepare(request)
@@ -120,6 +142,7 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
     app = web.Application(middlewares=[protected], client_max_size=32 * 1024)
     app[HUB_KEY] = hub
     mount(app, hub)
+    app.router.add_post('/api/v1/desktop/ticket', desktop_ticket)
     app.router.add_get('/websockify', websocket)
     app.router.add_get('/api/v1/tls-certificate.pem', certificate)
     app.router.add_static('/desktop/', desktop_dir, show_index=False)

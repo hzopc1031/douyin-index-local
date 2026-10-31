@@ -334,6 +334,8 @@ def mount(app, hub):
         if action == 'image':
             return web.Response(body=base64.b64decode(result['png_base64'], validate=True),
                                 content_type='image/png', headers={'Cache-Control': 'no-store'})
+        if action == 'status' and result.get('state') not in ('starting', 'qr_ready'):
+            result = {**result, 'browser': await hub.browser_status()}
         return reply({**result, 'login_mode': login_mode()})
 
     async def platforms(request):

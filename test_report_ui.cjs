@@ -18,3 +18,15 @@ ctx.query=query;
  const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size);for(const id of ['reportProgress','retryBundle','relatedData','audienceData'])assert(ids.includes(id));assert(!html.includes("$('#insightKind')"));assert(!html.includes("$('#collectInsight')"));
  console.log('report grouping, independent endpoints, partial submission recovery, idempotency, read-only refresh and shared-context checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
+
+const qrNodes={};const qr$=id=>qrNodes[id]??={hidden:false,textContent:'',innerHTML:'',removeAttribute(){},getAttribute(){return null}};
+const qrCtx=vm.createContext({$:qr$,esc:String,clearTimeout(){},setTimeout(){},loadQr(){}});
+vm.runInContext('let qrTimer=null;'+html.slice(html.indexOf('function renderQr('),html.indexOf('async function openDesktop(')),qrCtx);
+for(const browser of ['browser_ready','login_required']){
+ qrCtx.data={state:'verification_required',browser};vm.runInContext('renderQr(data)',qrCtx);
+ assert.equal(qr$('#qrState').innerHTML.includes('已登录 · 官方窗口页面就绪'),browser==='browser_ready');
+ assert.equal(qr$('#qrDesktop').hidden,browser==='browser_ready');
+ if(browser==='browser_ready'){assert(qr$('#qrRefresh').hidden);assert(!qr$('#qrStart').hidden);assert.equal(qr$('#qrStart').textContent,'重新扫码')}
+ else assert(qr$('#qrState').innerHTML.includes('需要安全验证'));
+}
+console.log('QR browser-ready copy checks passed');
