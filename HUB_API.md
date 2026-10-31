@@ -88,7 +88,13 @@ OpenAPI 3.1 文档：`GET /api/v1/openapi.json`，需要有效 Key 或管理登�
 
 错误格式 `{"error":{"code":"...","message":"..."}}`。任务执行失败则写入 `job.error`。
 典型 HTTP 状态：400 参数错误、401 认证失败、403 权限不足、409 幂等冲突或采集暂停、422 平台未接入、429 请求/队列超限。
-HTTP 接口可用不等于登录有效；`browser_ready` 只代表页面预检就绪，实际认证以成功取数或平台错误为准。
+HTTP 接口可用不等于登录有效。`GET /api/v1/status` 的 `browser` 保留原有状态字符串，新增 `login_state`：`qr_session`（内存扫码会话）、`cookie_present`（检测到关键登录 Cookie 且未发现过期）、`expired`（显式过期时间或 sid_guard 内嵌签发时间与有效期已过期）、`rejected`（相同关键 Cookie 集合已经取数认证失败）、`no_session_cookie`（没有关键登录 Cookie）、`unknown`（无法读取 Cookie store）。桥接响应使用相同的 `login_state`，并保留 `state`。
+
+桌面窗口只有通过官方页面检查且 `login_state=cookie_present` 才是 `browser_ready`；已有内存 QR 会话保留 `qr_session` 就绪路径。其他登录状态均为 `login_required`，任务在取数前停止，不消耗在线次数。状态检查只读取本地页面与 Cookie，不联网、不占配额，不返回 Cookie 值。Cookie 存在与过期检查只是本地启发式判断：服务端撤销或风控导致的认证失效只能由真实取数发现；`rejected` 只识别已经失败的完全相同 Cookie 集合。进程仅在内存保存该集合的 SHA-256 指纹（不记录日志、不持久化、不返回），Cookie 集合改变或进程重启后清除；不能将 `cookie_present` 当作认证成功。
+
+Hub 持久模式下，`login_state` 与 `app._client()` 共用修复后的 `get_cookies()`：共享 profile 创建前，在 profile 锁内通过 SQLite `mode=ro` 只读恢复 `douyin.com` / `creator.douyin.com` 的 Cookie，再由按 `(name, domain, path)` 建立的内存镜像接收 Qt 增删信号。保留 HttpOnly、Secure、Path、Expires 和无过期时间的会话 Cookie，快照排除已过期项。数据库只在启动时读一次，不复制、不导出、不打印 Cookie；运行中的替换和删除不会被旧磁盘数据覆盖。Qt 6.12.0 对完全相同会话 Cookie 的覆盖会发出成对删除信号，镜像合并同一 GUI 事件批次内完全相同的一对；单次真实删除正常生效。
+
+本机 pywebview 6.2.1 / PySide6 6.12.0 实测：即使提前连接信号，并在 GUI 线程于创建时、加载后和延迟时调用 `loadAllCookies()`，重启后的 Cookie 仍不发出新增信号，因此使用上述只读恢复。合成 profile 的 Chromium schema 24 使用明文 `value`；当前回退支持此格式，遇到加密值（含 v10/v11）、损坏或不可读数据库会返回 `unknown` 并阻止使用不完整会话，不猜测解密密钥。本地双窗口回归已验证普通退出及 SIGTERM 重启后，生产 Cookie 来源和生产 `_client()` 创建的 requests 会话均包含三种 Cookie，`login_state=cookie_present`；空 profile 为 `no_session_cookie`。测试仅访问 127.0.0.1，未请求真实抖音数据，不能证明服务端登录仍有效。
 
 ## 运行保护
 
@@ -160,4 +166,6 @@ worker 保护状态码：
 
 全部接口经过网关认证，仅管理员可调用；普通 API Key 返回 403，POST 使用现有 `X-Hub-Request: 1` 同源 CSRF 校验。`qr_busy`、`qr_disabled`、`qr_unsafe_debug`、`qr_no_display` 返回 409；桥接不可用返回 `503 browser_unavailable`。扫码接口不消耗每日在线次数、不更新取数时间，也不受 15 秒取数间隔限制。交接后的会话只在 `app.py` 进程内存中；认证失效时清空，安全验证请使用远程桌面。登录成功后需在采集任务中手动恢复；不自动重试失败任务。`/api/v1/status` 同时返回 `login_mode`。
 
-交接后的会话只在 `app.py` 进程内存中，不写状态文件和日志。扫码期间 Chromium 使用 Playwright 在 `/tmp`（单元的 `PrivateTmp`）下创建的临时 profile，Cookie 会短暂写入其中（无系统钥匙串时近似明文）；浏览器正常关闭时目录被删除，若进程被强杀则残留在 PrivateTmp 中直到单元停止。Chromium 沙箱由 Playwright 默认关闭（`--no-sandbox`），代码显式设置 `chromium_sandbox=False`；开启需另做 AppArmor/userns 配置。
+交接后的会话只在 `app.py` 进程内存中，不写状态文件和日志。扫码 Chromium 默认使用服务账号所有的 0700 持久 profile，重启后保留登录资料；`INDEX_HUB_PERSIST_LOGIN=0` 时恢复 Playwright 临时 profile（PrivateTmp 下，正常关闭删除，强杀残留直到单元停止）。Chromium 沙箱由 Playwright 默认关闭（`--no-sandbox`），代码显式设置 `chromium_sandbox=False`；开启需另做 AppArmor/userns 配置。
+
+云端 Hub 默认持久化浏览器登录资料到服务账号所有的 0700 目录：`INDEX_HUB_PROFILE_DIR`，默认 `INDEX_HUB_STATE_DIR/browser-profiles`。Cookie 以近似明文形式保存在该目录（无系统钥匙串），任何能以 douyin-svc 或 root 身份读盘的人都能拿到登录态；若目录不归 douyin-svc 所有或是符号链接，app.py 会拒绝启动。禁止提交、上传或打印这些资料。`INDEX_HUB_PERSIST_LOGIN=0` 恢复无痕模式；普通桌面启动仍使用无痕模式。远程桌面先由管理员携带 `X-Hub-Request` 调用 `POST /api/v1/desktop/ticket`，取得 60 秒内单次有效的 WebSocket 票据（仅内存保存其 SHA-256）。

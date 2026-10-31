@@ -87,7 +87,10 @@ def compare_result(result, entries, *, compared_at=None):
 
 class Api:
     def __init__(self):
+        from browser_login import BrowserLoginState
         from storage import ResultStore
+        self._browser_login = BrowserLoginState()
+        self._fetch_cookie_fingerprint = None
         self._qr_lock = threading.Lock()
         self._page = None
         self._lock = threading.Lock()
@@ -113,11 +116,26 @@ class Api:
 
     def _on_auth_failed(self):
         from qr_login import login_mode
+        # Captured from the cookies used for this fetch, never from a potentially
+        # newer login that arrived while the request was in flight.
+        if self._fetch_cookie_fingerprint is not None:
+            self._browser_login.reject(self._fetch_cookie_fingerprint)
+        self._fetch_cookie_fingerprint = None
         if login_mode() == 'qr' and hasattr(self, '_qr'):
             self._qr.holder.clear()
 
-    def _client(self):
+    def _login_state(self, *, _test_cookie_host=None):
+        from webview_cookies import cookie_domains
+        qr = self._qr_manager()
+        return self._browser_login.read(self._page, qr_session=qr is not None and qr.holder.has_session(),
+                                        accepted_domains=cookie_domains(_test_cookie_host=_test_cookie_host))
+
+    def _client(self, *, _test_cookie_host=None):
+        from browser_login import _cookie_snapshot
         from client import DouyinIndexClient
+        from webview_cookies import cookie_domains
+        domains = cookie_domains(_test_cookie_host=_test_cookie_host)
+        self._fetch_cookie_fingerprint = None
         qr = self._qr_manager()
         if qr is not None and qr.holder.has_session():
             session, ua = qr.holder.take_session()
@@ -130,7 +148,9 @@ class Api:
         if self._page is None:
             raise LoginRequired("请先打开官方登录窗口。")
         current = urlsplit(self._page.get_current_url() or "")
-        if current.scheme != "https" or current.hostname != "creator.douyin.com" or current.username or current.password or current.port not in (None, 443):
+        official = current.scheme == 'https' and current.hostname == 'creator.douyin.com' and current.port in (None, 443)
+        fixture = _test_cookie_host == '127.0.0.1' and current.scheme == 'http' and current.hostname == _test_cookie_host
+        if not (official or fixture) or current.username or current.password:
             raise LoginRequired("请先在 HTTPS 官方窗口完成登录，并进入抖音指数页。")
         visible_login = self._page.evaluate_js("Boolean(document.querySelector('input[type=tel]')) && document.body.innerText.includes('扫码登录')")
         if visible_login:
@@ -138,10 +158,12 @@ class Api:
         session = requests.Session()
         session.trust_env = False
         try:
-            for cookie in self._page.get_cookies():
+            cookies = self._page.get_cookies()
+            _, fingerprint = _cookie_snapshot(cookies, accepted_domains=domains)
+            for cookie in cookies:
                 for item in cookie.values():
                     domain = item["domain"].lstrip(".").lower()
-                    if domain not in ("douyin.com", "creator.douyin.com"):
+                    if domain not in domains:
                         continue
                     session.cookies.set(item.key, item.value, domain=item["domain"],
                                         path=item["path"] or "/", secure=bool(item["secure"]))
@@ -150,7 +172,9 @@ class Api:
             ua = self._page.evaluate_js("navigator.userAgent")
             if not isinstance(ua, str) or not ua:
                 raise ValueError("暂时无法识别官方窗口，请等待页面加载完成。")
-            return DouyinIndexClient(session=session, user_agent=ua)
+            client = DouyinIndexClient(session=session, user_agent=ua)
+            self._fetch_cookie_fingerprint = fingerprint
+            return client
         except Exception:
             session.cookies.clear()
             session.close()
@@ -238,6 +262,7 @@ class Api:
                 pass
             return safe
         finally:
+            self._fetch_cookie_fingerprint = None
             self._lock.release()
 
     def compare(self, entries):
@@ -258,6 +283,28 @@ class Api:
             self._lock.release()
 
 
+_profile_lock = None
+
+
+def _webview_start_kwargs():
+    global _profile_lock
+    from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy
+    kwargs = dict(private_mode=True, debug=False, http_server=False)
+    if os.environ.get('INDEX_HUB_ENABLED') == '1' and persist_enabled():
+        from webview_profile_patch import install_shared_profile
+        directory = prepare_profile(ROOT, 'webview')
+        if not install_shared_profile(directory):
+            return kwargs
+        try:
+            _profile_lock = ProfileLock(directory).acquire()
+        except ProfileBusy:
+            import logging
+            logging.getLogger(__name__).error('Webview profile busy')
+            raise SystemExit(2) from None
+        kwargs.update(private_mode=False, storage_path=str(directory))
+    return kwargs
+
+
 def main():
     import webview
 
@@ -276,7 +323,31 @@ def main():
         configure_logging('app', ROOT)
         from hub_bridge import start_bridge
         start_bridge(api)
-    webview.start(private_mode=True, debug=False, http_server=False)
+    shutdown = None
+    try:
+        kwargs = _webview_start_kwargs()
+        if os.environ.get('INDEX_HUB_ENABLED') == '1':
+            from webview_watchdog import watch_startup, bounded_env
+            def release_profile():
+                if _profile_lock is not None:
+                    _profile_lock.release()
+            if not kwargs['private_mode']:
+                from webview_shutdown import QtShutdown
+                shutdown = QtShutdown(release_profile)
+            startup_loaded = threading.Event()
+            api._page.events.loaded += startup_loaded.set
+            threading.Thread(target=watch_startup, args=(startup_loaded, release_profile),
+                             kwargs=dict(timeout=bounded_env('INDEX_HUB_WEBVIEW_START_TIMEOUT', 90, 10, 300),
+                                         max_rss_mb=bounded_env('INDEX_HUB_WEBVIEW_MAX_RSS_MB', 2500, 256, 3000)),
+                             daemon=True, name='webview-startup-watchdog').start()
+        webview.start(**kwargs)
+    finally:
+        try:
+            if shutdown is not None:
+                shutdown.finish()
+        finally:
+            if _profile_lock is not None:
+                _profile_lock.release()
 
 
 if __name__ == "__main__":

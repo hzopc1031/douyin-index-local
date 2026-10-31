@@ -134,8 +134,7 @@ def collect(api, body):
             client.session.cookies.clear();client.session.close()
     except Exception as exc:
         from client import SanitizedClientError
-        from qr_login import login_mode
-        if login_mode() == 'qr' and getattr(exc, 'code', None) == 'authentication_required':
+        if getattr(exc, 'code', None) == 'authentication_required':
             api._on_auth_failed()
         if isinstance(exc,SanitizedClientError):return {'ok':False,**exc.as_dict()}
         if isinstance(exc,HubError):return {'ok':False,'code':exc.code,'message':str(exc)}
@@ -143,4 +142,6 @@ def collect(api, body):
             return {'ok':False,'code':'authentication_required','message':str(exc)}
         logging.getLogger('index_hub.insights').error('collect kind=%s %s', query['kind'], exc_summary(exc))
         return {'ok':False,'code':'request_failed','message':'扩展数据读取失败，未输出原始错误。'}
-    finally:api._lock.release()
+    finally:
+        api._fetch_cookie_fingerprint = None
+        api._lock.release()

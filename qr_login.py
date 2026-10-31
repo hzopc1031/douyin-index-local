@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 
 import requests
 
+from pathlib import Path
+from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy, clear_stale_singleton
+
 import client
 
 LOGIN_URL = client.PAGE_URL
@@ -261,7 +264,7 @@ def _playwright():
 class QrLoginManager:
     def __init__(self, browser_factory=None, *, allowed_origin='https://creator.douyin.com',
                  login_url=LOGIN_URL, cookie_url=client.TREND_URL,
-                 clock=time.monotonic, timeout=None, allow_insecure=False, browser_mode=None):
+                 clock=time.monotonic, timeout=None, allow_insecure=False, browser_mode=None, profile_dir=None):
         self._origin = urlsplit(allowed_origin)
         if (self._origin.hostname is None or self._origin.username or self._origin.password
                 or self._origin.path not in ('', '/') or self._origin.query or self._origin.fragment
@@ -271,6 +274,8 @@ class QrLoginManager:
         for url in (login_url, cookie_url):
             if not self._allowed(url):
                 raise ValueError('登录地址必须与允许来源一致')
+        self._profile_dir = profile_dir
+        self._persistent_open = False
         self._factory = browser_factory or _playwright
         self._login_url, self._cookie_url = login_url, cookie_url
         self._clock = clock
@@ -311,7 +316,7 @@ class QrLoginManager:
 
     def browser_open(self):
         browser = self._last_browser
-        return bool(browser is not None and browser.is_connected())
+        return self._persistent_open or bool(browser is not None and browser.is_connected())
 
     def status(self):
         with self._lock:
@@ -329,7 +334,7 @@ class QrLoginManager:
                 self._session.cancelled.set()
 
     def _run(self, session):
-        context = browser = None
+        context = browser = profile_lock = None
         cookies = []
         final = 'failed'
         stage = 'launch'
@@ -339,11 +344,23 @@ class QrLoginManager:
                 try:
                     # Playwright 默认即不开 Chromium 沙箱（会加 --no-sandbox），这里显式写出以免误解；
                     # 开启需另做 AppArmor/userns 配置。
-                    browser = playwright.chromium.launch(
-                        headless=(self._browser_mode == 'headless'), chromium_sandbox=False)
-                    self._browser = self._last_browser = browser
-                    context = browser.new_context(accept_downloads=False, locale='zh-CN')
-                    page = context.new_page()
+                    directory = self._profile_dir
+                    if directory is None and persist_enabled():
+                        directory = prepare_profile(Path(__file__).resolve().parent, 'qr-chromium')
+                    if directory is not None:
+                        profile_lock = ProfileLock(directory).acquire()
+                        clear_stale_singleton(directory)
+                        context = playwright.chromium.launch_persistent_context(
+                            str(directory), headless=(self._browser_mode == 'headless'),
+                            chromium_sandbox=False, accept_downloads=False, locale='zh-CN')
+                        self._persistent_open = True
+                        page = context.pages[0] if context.pages else context.new_page()
+                    else:
+                        browser = playwright.chromium.launch(
+                            headless=(self._browser_mode == 'headless'), chromium_sandbox=False)
+                        self._browser = self._last_browser = browser
+                        context = browser.new_context(accept_downloads=False, locale='zh-CN')
+                        page = context.new_page()
                     page.set_default_timeout(1000)
                     stage = 'goto'
                     page.goto(self._login_url, timeout=min(30000, self._timeout * 1000))
@@ -411,12 +428,15 @@ class QrLoginManager:
                             browser.close()
         except Exception as exc:
             # Never log raw browser exceptions: they may contain credentials.
-            reason = str(exc) if isinstance(exc, (CookieRejected, QrNoDisplay)) else '-'
+            reason = 'profile_busy' if isinstance(exc, ProfileBusy) else str(exc) if isinstance(exc, (CookieRejected, QrNoDisplay)) else '-'
             logger.warning('QR login failed stage=%s error=%s reason=%s',
                            stage, type(exc).__name__, reason)
             final = 'failed'
         finally:
             self._browser = None
+            self._persistent_open = False
+            if profile_lock is not None:
+                profile_lock.release()
             for item in cookies:
                 if isinstance(item, dict):
                     item['value'] = ''
@@ -424,6 +444,6 @@ class QrLoginManager:
             if session.cancelled.is_set():
                 final = 'cancelled'
             session._set(final)
-            logger.info('QR login finished state=%s stage=%s cookies=%d partitioned_skipped=%d duplicates_resolved=%d',
+            logger.info('QR login finished state=%s stage=%s accepted=%d partitioned_skipped=%d duplicates_resolved=%d',
                         final, stage, stats['accepted'], stats['partitioned_skipped'],
                         stats['duplicates_resolved'])

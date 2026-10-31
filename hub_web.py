@@ -74,14 +74,22 @@ class Hub:
         self.bridge = bridge
         self.worker_task = None
 
-    async def browser_status(self):
+    async def browser_status(self, *, details=False):
+        from browser_login import LOGIN_STATES
+        state, login_state = 'unavailable', 'unknown'
         try:
             result = await asyncio.to_thread(self.bridge, 'status', None, 2)
             state = result.get('state') if result.get('ok') else 'unavailable'
-            return state if state in ('browser_ready', 'login_required') else 'unavailable'
+            state = state if state in ('browser_ready', 'login_required') else 'unavailable'
+            login_state = result.get('login_state', 'unknown') if result.get('ok') else 'unknown'
+            login_state = login_state if login_state in LOGIN_STATES else 'unknown'
+            if state == 'browser_ready' and 'login_state' in result and login_state not in ('cookie_present', 'qr_session'):
+                state = 'login_required'
         except Exception as exc:
             logger.warning('command=status %s', exc_summary(exc))
-            return 'unavailable'
+            state, login_state = 'unavailable', 'unknown'
+        # Preserve the string return used by worker, resume and QR callers.
+        return {'state': state, 'login_state': login_state} if details else state
 
     def _requeue_unattempted(self, job_id, attempt_day, *, busy=False):
         return self.store.requeue_job(job_id, attempt_day,
@@ -334,6 +342,8 @@ def mount(app, hub):
         if action == 'image':
             return web.Response(body=base64.b64decode(result['png_base64'], validate=True),
                                 content_type='image/png', headers={'Cache-Control': 'no-store'})
+        if action == 'status' and result.get('state') not in ('starting', 'qr_ready'):
+            result = {**result, 'browser': await hub.browser_status()}
         return reply({**result, 'login_mode': login_mode()})
 
     async def platforms(request):
@@ -346,10 +356,11 @@ def mount(app, hub):
         daily = s.get('daily', {'date': day, 'count': 0})
         if daily['date'] != day:
             daily = {'date': day, 'count': 0}
-        browser = await hub.browser_status()
+        browser = await hub.browser_status(details=True)
         next_attempt = s.get('last_attempt_at', 0) + 15
         remaining = max(0, math.ceil(next_attempt - time.time()))
-        return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser, 'paused': s.get('paused'),
+        return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser['state'],
+                      'login_state': browser['login_state'], 'paused': s.get('paused'),
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,

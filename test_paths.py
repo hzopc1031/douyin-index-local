@@ -27,7 +27,7 @@ class PathsTests(unittest.TestCase):
             with self.subTest(document=name):
                 text = (ROOT / name).read_text()
                 for detail in ('`app.py` 进程内存', '不写状态文件和日志',
-                               '近似明文', '直到单元停止', 'chromium_sandbox=False'):
+                               '0700', '近似明文', 'INDEX_HUB_PERSIST_LOGIN=0', '直到单元停止', 'chromium_sandbox=False'):
                     self.assertIn(detail, text)
 
     def test_default(self):

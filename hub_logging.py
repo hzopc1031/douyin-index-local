@@ -23,7 +23,8 @@ def redact(text) -> str:
         r"(?i)(?<![\w.-])([\w.-]*(?:" + KEY_NAMES + r")[\w.-]*[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
         r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\x26}\"']+)",
         r'\1***', text)
-    return re.sub(r'[A-Za-z0-9_\-+/=]{24,}', '***', text)
+    return re.sub(r'[A-Za-z0-9_\-+/]{24,}={0,2}',
+                  lambda m: m[0] if re.fullmatch(r'[a-z]+(?:_[a-z]+)+', m[0]) else '***', text)
 
 
 class RedactingFilter(logging.Filter):

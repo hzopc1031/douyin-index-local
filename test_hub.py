@@ -463,7 +463,7 @@ class DiagnosticTests(unittest.TestCase):
                     patch.object(hub_bridge.socketserver, 'UnixStreamServer', Server), \
                     patch.object(hub_bridge.os, 'chmod'):
                 api = unittest.mock.Mock()
-                api._page.get_current_url.side_effect = RuntimeError('cookie=' + SECRET)
+                api._login_state.side_effect = RuntimeError('cookie=' + SECRET)
                 server = hub_bridge.start_bridge(api)
             handler = object.__new__(server.handler)
             handler.request = unittest.mock.Mock()
@@ -542,3 +542,83 @@ class WorkerDiagnosticTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DesktopTicketTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        async def vnc(reader, writer):
+            try:
+                writer.write(b'RFB 003.008\n')
+                await writer.drain()
+                await reader.read()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        self.vnc = await asyncio.start_server(vnc, '127.0.0.1', 0)
+        self.now = 100.0
+        port = self.vnc.sockets[0].getsockname()[1]
+        original = create_app
+        with patch('test_hub.create_app', side_effect=lambda *a, **kw: original(*a, **kw, vnc_port=port, clock=lambda: self.now)):
+            await ApiTests.asyncSetUp(self)
+
+    async def asyncTearDown(self):
+        await ApiTests.asyncTearDown(self)
+        self.vnc.close()
+        await self.vnc.wait_closed()
+
+    async def ticket(self):
+        response = await self.client.post('/api/v1/desktop/ticket', headers=self.admin, json={})
+        self.assertEqual(response.status, 200)
+        data = await response.json()
+        self.assertEqual(data['expires_in'], 60)
+        return data['ticket']
+
+    async def test_admin_csrf_required(self):
+        for headers, status in [({}, 401), (self.bearer, 403), ({'Authorization': self.admin['Authorization']}, 403)]:
+            response = await self.client.post('/api/v1/desktop/ticket', headers=headers, json={})
+            self.assertEqual(response.status, status)
+
+    async def test_websocket_ticket_single_use_and_origin(self):
+        ticket = await self.ticket()
+        origin = 'https://' + self.client.server.host + ':' + str(self.client.server.port)
+        ws = await self.client.ws_connect('/websockify?ticket='+ticket, headers={'Origin': origin}, protocols=['binary'])
+        self.assertEqual((await ws.receive()).data, b'RFB 003.008\n')
+        await ws.close()
+        with self.assertLogs('index_hub', level='WARNING') as logs:
+            response = await self.client.get('/websockify?ticket='+ticket)
+            self.assertEqual(response.status, 401)
+        self.assertNotIn(ticket, '\n'.join(logs.output))
+        ticket = await self.ticket()
+        response = await self.client.get('/websockify?ticket='+ticket, headers={'Origin': 'https://wrong.invalid'})
+        self.assertEqual(response.status, 403)
+
+    async def test_expiry_path_restriction_and_missing(self):
+        ticket = await self.ticket()
+        response = await self.client.get('/?ticket='+ticket)
+        self.assertEqual(response.status, 401)
+        self.now += 61
+        response = await self.client.get('/websockify?ticket='+ticket)
+        self.assertEqual(response.status, 401)
+        response = await self.client.get('/websockify')
+        self.assertEqual(response.status, 401)
+
+    async def test_ticket_cap(self):
+        tickets = [await self.ticket() for _ in range(33)]
+        response = await self.client.get('/websockify?ticket='+tickets[0])
+        self.assertEqual(response.status, 401)
+
+    async def test_qr_status_browser_field_only_when_inactive(self):
+        from unittest.mock import AsyncMock
+        for state in ('verification_required', 'starting', 'qr_ready', 'succeeded'):
+            with patch.object(self.hub, 'bridge', return_value={'ok': True, 'state': state}), patch.object(self.hub, 'browser_status', new_callable=AsyncMock, return_value='browser_ready') as browser:
+                response = await self.client.get('/api/v1/login/qr', headers=self.admin)
+                data = await response.json()
+                if state in ('starting', 'qr_ready'):
+                    self.assertNotIn('browser', data)
+                    browser.assert_not_awaited()
+                else:
+                    self.assertEqual(data['browser'], 'browser_ready')
+                for action in ('start', 'cancel'):
+                    self.hub._qr_last_start = None
+                    response = await self.client.post('/api/v1/login/qr/'+action, headers=self.admin, json={})
+                    self.assertNotIn('browser', await response.json())

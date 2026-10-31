@@ -215,6 +215,7 @@ class HandlerTests(unittest.TestCase):
             manager.status.return_value = {'state': 'idle', 'qr_version': 0, 'expires_in': 0, 'message': 'synthetic'}
             manager.holder_info.return_value = {'has_session': True, 'age_seconds': 10}
             manager.holder.has_session.return_value = True
+            api._login_state.side_effect = lambda: 'qr_session' if manager.holder.has_session() else 'no_session_cookie'
             manager.qr_png.return_value = b'PNG'
             server = hub_bridge.start_bridge(api)
             def call(command):
