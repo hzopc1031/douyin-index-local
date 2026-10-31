@@ -241,3 +241,32 @@ class ControllerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebviewProfileTests(unittest.TestCase):
+    def test_hub_profile_and_busy_exit(self):
+        import tempfile
+        import os
+        import app
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
+            'INDEX_HUB_ENABLED': '1', 'INDEX_HUB_PERSIST_LOGIN': '1', 'INDEX_HUB_PROFILE_DIR': root}):
+            try:
+                kwargs = app._webview_start_kwargs()
+                self.assertFalse(kwargs['private_mode'])
+                self.assertEqual(kwargs['storage_path'], str(Path(root) / 'webview'))
+                with self.assertRaises(SystemExit) as caught:
+                    app._webview_start_kwargs()
+                self.assertEqual(caught.exception.code, 2)
+            finally:
+                app._profile_lock.release()
+                app._profile_lock = None
+
+    def test_desktop_and_rollback_remain_private(self):
+        import os
+        import app
+        from unittest.mock import patch
+        for enabled, persist in [('0', '1'), ('1', '0')]:
+            with patch.dict(os.environ, {'INDEX_HUB_ENABLED': enabled, 'INDEX_HUB_PERSIST_LOGIN': persist}), patch('browser_profile.prepare_profile') as prepare:
+                self.assertEqual(app._webview_start_kwargs(), dict(private_mode=True, debug=False, http_server=False))
+                prepare.assert_not_called()

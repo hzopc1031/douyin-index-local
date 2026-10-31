@@ -16,7 +16,10 @@ Environment=INDEX_HUB_LOG_DIR=/var/log/douyin-index
 Environment=INDEX_HUB_LOGIN_MODE=qr
 # 有头 Chromium 复用本单元 tencent-desktop.sh 启动的 Xvfb（DISPLAY=:107），不另开 Xvfb。
 Environment=INDEX_HUB_QR_BROWSER=headed
-# root 安装、只读即可；ProtectSystem=strict 下无需加入 ReadWritePaths。临时 profile 在 PrivateTmp 的 /tmp。
+# 登录信息落盘在 0700 目录，仅 douyin-svc 可读写；改成 0 回到无痕模式；目录必须在 ReadWritePaths 内
+Environment=INDEX_HUB_PERSIST_LOGIN=1
+Environment=INDEX_HUB_PROFILE_DIR=/var/lib/douyin-index/browser-profiles
+# Chromium 程序由 root 安装，只读；持久 profile 位于下方可写状态目录。
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 UMask=0077
 PrivateTmp=true

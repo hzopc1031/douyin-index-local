@@ -5,6 +5,8 @@ import os
 import struct
 import threading
 import time
+import tempfile
+from pathlib import Path
 import unittest
 import zlib
 from unittest.mock import patch
@@ -74,7 +76,7 @@ class UnitTests(unittest.TestCase):
                     factory = Mock()
                     factory.return_value.__enter__ = Mock(return_value=SimpleNamespace(chromium=SimpleNamespace(launch=launch)))
                     factory.return_value.__exit__ = Mock(return_value=False)
-                    manager = QrLoginManager(browser_factory=factory, browser_mode=mode)
+                    manager = _ephemeral_manager(browser_factory=factory, browser_mode=mode)
                     with patch.dict(os.environ, {'DISPLAY': ':107'}, clear=True), patch('qr_login.logger.warning') as warning:
                         session = manager.start()
                         session.thread.join(2)
@@ -145,7 +147,7 @@ class UnitTests(unittest.TestCase):
                 context.cookies.return_value = [cookie(partitionKey='x'), cookie()]
                 if fail_goto:
                     page.goto.side_effect = RuntimeError(SECRET)
-                manager = QrLoginManager(browser_factory=factory, browser_mode='headless')
+                manager = _ephemeral_manager(browser_factory=factory, browser_mode='headless')
                 session = QrLoginSession()
                 with self.assertLogs('index_hub.qr_login', level='INFO') as logs:
                     manager._run(session)
@@ -158,9 +160,9 @@ class UnitTests(unittest.TestCase):
                 finished = [line.split('QR login finished ')[1] for line in logs.output
                             if 'QR login finished ' in line]
                 self.assertEqual(finished, [
-                    'state=failed stage=goto cookies=0 partitioned_skipped=0 duplicates_resolved=0'
+                    'state=failed stage=goto accepted=0 partitioned_skipped=0 duplicates_resolved=0'
                     if fail_goto else
-                    'state=succeeded stage=close cookies=1 partitioned_skipped=1 duplicates_resolved=0'])
+                    'state=succeeded stage=close accepted=1 partitioned_skipped=1 duplicates_resolved=0'])
                 context.close.assert_called_once()
                 browser.close.assert_called_once()
                 manager.holder.clear()
@@ -215,7 +217,7 @@ class UnitTests(unittest.TestCase):
     def test_failure_preserves_holder_and_sanitizes_logs(self):
         def fail():
             raise RuntimeError(SECRET)
-        manager = QrLoginManager(browser_factory=fail, browser_mode='headless')
+        manager = _ephemeral_manager(browser_factory=fail, browser_mode='headless')
         manager.holder.put([cookie()], 'Synthetic UA')
         with patch.dict(os.environ, {}, clear=True), self.assertLogs('index_hub.qr_login', level='WARNING') as logs:
             session = manager.start()
@@ -249,7 +251,7 @@ class UnitTests(unittest.TestCase):
                 return SimpleNamespace(chromium=SimpleNamespace(launch=lambda **kw: browser))
             def __exit__(self, *args):
                 pass
-        manager = QrLoginManager(browser_factory=Factory, browser_mode='headless', clock=lambda: clock[0], timeout=20)
+        manager = _ephemeral_manager(browser_factory=Factory, browser_mode='headless', clock=lambda: clock[0], timeout=20)
         manager.holder.put([cookie()], 'Synthetic UA')
         with patch.dict(os.environ, {}, clear=True):
             session = manager.start()
@@ -350,7 +352,9 @@ class BrowserTests(unittest.TestCase):
                 browser.close()
         except Exception as exc:
             _browser_skip('Chromium cannot launch: ' + type(exc).__name__)
-        self.manager = QrLoginManager(allowed_origin=self.origin,
+        self.profile_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.profile_temp.cleanup)
+        self.manager = QrLoginManager(profile_dir=Path(self.profile_temp.name), allowed_origin=self.origin,
                                       login_url=self.origin + '/creator-micro/login',
                                       cookie_url=self.origin + '/creator-micro/home',
                                       allow_insecure=True, timeout=20, browser_mode='headless')
@@ -424,7 +428,9 @@ class BrowserTests(unittest.TestCase):
             _browser_skip('DISPLAY unavailable')
         self.manager.cancel()
         self.session.thread.join(4)
-        self.manager = QrLoginManager(allowed_origin=self.origin,
+        self.profile_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.profile_temp.cleanup)
+        self.manager = QrLoginManager(profile_dir=Path(self.profile_temp.name), allowed_origin=self.origin,
                                      login_url=self.origin + '/creator-micro/login',
                                      cookie_url=self.origin + '/creator-micro/home',
                                      allow_insecure=True, timeout=20, browser_mode='headed')
@@ -467,5 +473,64 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.manager.status()['state'], 'qr_ready')
 
 
+def _ephemeral_manager(**kwargs):
+    manager = QrLoginManager(**kwargs)
+    original = manager._run
+    def run(session):
+        with patch('qr_login.persist_enabled', return_value=False):
+            original(session)
+    manager._run = run
+    return manager
+
 if __name__ == '__main__':
     unittest.main()
+
+
+
+class PersistentManagerTests(unittest.TestCase):
+    def test_busy_profile_fails_at_launch(self):
+        from unittest.mock import MagicMock
+        from browser_profile import ProfileLock
+        with tempfile.TemporaryDirectory() as directory, ProfileLock(directory):
+            factory = MagicMock()
+            manager = QrLoginManager(profile_dir=directory, browser_factory=factory, browser_mode='headless')
+            session = QrLoginSession()
+            with self.assertLogs('index_hub.qr_login', level='WARNING') as logs:
+                manager._run(session)
+            self.assertEqual(session.snapshot()['state'], 'failed')
+            self.assertIn('QR login failed stage=launch error=ProfileBusy reason=profile_busy', '\n'.join(logs.output))
+            factory.return_value.__enter__.return_value.chromium.launch_persistent_context.assert_not_called()
+            self.assertFalse(manager.browser_open())
+
+    def test_persistent_context_without_browser_closed_before_unlock(self):
+        from unittest.mock import MagicMock
+        from browser_profile import ProfileLock, ProfileBusy
+        with tempfile.TemporaryDirectory() as directory:
+            factory = MagicMock()
+            chromium = factory.return_value.__enter__.return_value.chromium
+            context = chromium.launch_persistent_context.return_value
+            context.browser = None
+            page = MagicMock()
+            context.pages = [page]
+            page.url = 'https://' + HOST + '/home'
+            page.locator.return_value.inner_text.return_value = 'Home'
+            page.locator.return_value.count.return_value = 0
+            page.evaluate.return_value = 'Synthetic Chrome'
+            context.cookies.return_value = [cookie()]
+            manager = QrLoginManager(profile_dir=directory, browser_factory=factory, browser_mode='headless')
+            def closing():
+                self.assertTrue(manager.browser_open())
+                with self.assertRaises(ProfileBusy):
+                    ProfileLock(directory).acquire()
+            context.close.side_effect = closing
+            session = QrLoginSession()
+            manager._run(session)
+            self.assertEqual(session.snapshot()['state'], 'succeeded')
+            self.assertFalse(manager.browser_open())
+            context.close.assert_called_once()
+            chromium.launch.assert_not_called()
+            context.new_page.assert_not_called()
+            chromium.launch_persistent_context.assert_called_once_with(directory, headless=True, chromium_sandbox=False, accept_downloads=False, locale='zh-CN')
+            with ProfileLock(directory):
+                pass
+            manager.holder.clear()

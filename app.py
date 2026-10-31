@@ -258,6 +258,25 @@ class Api:
             self._lock.release()
 
 
+_profile_lock = None
+
+
+def _webview_start_kwargs():
+    global _profile_lock
+    from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy
+    kwargs = dict(private_mode=True, debug=False, http_server=False)
+    if os.environ.get('INDEX_HUB_ENABLED') == '1' and persist_enabled():
+        directory = prepare_profile(ROOT, 'webview')
+        try:
+            _profile_lock = ProfileLock(directory).acquire()
+        except ProfileBusy:
+            import logging
+            logging.getLogger(__name__).error('Webview profile busy')
+            raise SystemExit(2) from None
+        kwargs.update(private_mode=False, storage_path=str(directory))
+    return kwargs
+
+
 def main():
     import webview
 
@@ -276,7 +295,11 @@ def main():
         configure_logging('app', ROOT)
         from hub_bridge import start_bridge
         start_bridge(api)
-    webview.start(private_mode=True, debug=False, http_server=False)
+    try:
+        webview.start(**_webview_start_kwargs())
+    finally:
+        if _profile_lock is not None:
+            _profile_lock.release()
 
 
 if __name__ == "__main__":
