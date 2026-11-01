@@ -25,6 +25,7 @@ function fixture(){
 test('all states and buttons, masked number only',async()=>{
  for(const state of ['idle','opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login','succeeded','already_logged_in','rate_limited','failed','timeout','cancelled']){
   const f=fixture();f.run('smsEnabled=true');
+  if(['succeeded','already_logged_in'].includes(state))await f.render({state:'opening'});
   const verify=state.startsWith('verify_'),active=['opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login'].includes(state);
   await f.render({state,verification_mode:verify?'manual':null,resend_in:60,attempts_left:3,phone:'138****8000'});
   assert.equal(f.$('#smsPhoneForm').hidden,active||['succeeded','already_logged_in'].includes(state));assert.equal(f.$('#smsCodeForm').hidden,!['code_sent','code_invalid'].includes(state));assert.equal(f.$('#smsVerification').hidden,!verify);assert.equal(f.$('#smsCancel').hidden,!active);assert.equal(f.$('#smsNumber').textContent,'138****8000');
@@ -57,6 +58,7 @@ test('new SMS success hides forms immediately; later invalid status wins over te
  for(const state of ['succeeded','already_logged_in']){
   for(const login_state of ['expired','rejected','no_session_cookie','unknown']){
    const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+   await f.render({state:'opening'});
    await f.render({state,phone:'138****8000',message:'官方窗口已登录'});
    assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
    assert(f.$('#smsState').textContent.startsWith('已登录'));
@@ -65,6 +67,21 @@ test('new SMS success hides forms immediately; later invalid status wins over te
    assert(!f.$('#smsState').textContent.includes('已登录'));assert.equal(f.calls.length,0);
   }
  }
+});
+test('historical terminal snapshots cannot override current expired status on reload',async()=>{
+ for(const state of ['succeeded','already_logged_in']){
+  const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'expired'})");
+  await f.render({state,message:'官方窗口已登录'});
+  assert(!f.$('#smsPhoneForm').hidden);assert(!f.$('#smsState').textContent.includes('已登录'));
+  assert.equal(f.calls.length,0);
+ }
+});
+test('immediate successful action response hides form even without an opening snapshot',async()=>{
+ const f=fixture();f.run("smsEnabled=true;setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+ await f.render({state:'idle'});f.state.state='already_logged_in';
+ await f.run("smsAction('start',{phone:'13800138000'})");
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsState').textContent.startsWith('已登录'));
+ assert.equal(f.calls.filter(c=>c.body).length,1);
 });
 test('connection loss and logout restore form; only masked phone is displayed',async()=>{
  const f=fixture();await f.render({state:'idle'});

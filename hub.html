@@ -140,10 +140,10 @@ const smsManual=d=>['verify_send','verify_login'].includes(d?.state)&&d.verifica
 function resetSmsGesture(){const g=smsGesture;smsGesture=null;if(g){clearTimeout(g.timer);const image=$('#smsImage');if(image.hasPointerCapture?.(g.pointer))image.releasePointerCapture(g.pointer)}$('#smsFinger').hidden=true}
 function clearSmsFrame(){resetSmsGesture();smsFrameRequest++;smsFrameLoading=false;const image=$('#smsImage');if(image.getAttribute('src'))URL.revokeObjectURL(image.src);if(smsFrame&&smsFrame.url!==image.src)URL.revokeObjectURL(smsFrame.url);smsFrame=null;image.onload=null;image.onerror=null;image.hidden=true;image.removeAttribute('src')}
 function setSmsMode(mode){smsEnabled=mode==='sms';$('#smsLoginCard').hidden=!smsEnabled;if(smsEnabled&&!smsInitialized){smsInitialized=true;loadSms()}if(!smsEnabled){smsRevision++;smsInitialized=false;clearTimeout(smsTimer);clearSmsFrame();for(const id of ['#smsPhone','#smsCode','#smsText'])$(id).value=''}}
-function renderSms(data){
+function renderSms(data,fromAction=false){
  // A newly completed SMS round is newer than the last 15-second status read.
  // Re-rendering an old terminal snapshot must not override a later logout.
- if(data.state!==smsSnapshot?.state&&['succeeded','already_logged_in'].includes(data.state))smsLoggedIn=true;
+ if((fromAction||smsActive(smsSnapshot?.state))&&data.state!==smsSnapshot?.state&&['succeeded','already_logged_in'].includes(data.state))smsLoggedIn=true;
  const active=smsActive(data.state),verify=['verify_send','verify_login'].includes(data.state),manual=smsManual(data),canCode=['code_sent','code_invalid'].includes(data.state),busy=Boolean(smsActing||smsCancelling);
  if(smsLoggedIn||!manual||smsSnapshot?.challenge_epoch!==data.challenge_epoch)clearSmsFrame();
  smsSnapshot=data;clearTimeout(smsTimer);smsTimer=null;
@@ -192,7 +192,7 @@ async function smsAction(action,body={}){
  if(cancelling)smsCancelling=true;else smsActing=action;
  // Invalidate older status reads and any pointer response overtaken by cancel.
  const revision=++smsRevision;clearTimeout(smsTimer);if(smsSnapshot)renderSms(smsSnapshot);
- try{const data=await api('login/sms/'+action,{method:'POST',body});if(smsEnabled&&revision===smsRevision)renderSms(data)}
+ try{const data=await api('login/sms/'+action,{method:'POST',body});if(smsEnabled&&revision===smsRevision)renderSms(data,true)}
  catch(e){if(smsEnabled&&revision===smsRevision){toast(e.code==='stale_frame'?'画面已更新，请重新操作':e.message);if(e.code==='stale_frame')clearSmsFrame()}}
  finally{body=null;if(cancelling)smsCancelling=false;else smsActing=false;await loadSms()}
 }
