@@ -43,7 +43,7 @@ test('restored browser login hides idle SMS form without sending anything',async
   await f.render({state:'idle'});assert(f.$('#smsPhoneForm').hidden);
   assert.equal(f.calls.length,0);
  }
- assert(html.includes('setSmsLoginStatus(state);setSmsMode(state.login_mode)'));
+ assert(html.includes('setSmsLoginStatus(state,loginRevision);setSmsMode(state.login_mode)'));
 });
 test('status arriving before SMS snapshot still hides stale code and verification UI',async()=>{
  for(const state of ['idle','code_sent','verify_login']){
@@ -93,7 +93,29 @@ test('connection loss and logout restore form; only masked phone is displayed',a
  for(const phone of ['13800138000','<img src=x onerror=alert(1)>','138****8000 extra']){
   await f.render({phone});assert.equal(f.$('#smsNumber').textContent,'账号信息：当前会话未提供脱敏手机号');
  }
- assert(html.includes('catch(e){setSmsLoginStatus(null);toast(e.message)'));
+ assert(html.includes('catch(e){setSmsLoginStatus(null,loginRevision);toast(e.message)'));
+});
+test('status response or failure started before SMS success cannot override it',async()=>{
+ for(const response of ["{browser:'login_required',login_state:'no_session_cookie'}",'null']){
+  const f=fixture();await f.render({state:'submitting'});
+  f.run('const earlierRevision=smsLoginRevision');
+  await f.render({state:'succeeded'});
+  f.run(`setSmsLoginStatus(${response},earlierRevision)`);
+  await f.render({state:'succeeded'});
+  assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));
+  f.run("setSmsLoginStatus({browser:'login_required',login_state:'expired'})");
+  assert(!f.$('#smsPhoneForm').hidden);
+ }
+ assert(html.includes('const loginRevision=smsLoginRevision;try{const [state,h,j]=await'));
+});
+test('repeated terminal action is fresh confirmation after a status failure',async()=>{
+ const f=fixture();f.run('smsEnabled=true');await f.render({state:'opening'});
+ await f.render({state:'already_logged_in'});f.run('setSmsLoginStatus(null)');
+ assert(!f.$('#smsPhoneForm').hidden);
+ await f.run("smsAction('start',{phone:'13800138000'})");
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsState').textContent.startsWith('已登录'));
+ assert.equal(f.calls.filter(c=>c.body).length,1);
 });
 test('auto/manual/remote-desktop display and countdown',async()=>{
  const f=fixture();await f.manual();assert(!f.$('#smsRefresh').hidden);
