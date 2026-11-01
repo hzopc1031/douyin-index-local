@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>评论工具 · 登录</title><link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script></head>
+<body><main><h1>评论工具登录</h1><p>仅本人使用 · 私网连接 · 北京时间（UTC+8）</p>
+<p id="status" role="status" aria-live="polite">请输入启动终端显示的一次性口令。</p>
+<section id="auth"><label for="token">一次性口令</label>
+<input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="128">
+<button id="unlock">进入登录</button></section>
+<section id="login" hidden>
+<nav><button id="smsMode">短信登录</button><button id="qrMode">切换扫码</button></nav>
+<section id="sms"><label for="phone">中国大陆手机号（+86）</label>
+<input id="phone" type="password" inputmode="numeric" autocomplete="off" maxlength="11">
+<p>点击发码即向抖音请求验证码；登录即表示同意抖音用户协议和隐私政策。</p>
+<button id="send">发送验证码</button>
+<label for="code">6 位短信验证码</label>
+<input id="code" type="password" inputmode="numeric" autocomplete="off" maxlength="6">
+<button id="submit">提交验证码</button></section>
+<section id="picture" hidden><p id="hint">请在图中拖动滑块或点选。页面变化后请刷新截图。</p>
+<img id="frame" alt="登录验证或二维码" draggable="false">
+<button id="refresh">刷新截图</button></section>
+<p id="details"></p><button id="cancel" class="secondary">结束并释放登录会话</button>
+</section><p id="error" role="alert"></p>
+<small>口令只能使用一次，3 分钟内有效；登录会话最长 10 分钟。页面关闭后服务仍会在期限内自动释放。</small>
+</main></body></html>

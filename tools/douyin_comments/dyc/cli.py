@@ -41,6 +41,9 @@ def parser():
     fetch.add_argument("--max-pages", type=positive, default=1500, help="Per-video request budget (at most 1500)")
     login = subs.add_parser("login", parents=[common], help="Wait for human login; refreshed private QR path on stderr")
     login.add_argument("--wait-seconds", type=positive, default=180, help="Login wait, at most 600 seconds")
+    mobile = subs.add_parser("login-web", parents=[common], help="Short-lived private phone SMS/QR login (loopback only)")
+    mobile.add_argument("--origin", required=True, help="Exact Tailscale HTTPS origin, e.g. https://host.tailnet.ts.net:8444")
+    mobile.add_argument("--port", type=positive, default=8766, help="Loopback port (default 8766)")
     subs.add_parser("check-env", parents=[common], help="Offline environment report")
     smoke = subs.add_parser("selftest", parents=[common], help="Entire pipeline against an in-memory fake origin")
     smoke.add_argument("--out", metavar="DIR")
@@ -106,6 +109,9 @@ def main(argv=None):
         args = defaults(parser().parse_args(argv))
         if args.command == "check-env":
             code, result = check_env(args)
+        elif args.command == "login-web":
+            from .sms_web import serve
+            code, result = asyncio.run(serve(args))
         else:
             from . import runner
             if args.command == "fetch":

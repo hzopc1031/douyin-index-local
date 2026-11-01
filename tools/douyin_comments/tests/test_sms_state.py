@@ -1,0 +1,293 @@
+"""Synthetic secrets only; no sockets, SMS, real profile or external traffic."""
+import asyncio
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from dyc.models import SHANGHAI
+from dyc.runtime import Profile
+from dyc.errors import Stop
+from dyc.sms_state import LoginError, LoginSession, SmsQuota, payload
+from dyc.sms_web import WebApp, connection, origin_checked, read_request
+
+PHONE, CODE = '13900001234', '975318'  # deliberately synthetic fixtures
+ORIGIN = 'https://dyc.example.ts.net:8444'
+
+
+class Clock:
+    def __init__(self, value=1000):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
+class DummyBrowser:
+    auto_attempts = 0
+
+    def __init__(self):
+        self.start = AsyncMock()
+        self.close = AsyncMock()
+        self.observe = AsyncMock(return_value='pending')
+        self.send = AsyncMock()
+        self.submit = AsyncMock()
+        self.reset = AsyncMock()
+        self.auto_step = AsyncMock()
+        self.persist = AsyncMock()
+        self.pointer = AsyncMock()
+        self.frame = AsyncMock(return_value=dict(image='synthetic', frame='safe'))
+
+
+class QuotaTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = Clock(datetime(2026, 11, 1, 12, tzinfo=SHANGHAI).timestamp())
+        self.quota = SmsQuota(self.tmp.name, self.clock)
+
+    def error(self, expected):
+        with self.assertRaises(LoginError) as caught:
+            self.quota.reserve()
+        self.assertEqual(str(caught.exception), expected)
+
+    def test_interval_rolling_hour_restart_and_day(self):
+        self.quota.reserve()
+        self.clock.value += 59.99
+        self.error('send_interval')
+        self.clock.value += .01
+        self.quota.reserve()
+        self.clock.value += 60
+        self.quota.reserve()
+        self.clock.value += 60
+        self.quota = SmsQuota(self.tmp.name, self.clock)
+        self.error('send_hour_limit')
+        self.clock.value += 3600
+        for _ in range(3):
+            self.quota.reserve()
+            self.clock.value += 60
+        self.clock.value += 3600
+        self.error('send_day_limit')
+        data = json.loads((Path(self.tmp.name) / 'sms-attempts.json').read_text())
+        self.assertEqual(len(data), 6)
+        self.assertTrue(all(isinstance(v, (int, float)) for v in data))
+
+    def test_shanghai_midnight_does_not_reset_rolling_hour(self):
+        self.clock.value = datetime(2026, 11, 1, 23, 57, tzinfo=SHANGHAI).timestamp()
+        for _ in range(3):
+            self.quota.reserve()
+            self.clock.value += 60
+        self.error('send_hour_limit')
+        self.clock.value += 3600
+        self.quota.reserve()
+
+    def test_corruption_rollback_and_symlink_fail_closed(self):
+        self.quota.reserve()
+        self.clock.value -= 1
+        self.error('quota_unavailable')
+        path = Path(self.tmp.name) / 'sms-attempts.json'
+        path.write_text('[NaN]')
+        self.error('quota_unavailable')
+        path.unlink()
+        path.symlink_to(Path(self.tmp.name) / 'missing')
+        with self.assertRaises(Stop):
+            self.quota.reserve()
+
+    def test_profile_shared_with_login_and_fetch(self):
+        with Profile(Path(self.tmp.name) / 'profile'):
+            with self.assertRaises(Stop) as caught:
+                with Profile(Path(self.tmp.name) / 'profile'):
+                    self.fail('second profile owner')
+            self.assertEqual(caught.exception.reason, 'profile_locked')
+
+
+class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = Clock()
+        self.browser = DummyBrowser()
+        self.session = LoginSession(self.browser, SmsQuota(self.tmp.name, self.clock), clock=self.clock)
+
+    async def action(self, action, **extra):
+        return await self.session.act(dict(action=action, nonce=self.session.nonce, **extra))
+
+    async def test_nonce_code_replay_and_redacted_response(self):
+        nonce = self.session.nonce
+        result = await self.action('send', phone=PHONE)
+        self.assertNotIn(PHONE, json.dumps(result))
+        self.assertEqual(result['phone'], '139****1234')
+        with self.assertRaisesRegex(LoginError, 'replayed_action'):
+            await self.session.act(dict(action='send', nonce=nonce, phone=PHONE))
+        await self.action('code', code=CODE)
+        with self.assertRaisesRegex(LoginError, 'wrong_state'):
+            await self.action('code', code=CODE)
+        await self.action('mode', mode='sms')
+        self.clock.value += 60
+        await self.action('send', phone=PHONE)
+        with self.assertRaisesRegex(LoginError, 'replayed_code'):
+            await self.action('code', code=CODE)
+        self.browser.submit.assert_awaited_once_with(CODE)
+
+    async def test_serial_rejection_no_queued_credentials(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def send(_):
+            entered.set()
+            await release.wait()
+        self.browser.send.side_effect = send
+        pending = asyncio.create_task(self.action('send', phone=PHONE))
+        await entered.wait()
+        try:
+            with self.assertRaisesRegex(LoginError, 'busy'):
+                await self.action('send', phone=PHONE)
+        finally:
+            release.set()
+            await pending
+        self.browser.send.assert_awaited_once()
+
+    async def test_expiry_releases_browser_and_replay_material(self):
+        await self.action('send', phone=PHONE)
+        self.clock.value += 601
+        result = await self.session.act(dict(action='status'))
+        self.assertEqual(result['state'], 'expired')
+        self.assertFalse(self.session.key or self.session.nonce or self.session.used_codes)
+        self.browser.close.assert_awaited_once()
+
+    async def test_cancel_pending_operation_closes_browser(self):
+        entered = asyncio.Event()
+        async def send(_):
+            entered.set()
+            await asyncio.Event().wait()
+        self.browser.send.side_effect = send
+        pending = asyncio.create_task(self.action('send', phone=PHONE))
+        await entered.wait()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        self.browser.close.assert_awaited_once()
+        self.assertEqual(self.session.state, 'cancelled')
+
+    async def test_success_requires_browser_observation_and_persistence(self):
+        await self.action('send', phone=PHONE)
+        self.browser.observe.return_value = 'succeeded'
+        result = await self.session.act(dict(action='status'))
+        self.assertEqual(result['state'], 'succeeded')
+        self.browser.persist.assert_awaited_once()
+        self.browser.close.assert_awaited_once()
+
+
+class WebTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = Clock()
+        self.browser = DummyBrowser()
+        self.session = LoginSession(self.browser, SmsQuota(self.tmp.name, self.clock), clock=self.clock)
+        self.app = WebApp(ORIGIN, 'synthetic-owner-token', lambda: self.session, clock=self.clock)
+        self.headers = {'host': 'dyc.example.ts.net:8444', 'origin': ORIGIN,
+                        'content-type': 'application/json', 'sec-fetch-site': 'same-origin'}
+
+    async def request(self, target, data, headers=None):
+        return await self.app.dispatch('POST', target, self.headers if headers is None else headers,
+                                       json.dumps(data).encode())
+
+    async def auth(self):
+        status, headers, data = await self.request('/auth', {'token': 'synthetic-owner-token'})
+        self.assertEqual(status, 200)
+        self.headers['cookie'] = headers['Set-Cookie'].split(';')[0]
+        self.headers['x-dyc-csrf'] = data['csrf']
+        return data
+
+    async def test_auth_is_once_cookie_secure_and_csrf_required(self):
+        _, headers, _ = await self.request('/auth', {'token': 'synthetic-owner-token'})
+        for flag in ('HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'):
+            self.assertIn(flag, headers['Set-Cookie'])
+        status, _, _ = await self.request('/auth', {'token': 'synthetic-owner-token'})
+        self.assertEqual(status, 403)
+        self.headers['cookie'] = headers['Set-Cookie'].split(';')[0]
+        status, _, data = await self.request('/api', {'action': 'status'})
+        self.assertEqual((status, data['error']), (403, 'csrf'))
+
+    async def test_cross_origin_missing_origin_wrong_host_and_form_rejected(self):
+        for change in ({'origin': 'https://evil.invalid'}, {'host': 'evil.invalid'},
+                       {'content-type': 'text/plain'}, {'sec-fetch-site': 'cross-site'}, {'origin': ''}):
+            status, _, _ = await self.request('/auth', {'token': 'synthetic-owner-token'}, self.headers | change)
+            self.assertEqual(status, 403)
+        self.browser.start.assert_not_awaited()
+
+    async def test_auth_expiry_and_guess_budget(self):
+        for _ in range(8):
+            self.assertEqual((await self.request('/auth', {'token': 'wrong'}))[0], 403)
+        self.assertTrue(self.app.done.is_set())
+        self.assertEqual((await self.request('/auth', {'token': 'synthetic-owner-token'}))[0], 403)
+        self.clock.value += 181
+        await self.app.tick()
+        self.browser.start.assert_not_awaited()
+
+    async def test_exceptions_and_responses_never_leak_secret(self):
+        await self.auth()
+        self.browser.send.side_effect = RuntimeError(PHONE + CODE)
+        logs = io.StringIO()
+        with redirect_stdout(logs), redirect_stderr(logs):
+            result = await self.request('/api', dict(action='send', nonce=self.session.nonce, phone=PHONE))
+        serialized = json.dumps(result) + logs.getvalue()
+        self.assertNotIn(PHONE, serialized)
+        self.assertNotIn(CODE, serialized)
+        self.assertEqual(result[2], {'error': 'login_failed'})
+        self.assertEqual(self.session.state, 'failed')
+        self.browser.close.assert_awaited_once()
+
+    async def test_body_strict_duplicates_unknown_keys_get_secrets(self):
+        for raw in (b'{"phone":"a","phone":"b"}', b'{"a":NaN}', b'[]'):
+            with self.assertRaises(LoginError):
+                payload(raw)
+        result = await self.app.dispatch('GET', '/?phone=' + PHONE, self.headers, b'')
+        self.assertEqual(result[0], 409)
+        self.assertNotIn(PHONE, str(result))
+        await self.auth()
+        result = await self.request('/api', {'action': 'status', 'phone': PHONE})
+        self.assertEqual(result[2], {'error': 'invalid_request'})
+
+    async def test_timer_closes_abandoned_session(self):
+        await self.auth()
+        self.clock.value += 601
+        await self.app.tick()
+        self.assertEqual(self.session.state, 'expired')
+        self.browser.close.assert_awaited_once()
+        self.clock.value += 11
+        await self.app.tick()
+        self.assertTrue(self.app.done.is_set())
+        self.assertFalse(self.app.cookie_hash or self.app.csrf)
+
+    async def test_http_framing_and_redacted_errors_without_listener(self):
+        class Writer:
+            data = b''
+            closed = False
+            def write(self, data): self.data += data
+            async def drain(self): pass
+            def close(self): self.closed = True
+            async def wait_closed(self): pass
+        for raw in (b'POST /auth HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx',
+                    b'POST /auth HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n',
+                    ('GET /?phone='+PHONE+' HTTP/1.1\r\nHost: wrong\r\n\r\n').encode()):
+            reader, writer = asyncio.StreamReader(), Writer()
+            reader.feed_data(raw); reader.feed_eof()
+            await connection(self.app, reader, writer)
+            self.assertTrue(writer.closed)
+            self.assertNotIn(PHONE.encode(), writer.data)
+            self.assertIn(b'Cache-Control: no-store', writer.data)
+        reader, writer = asyncio.StreamReader(), Writer()
+        reader.feed_data(b'GET / HTTP/1.1\r\nHost: dyc.example.ts.net:8444\r\n\r\n'); reader.feed_eof()
+        await connection(self.app, reader, writer)
+        self.assertIn(b'200 OK', writer.data)
+        self.assertIn(b'text/html', writer.data)
+
+    def test_only_exact_tailscale_https_origin(self):
+        self.assertEqual(origin_checked(ORIGIN), ORIGIN)
+        for value in ('http://dyc.example.ts.net', ORIGIN+'/', ORIGIN+'?phone='+PHONE,
+                      'https://user@dyc.ts.net', 'https://evil.invalid', 'https://dyc.ts.net:107'):
+            with self.assertRaises(Stop):
+                origin_checked(value)
