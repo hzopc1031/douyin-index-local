@@ -206,3 +206,23 @@ class PointTests(unittest.TestCase):
                        [[.5,.5,0],[.5,.5,5001]], [[True,.5,0]]):
             with self.assertRaises(LoginError):
                 points_checked(values)
+
+
+class RedirectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_credential_redirect_and_foreign_get_stopped_before_follow(self):
+        browser = SmsBrowser('/unused')
+        browser.response_session = type('CDP', (), {'send': AsyncMock()})()
+        browser.private_values = [PHONE, CODE]
+        for method, target in (('POST', '/same-host'), ('GET', 'https://evil.invalid/'),
+                               ('GET', '/path?phone=' + PHONE)):
+            await browser.check_response(dict(requestId='synthetic', responseStatusCode=307,
+                request=dict(method=method, url='https://www.douyin.com/passport/'),
+                responseHeaders=[dict(name='Location', value=target)]))
+            self.assertEqual(browser.response_session.send.call_args.args[0], 'Fetch.failRequest')
+            self.assertTrue(browser.fatal)
+        browser.fatal = False
+        await browser.check_response(dict(requestId='synthetic', responseStatusCode=302,
+            request=dict(method='GET', url='https://www.douyin.com/'),
+            responseHeaders=[dict(name='Location', value='/jingxuan')]))
+        self.assertEqual(browser.response_session.send.call_args.args[0], 'Fetch.continueRequest')
+        self.assertFalse(browser.fatal)

@@ -4,6 +4,10 @@
 代码独立实现，未读取或复制无许可证的第三方代码。**2026-11-01 已只读校准公开登录弹窗；账号成功信号、评论字段和接口仍待真实验证。**
 “complete”仅表示所见分页走到末尾且回复数量无已知缺口，不代表拿到平台隐藏或折叠的评论。
 
+新增独立手机登录入口 `bin/dyc login-web`：短信登录、人工验证截图和扫码备用，
+仅绑定 loopback，通过 Tailscale 私网访问。认证、限频、部署/启用和回滚步骤见 [SMS_LOGIN.md](SMS_LOGIN.md)。
+实现日期 2026-11-01（北京时间 UTC+8）；此次仅离线验证，真实启用须另行批准。
+
 ## 使用
 
 在本目录执行，也可从任何目录调用 `bin/dyc`；相对文件路径始终以调用时的工作目录为准：
@@ -68,9 +72,9 @@ bin/dyc selftest
 已检测到验证码立即停止，不等其它 frame；验证截图在浏览器关闭前写入 `login-verify.png`，同样遮盖输入框和手机号。
 慢扫描只输出耗时和 frame 数，不输出页面内容、URL 或会话。
 资料目录仍含登录态，应按凭据保护，不提交、不上传。首次真实访问及扫码需用户授权。
-2026-11-01 11:07（东京时间 UTC+9）经授权在腾讯云尝试一次独立登录，二维码生成前因
+2026-11-01 10:07（北京时间 UTC+8）经授权在腾讯云尝试一次独立登录，二维码生成前因
 `state_check_timeout`（退出码 3）保护性停止，未重试或抓取。
-2026-11-01 11:42 起（东京时间）完成腾讯云只读 DOM/截图校准；未提交登录、未请求评论。真实扫码与刷新仍需本次上线验证；该超时本身不能证明平台风控。
+2026-11-01 10:42 起（北京时间 UTC+8）完成腾讯云只读 DOM/截图校准；未提交登录、未请求评论。真实扫码与刷新仍需本次上线验证；该超时本身不能证明平台风控。
 
 ## 限制、退出与风险
 
@@ -100,7 +104,8 @@ bin/dyc selftest
 ## 离线测试
 
 ```sh
-DYC_REQUIRE_BROWSER_TESTS=1 xvfb-run -a /tmp/dycvenv/bin/python -m unittest discover -s tests -p 'test_*.py'
+.venv/bin/python -m pip install -r requirements.txt -r requirements-solver.txt
+DYC_REQUIRE_BROWSER_TESTS=1 .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 在上述命令末尾加 `-v --durations 0` 可记录每项测试耗时（Python 3.13）。慢 seed 测试用事件控制

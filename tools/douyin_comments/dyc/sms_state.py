@@ -23,7 +23,7 @@ class LoginError(Exception):
 
 
 def reject(code="invalid_request"):
-    raise LoginError(code)
+    raise LoginError(code) from None
 
 
 def unique(pairs):

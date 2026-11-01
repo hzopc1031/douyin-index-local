@@ -96,6 +96,8 @@ class SmsBrowser:
         self.solver = solver
         self.playwright = self.persistent = self.context = self.page = None
         self.driver_pid = None
+        self.response_session = None
+        self.guard_tasks = set()
         self.private_values = []
         self.fatal = False
         self.auto_attempts = 0
@@ -171,6 +173,10 @@ class SmsBrowser:
             self.context.on('response', self.response)
             self.page = await self.context.new_page()
             self.page.set_default_timeout(3000)
+            self.response_session = await self.context.new_cdp_session(self.page)
+            self.response_session.on('Fetch.requestPaused', self.guard_response)
+            await self.response_session.send('Fetch.enable', dict(patterns=[
+                dict(urlPattern='*', requestStage='Response')]))
             await self.reset()
         except BaseException:
             await self.close()
@@ -180,10 +186,44 @@ class SmsBrowser:
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
             self.fatal = True
 
+    def guard_response(self, event):
+        task = asyncio.create_task(self.check_response(event))
+        self.guard_tasks.add(task)
+        task.add_done_callback(self.guard_tasks.discard)
+
+    async def check_response(self, event):
+        """Chromium pauses before redirects, which Playwright routes may skip."""
+        request_id = event['requestId']
+        try:
+            status = event.get('responseStatusCode', 0)
+            denied = bool(event.get('responseErrorReason'))
+            if 300 <= status < 400:
+                request = event['request']
+                location = next((h['value'] for h in event.get('responseHeaders', [])
+                                 if h['name'].lower() == 'location'), '')
+                from urllib.parse import urljoin
+                target = urlsplit(urljoin(request['url'], location))
+                # Never replay a credential POST through a redirect. GET
+                # redirects stay on the same approved host and carry no input.
+                denied = (request['method'] not in ('GET', 'HEAD') or
+                          target.scheme != 'https' or target.netloc != urlsplit(request['url']).netloc or
+                          self.contains_private(target.geturl()))
+                if denied:
+                    self.fatal = True
+            if denied:
+                await self.response_session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
+            else:
+                await self.response_session.send('Fetch.continueRequest', dict(requestId=request_id))
+        except Exception:
+            self.fatal = True
+            try:
+                await self.response_session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
+            except Exception:
+                pass
+
     async def reset(self):
         self.last_frame = None
         self.frame_token = ''
-        self.private_values.clear()
         # Destroy the DOM containing old inputs, without storing page state.
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
@@ -383,6 +423,10 @@ class SmsBrowser:
             _kill_owned(records)
         finally:
             self.context = self.persistent = self.playwright = self.page = None
+            for task in self.guard_tasks:
+                task.cancel()
+            await asyncio.gather(*self.guard_tasks, return_exceptions=True)
+            self.guard_tasks.clear()
             if self.solver:
                 await self.solver.close()
             await self.display.close()
