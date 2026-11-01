@@ -226,6 +226,16 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         status, _, data = await self.request('/api', {'action': 'status'})
         self.assertEqual((status, data['error']), (403, 'csrf'))
 
+    async def test_unrelated_cookies_accepted_duplicate_auth_rejected(self):
+        await self.auth()
+        own = self.headers['cookie']
+        self.headers['cookie'] = 'theme=dark; ' + own + '; other_service=synthetic'
+        self.assertEqual((await self.request('/api', {'action': 'status'}))[0], 200)
+        for header in (own + '; ' + own, own + '; __Host-dyc_login=bad',
+                       own + '; __Host-dyc_login', '__Host-dyc_login=bad'):
+            self.headers['cookie'] = header
+            self.assertEqual((await self.request('/api', {'action': 'status'}))[0], 403)
+
     async def test_cross_origin_missing_origin_wrong_host_and_form_rejected(self):
         for change in ({'origin': 'https://evil.invalid'}, {'host': 'evil.invalid'},
                        {'content-type': 'text/plain'}, {'sec-fetch-site': 'cross-site'}, {'origin': ''}):

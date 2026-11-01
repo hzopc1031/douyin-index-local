@@ -57,10 +57,18 @@ class WebApp:
         self.terminal_at = None
 
     def authenticated(self, headers):
-        cookie = headers.get('cookie', '')
-        match = re.fullmatch(r'__Host-dyc_login=([A-Za-z0-9_-]{32,128})', cookie)
-        return bool(match and self.cookie_hash and
-                    hmac.compare_digest(hashlib.sha256(match[1].encode()).digest(), self.cookie_hash))
+        # Cookies are scoped to a hostname, not a port. Other trusted services
+        # on this Tailscale host may have unrelated cookies. Keep exactly one
+        # unambiguous authentication entry; never accept duplicate credentials.
+        values = []
+        for entry in headers.get('cookie', '').split(';'):
+            name, separator, value = entry.strip().partition('=')
+            if name == '__Host-dyc_login':
+                values.append(value if separator else '')
+        if len(values) != 1 or re.fullmatch(r'[A-Za-z0-9_-]{32,128}', values[0]) is None:
+            return False
+        return bool(self.cookie_hash and hmac.compare_digest(
+            hashlib.sha256(values[0].encode()).digest(), self.cookie_hash))
 
     async def dispatch(self, method, target, headers, body):
         """Also used by offline tests; only static codes cross this boundary."""

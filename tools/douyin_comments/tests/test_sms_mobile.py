@@ -52,6 +52,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await route.fulfill(status=status, headers=HEADERS | {'Content-Type': 'application/json'} | extra, body=data)
             await front.route('**/*', frontend)
             await front.route_web_socket('**/*', lambda socket: socket.close())
+            await front.add_cookies([dict(name='other_tool', value='synthetic-theme', url=ORIGIN)])
             page = await front.new_page()
             page.on('console', lambda item: console.append(item.text))
             page.on('pageerror', lambda error: console.append(str(error)))
@@ -77,7 +78,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await page.locator('#code').input_value(), '')
                 self.assertEqual(sent, [('/sms', True), ('/submit', True)])
                 self.assertEqual(await page.evaluate('[localStorage.length, sessionStorage.length]'), [0, 0])
-                self.assertEqual(await page.evaluate('document.cookie'), '')  # HttpOnly session
+                self.assertEqual(await page.evaluate('document.cookie'), 'other_tool=synthetic-theme')  # auth remains HttpOnly
                 self.assertNotIn(PHONE, ''.join(console))
                 self.assertNotIn(CODE, ''.join(console))
                 self.assertFalse(foreign)
