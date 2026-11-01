@@ -1,0 +1,389 @@
+"""Isolated Playwright login; credentials live only in an incognito context.
+
+The persistent dyc profile stays at about:blank. Only allowlisted login cookies
+are copied back after a positive dyc login signal. No traces, HARs, downloads,
+page storage, screenshots or credential-bearing browser errors are written.
+"""
+import asyncio
+import base64
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+import os
+import secrets
+import threading
+from urllib.parse import quote, unquote, urlsplit
+
+from . import site
+from .browser import _kill_owned, _processes
+from .errors import Stop
+from .login_ui import ready_qr
+from .runtime import Display, Profile, browser_defaults, check_memory
+from .sms_state import reject
+
+# Fixed copy/adaptation of the 2026-10-31 login-B selectors; see SMS_LOGIN.md.
+PHONE = '#douyin_login_comp_mobile_code input#normal-input'
+CODE = '#douyin_login_comp_mobile_code input#button-input'
+SEND = '#douyin_login_comp_button_input_id span'
+SUBMIT = '#douyin_login_comp_btn_id'
+CHALLENGE = ('#captcha_container, .captcha_verify_container, #rc-verifycenter, '
+             '.rc-verifycenter, [id^="rc-verifycenter"], [data-e2e="verify-dialog"], '
+             'iframe[src*="captcha"], iframe[src*="verify"]')
+RECTS = dict(slider_handle='.secsdk-captcha-drag-icon',
+             slider_track='.secsdk-captcha-drag-wrapper',
+             slider_image='#captcha-verify-image', slider_piece='.captcha_verify_img_slide')
+COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
+                'sid_guard', 'sid_ucp_v1', 'ssid_ucp_v1', 'passport_csrf_token',
+                'passport_csrf_token_default', 'ttwid'}
+ASSET_DOMAINS = ('douyin.com', 'douyinpic.com', 'douyinvod.com', 'byteimg.com',
+                 'bytedance.com', 'bytegecko.com', 'zijieapi.com', 'snssdk.com',
+                 'pstatp.com', 'bytedance.net', 'ibytedtos.com')
+AUTH_DOMAINS = ('douyin.com', 'zijieapi.com', 'snssdk.com')
+
+# All DOM text (including reflected codes), form fields and editable content
+# are hidden BEFORE rasterization, in every frame. The trusted phone UI gives
+# instructions. Images/canvas inside the cropped challenge remain visible.
+REDACT_STYLE = '''* { color: transparent !important; -webkit-text-fill-color: transparent !important;
+ text-shadow: none !important; caret-color: transparent !important; }
+ input, textarea, [contenteditable], svg text { visibility: hidden !important; }
+ *::before, *::after { content: none !important; }'''
+
+
+def in_domains(host, domains):
+    return any(host == item or host.endswith('.' + item) for item in domains)
+
+
+def points_checked(points):
+    if not isinstance(points, (list, tuple)) or not 1 <= len(points) <= 160:
+        reject('invalid_points')
+    previous = -1
+    for point in points:
+        if (not isinstance(point, (list, tuple)) or len(point) != 3 or
+            any(type(v) not in (int, float) or not math.isfinite(v) for v in point)):
+            reject('invalid_points')
+        x, y, stamp = point
+        if not (0 <= x <= 1 and 0 <= y <= 1 and 0 <= stamp <= 5000 and stamp > previous):
+            reject('invalid_points')
+        previous = stamp
+    if points[0][2] != 0:
+        reject('invalid_points')
+    return points
+
+
+@dataclass(frozen=True)
+class Metadata:
+    x0: float
+    y0: float
+    width: float
+    height: float
+    x_scale: float = 1
+    y_scale: float = 1
+
+
+@dataclass(repr=False)
+class Capture:
+    png: bytes
+    metadata: Metadata
+
+
+class SmsBrowser:
+    def __init__(self, profile, *, backend=None, solver=None):
+        self.profile = Profile(profile)
+        self.display = Display()  # always owned; never use :107 or inherited DISPLAY
+        self.backend = backend
+        self.url = site.FAKE_ORIGIN if backend else site.LOGIN_URL
+        self.solver = solver
+        self.playwright = self.persistent = self.context = self.page = None
+        self.driver_pid = None
+        self.private_values = []
+        self.fatal = False
+        self.auto_attempts = 0
+        self.auto_seen = set()
+        self.auto_disabled = False
+        self.cancel = threading.Event()
+        self.last_frame = None
+        self.frame_token = ''
+
+    def __repr__(self):
+        return '<SmsBrowser>'
+
+    def require_origin(self):
+        parsed = urlsplit(self.page.url)
+        if (parsed.scheme != 'https' or parsed.netloc != urlsplit(self.url).netloc
+                or parsed.username or parsed.password or self.fatal):
+            raise Stop(4, 'login_origin_or_access')
+
+    def contains_private(self, value):
+        decoded = unquote(value)
+        return any(v in decoded or quote(v, safe='') in value or
+                   base64.b64encode(v.encode()).decode() in value for v in self.private_values)
+
+    async def route(self, route):
+        request = route.request
+        if self.backend:
+            await self.backend(route)
+            return
+        parsed = urlsplit(request.url)
+        host = parsed.hostname or ''
+        allowed = (parsed.scheme == 'https' and parsed.port in (None, 443) and
+                   not parsed.username and not parsed.password and
+                   in_domains(host, ASSET_DOMAINS) and
+                   not self.contains_private(request.url) and
+                   request.method in ('GET', 'HEAD', 'POST', 'OPTIONS'))
+        if request.method == 'POST':
+            allowed = allowed and in_domains(host, AUTH_DOMAINS)
+        if request.is_navigation_request() and request.frame == self.page.main_frame:
+            allowed = allowed and parsed.netloc == urlsplit(self.url).netloc
+        # Login must not collect comments as a side effect.
+        if site.request_kind(request.url):
+            allowed = False
+        if allowed:
+            await route.continue_()
+        else:
+            await route.abort()
+
+    async def start(self):
+        check_memory()
+        self.profile.__enter__()
+        try:
+            await self.display.start()
+            browser_defaults()
+            from playwright.async_api import async_playwright
+            self.playwright = await async_playwright().start()
+            self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
+            self.persistent = await self.playwright.chromium.launch_persistent_context(
+                str(self.profile.path), headless=False,
+                env={**os.environ, **self.display.environment()},
+                handle_sigint=False, handle_sigterm=False, handle_sighup=False,
+                service_workers='block', accept_downloads=False,
+                args=['--disable-background-networking', '--disable-component-update',
+                      '--disable-sync', '--no-first-run', '--disable-crash-reporter',
+                      '--disable-breakpad', '--disable-extensions'])
+            await self.persistent.route('**/*', lambda route: route.abort())
+            await self.persistent.route_web_socket('**/*', lambda socket: socket.close())
+            self.context = await self.persistent.browser.new_context(
+                viewport=dict(width=1000, height=800), device_scale_factor=1,
+                service_workers='block', accept_downloads=False)
+            await self.context.route('**/*', self.route)
+            await self.context.route_web_socket('**/*', lambda socket: socket.close())
+            await self.context.add_cookies(await self.persistent.cookies(self.url))
+            self.context.on('response', self.response)
+            self.page = await self.context.new_page()
+            self.page.set_default_timeout(3000)
+            await self.reset()
+        except BaseException:
+            await self.close()
+            raise
+
+    def response(self, response):
+        if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
+            self.fatal = True
+
+    async def reset(self):
+        self.last_frame = None
+        self.frame_token = ''
+        self.private_values.clear()
+        # Destroy the DOM containing old inputs, without storing page state.
+        await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
+        self.require_origin()
+        for _ in range(40):
+            self.require_origin()
+            if await self.page.locator(site.LOGIN_PANEL).filter(visible=True).count():
+                return
+            if await self.inside():
+                return
+            login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True)
+            if await login.count() == 1:
+                await login.click()
+                await self.page.locator(site.LOGIN_PANEL).first.wait_for(state='visible', timeout=10000)
+                return
+            await asyncio.sleep(.2)
+        raise Stop(5, 'login_panel_missing')
+
+    async def inside(self):
+        # Require absence of the login panel AND the existing dyc account signal.
+        # Live account signals remain pending verification; never infer success
+        # from navigation, an absent error or a submit click alone.
+        if await self.page.locator(site.LOGIN_PANEL).filter(visible=True).count():
+            return False
+        selectors = site.SIGNALS['logged_in'] if self.backend else site.SIGNALS['logged_in'][:1]
+        return bool(await self.page.locator(', '.join(selectors)).filter(visible=True).count())
+
+    async def observe(self):
+        self.require_origin()
+        if await self.challenge():
+            return 'verification'
+        if await self.inside():
+            return 'succeeded'
+        if await self.page.get_by_text('验证码错误', exact=False).filter(visible=True).count():
+            raise Stop(4, 'code_invalid')
+        return 'pending'
+
+    async def send(self, phone):
+        self.require_origin()
+        self.private_values.append(phone)
+        await self.page.locator(PHONE).fill(phone)
+        self.require_origin()
+        await self.page.locator(SEND).filter(has_text='获取验证码').click()
+
+    async def submit(self, code):
+        self.require_origin()
+        self.private_values.append(code)
+        try:
+            await self.page.locator(CODE).fill(code)
+            self.require_origin()
+            await self.page.locator(SUBMIT).click()
+        finally:
+            # Clear DOM even when click/verification fails. The context is also
+            # destroyed at timeout/cancel; never save storage_state.
+            try:
+                await self.page.locator(CODE).fill('', timeout=500)
+            except Exception:
+                pass
+
+    async def challenge(self):
+        self.require_origin()
+        for frame in self.page.frames:
+            candidates = frame.locator(CHALLENGE).filter(visible=True)
+            for index in range(await candidates.count()):
+                element = candidates.nth(index)
+                rect = await element.bounding_box()
+                if rect and rect['width'] >= 40 and rect['height'] >= 40:
+                    return element, rect
+        return None
+
+    async def capture(self, challenge):
+        _, rect = challenge
+        viewport = self.page.viewport_size
+        x, y = max(0, rect['x']), max(0, rect['y'])
+        w = min(rect['x'] + rect['width'], viewport['width']) - x
+        h = min(rect['y'] + rect['height'], viewport['height']) - y
+        if w < 40 or h < 40:
+            reject('frame_unavailable')
+        png = await self.page.screenshot(type='png', clip=dict(x=x, y=y, width=w, height=h),
+                                        style=REDACT_STYLE, animations='disabled', timeout=3000)
+        if len(png) > 500_000:
+            reject('frame_unavailable')
+        return Capture(png, Metadata(x, y, w, h))
+
+    @staticmethod
+    def identity(capture):
+        return hashlib.sha256(capture.png).digest(), capture.metadata
+
+    async def frame(self, verification):
+        self.require_origin()
+        if verification:
+            challenge = await self.challenge()
+            if challenge is None:
+                reject('frame_unavailable')
+            capture = await self.capture(challenge)
+            self.last_frame = self.identity(capture)
+            self.frame_token = secrets.token_urlsafe(24)
+            return dict(image=base64.b64encode(capture.png).decode(), frame=self.frame_token,
+                        width=capture.metadata.width, height=capture.metadata.height)
+        qr = await ready_qr(self.page)
+        if qr is None:
+            reject('frame_unavailable')
+        png = await qr.screenshot(type='png', style=REDACT_STYLE, timeout=3000)
+        return dict(image=base64.b64encode(png).decode(), frame='', width=0, height=0)
+
+    async def pointer(self, token, points):
+        points = points_checked(points)
+        if not isinstance(token, str) or not token or token != self.frame_token:
+            reject('stale_frame')
+        self.frame_token = ''  # single use even if replay fails
+        challenge = await self.challenge()
+        if challenge is None:
+            reject('stale_frame')
+        capture = await self.capture(challenge)
+        if self.identity(capture) != self.last_frame:
+            reject('stale_frame')
+        self.auto_disabled = True
+        await self.replay(points, capture.metadata)
+
+    async def replay(self, points, meta):
+        points_checked(points)
+        self.require_origin()
+        try:
+            previous = 0
+            for index, (x, y, stamp) in enumerate(points):
+                self.require_origin()
+                if self.cancel.is_set():
+                    raise asyncio.CancelledError
+                await asyncio.sleep((stamp-previous)/1000)
+                await self.page.mouse.move(meta.x0+x*meta.width, meta.y0+y*meta.height, steps=2)
+                if index == 0:
+                    await self.page.mouse.down()
+                previous = stamp
+        finally:
+            await self.page.mouse.up()
+
+    async def auto_step(self):
+        if self.auto_disabled or self.auto_attempts >= 3 or self.solver is None:
+            return
+        challenge = await self.challenge()
+        if challenge is None:
+            return
+        element, _ = challenge
+        # Cross-origin iframe or any ambiguous/rotation challenge is manual.
+        text = await element.inner_text(timeout=1000)
+        if ('旋转' in text or '转正' in text or not any(hint in text for hint in
+                ('拖动滑块完成拼图', '拖动滑块使拼图完整'))):
+            return
+        rects = {}
+        for name, selector in RECTS.items():
+            locator = element.locator(selector).filter(visible=True)
+            if await locator.count() != 1:
+                return
+            rects[name] = await locator.bounding_box()
+        capture = await self.capture(challenge)
+        identity = self.identity(capture)
+        if identity in self.auto_seen:
+            return
+        self.auto_seen.add(identity)
+        # Solver is synchronous, screenshot-only, bounded by its worker process.
+        points = await self.solver.solve(capture, dict(kind='gap_slider', rects=rects))
+        if not points:
+            self.auto_disabled = True
+            return
+        current = await self.challenge()
+        if current is None or self.identity(await self.capture(current)) != identity:
+            return
+        self.auto_attempts += 1  # charge before mouse-down, never reset on mode switch
+        await self.replay(points, capture.metadata)
+
+    async def persist(self):
+        self.require_origin()
+        if not await self.inside():
+            raise Stop(4, 'login_unconfirmed')
+        cookies = await self.context.cookies(self.url)
+        safe = [cookie for cookie in cookies if cookie['name'] in COOKIE_NAMES and
+                in_domains(cookie['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com')) and
+                not self.contains_private(json.dumps(cookie))]
+        if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') for c in safe):
+            raise Stop(4, 'login_cookie_missing')
+        await self.persistent.add_cookies(safe)
+
+    async def close(self):
+        self.cancel.set()
+        self.private_values.clear()
+        self.last_frame = None
+        self.frame_token = ''
+        records = _processes(self.driver_pid) if self.driver_pid else {}
+        try:
+            async with asyncio.timeout(5):
+                if self.context:
+                    await self.context.close()
+                if self.persistent:
+                    await self.persistent.close()
+                if self.playwright:
+                    await self.playwright.stop()
+        except BaseException:
+            _kill_owned(records)
+        finally:
+            self.context = self.persistent = self.playwright = self.page = None
+            if self.solver:
+                await self.solver.close()
+            await self.display.close()
+            self.profile.__exit__(None, None, None)
