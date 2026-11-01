@@ -528,6 +528,29 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/short/synthetic", fake.navigations)
         self.assertEqual(fake.foreign, [])
 
+    async def test_expired_short_link_is_partial_and_next_video_runs(self):
+        class Expired(FakeSite):
+            async def deliver(self, route):
+                if urlsplit(route.request.url).path.startswith('/short/'):
+                    await route.fulfill(content_type='text/html', body='''
+                    <div data-dyc-login="yes">synthetic account</div>
+                    <script>history.replaceState({}, '', '/expired')</script>''')
+                else:
+                    await super().deliver(route)
+        fake = Expired()
+        args = self.args()
+        args.urls = [site.FAKE_ORIGIN + '/short/expired', site.FAKE_ORIGIN + '/video/200']
+        real_sleep = asyncio.sleep
+        async def fast_resolution(delay):
+            await real_sleep(0 if delay == .1 else delay)
+        with browser_asyncio(sleep=fast_resolution):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual(code, 2)
+        self.assertEqual(result['videos'][0]['reason'], 'short_link_unresolved')
+        self.assertEqual(result['videos'][1]['status'], 'complete')
+        self.assertEqual(result['videos'][1]['video_id'], '200')
+        self.assertEqual(fake.foreign, [])
+
     async def test_failed_initial_page_still_deduplicates_resolved_video_aliases(self):
         class FailedBrowser(Browser):
             def __init__(browser, *args, **kwargs):

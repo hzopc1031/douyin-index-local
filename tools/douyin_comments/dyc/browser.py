@@ -487,6 +487,20 @@ class Browser:
         async with self.gate:
             self.seeding = False
 
+    def resolved_target(self):
+        """An official intermediate/error landing is not invalid user input."""
+        try:
+            return site.parse_url(self.page.url, fake=self.backend is not None)
+        except Stop:
+            parsed = urlsplit(self.page.url)
+            hosts = site.HOSTS | {site.SHORT_HOST}
+            if self.backend:
+                hosts = {urlsplit(site.FAKE_ORIGIN).hostname}
+            if (parsed.scheme == 'https' and parsed.hostname in hosts
+                    and parsed.port in (None, 443) and not parsed.username and not parsed.password):
+                return None
+            raise Stop(3, 'untrusted_video_redirect') from None
+
     async def open_video(self, url):
         self.templates.clear()
         self.seeded.clear()
@@ -497,12 +511,12 @@ class Browser:
         self.armed = self.seeding = True
         try:
             await self.control.run(self.page.goto(url, wait_until="domcontentloaded"))
-            resolved = site.parse_url(self.page.url, fake=self.backend is not None)
-            if not resolved.video_id:
+            resolved = self.resolved_target()
+            if resolved is None or not resolved.video_id:
                 for _ in range(150):
                     await self.control.run(asyncio.sleep(0.1))
-                    resolved = site.parse_url(self.page.url, fake=self.backend is not None)
-                    if resolved.video_id:
+                    resolved = self.resolved_target()
+                    if resolved is not None and resolved.video_id:
                         break
                 else:
                     raise Stop(2, "short_link_unresolved")

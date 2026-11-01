@@ -105,6 +105,7 @@ class LoginSession:
         self.browser, self.quota, self.clock = browser, quota, clock
         self.deadline = clock() + min(seconds, 600)
         self.state = "ready"
+        self.before_verification = "ready"
         self.mode = "sms"
         self.masked_phone = ""
         self.nonce = secrets.token_urlsafe(24)
@@ -143,10 +144,12 @@ class LoginSession:
             await self.browser.persist()
             await self.finish("succeeded")
         elif status == "verification":
+            if self.state != "verification":
+                self.before_verification = self.state
             self.state = "verification"
             await self.browser.auto_step()
         elif self.state == "verification":
-            self.state = "code_sent" if self.code_allowed else ("submitting" if self.mode == "sms" else "ready")
+            self.state = self.before_verification
 
     async def act(self, obj):
         if self.gate.locked():

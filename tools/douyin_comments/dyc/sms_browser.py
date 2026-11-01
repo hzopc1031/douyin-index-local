@@ -125,6 +125,9 @@ class SmsBrowser:
 
     async def route(self, route):
         request = route.request
+        if self.fatal or self.cancel.is_set():
+            await route.abort()
+            return
         if self.backend:
             await self.backend(route)
             return
@@ -198,7 +201,9 @@ class SmsBrowser:
         request_id = event['requestId']
         try:
             status = event.get('responseStatusCode', 0)
-            denied = bool(event.get('responseErrorReason'))
+            if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
+                self.fatal = True
+            denied = self.fatal or bool(event.get('responseErrorReason'))
             if 300 <= status < 400:
                 request = event['request']
                 location = next((h['value'] for h in event.get('responseHeaders', [])
@@ -207,7 +212,7 @@ class SmsBrowser:
                 target = urlsplit(urljoin(request['url'], location))
                 # Never replay a credential POST through a redirect. GET
                 # redirects stay on the same approved host and carry no input.
-                denied = (request['method'] not in ('GET', 'HEAD') or
+                denied = denied or (request['method'] not in ('GET', 'HEAD') or
                           target.scheme != 'https' or target.netloc != urlsplit(request['url']).netloc or
                           self.contains_private(target.geturl()))
                 if denied:

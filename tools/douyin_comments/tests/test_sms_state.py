@@ -8,12 +8,13 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
+from argparse import Namespace
 
 from dyc.models import SHANGHAI
 from dyc.runtime import Profile
 from dyc.errors import Stop
 from dyc.sms_state import LoginError, LoginSession, SmsQuota, payload
-from dyc.sms_web import WebApp, connection, origin_checked, read_request
+from dyc.sms_web import WebApp, connection, origin_checked, read_request, serve
 
 PHONE, CODE = '13900001234', '975318'  # deliberately synthetic fixtures
 ORIGIN = 'https://dyc.example.ts.net:8444'
@@ -178,6 +179,20 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser.persist.assert_awaited_once()
         self.browser.close.assert_awaited_once()
 
+    async def test_verification_restores_actual_prior_state(self):
+        for state, mode, allowed in (('ready', 'sms', False), ('code_sent', 'sms', True),
+                                     ('submitting', 'sms', False), ('ready', 'qr', False)):
+            self.session.state, self.session.mode, self.session.code_allowed = state, mode, allowed
+            self.browser.observe.return_value = 'verification'
+            await self.session.poll()
+            await self.session.poll()  # repeated polls must not overwrite the saved state
+            self.browser.observe.return_value = 'pending'
+            await self.session.poll()
+            self.assertEqual(self.session.state, state)
+        self.session.mode = 'sms'
+        await self.action('send', phone=PHONE)
+        self.browser.send.assert_awaited_once()
+
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -291,3 +306,32 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                       'https://user@dyc.ts.net', 'https://evil.invalid', 'https://dyc.ts.net:107'):
             with self.assertRaises(Stop):
                 origin_checked(value)
+
+    async def test_launcher_binds_only_loopback_and_writes_token_only_to_tty(self):
+        class Terminal(io.StringIO):
+            def close(self): pass  # retain synthetic startup output for assertions
+        terminal, logs = Terminal(), io.StringIO()
+        server = type('Server', (), {'close': lambda _: None, 'wait_closed': AsyncMock()})()
+        args = Namespace(origin=ORIGIN, display=None, port=8766,
+                         profile_dir=Path(self.tmp.name) / 'profile', state_dir=Path(self.tmp.name) / 'state')
+        async def done(app):
+            app.done.set()
+        with patch('dyc.sms_web.open', return_value=terminal) as opened, \
+             patch('dyc.sms_web.asyncio.start_server', AsyncMock(return_value=server)) as start, \
+             patch.object(WebApp, 'tick', done), redirect_stdout(logs), redirect_stderr(logs):
+            await serve(args)
+        opened.assert_called_once_with('/dev/tty', 'w')
+        self.assertEqual(start.call_args.args[1:], ('127.0.0.1', 8766))
+        self.assertEqual(logs.getvalue(), '')
+        self.assertIn(ORIGIN, terminal.getvalue())
+        self.assertIn('一次性口令', terminal.getvalue())
+
+    async def test_launcher_refuses_display_and_index_paths_before_access(self):
+        for display, directory in ((':107', Path(self.tmp.name)), (None, Path('/var/lib/douyin-index/profile'))):
+            args = Namespace(origin=ORIGIN, display=display, port=8766,
+                             profile_dir=directory, state_dir=Path(self.tmp.name))
+            with patch('dyc.sms_web.open') as opened, patch('dyc.sms_web.asyncio.start_server') as start:
+                with self.assertRaises(Stop):
+                    await serve(args)
+                opened.assert_not_called()
+                start.assert_not_called()

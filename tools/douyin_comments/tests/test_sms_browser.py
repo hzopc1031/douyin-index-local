@@ -224,6 +224,17 @@ class PointTests(unittest.TestCase):
 
 
 class RedirectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fatal_response_blocks_page_retry_before_next_poll(self):
+        from types import SimpleNamespace
+        for status in (401, 403, 429):
+            browser = SmsBrowser('/unused', backend=AsyncMock())
+            browser.response(SimpleNamespace(status=status, request=SimpleNamespace(resource_type='xhr')))
+            route = SimpleNamespace(request=object(), abort=AsyncMock(), continue_=AsyncMock())
+            await browser.route(route)
+            route.abort.assert_awaited_once()
+            route.continue_.assert_not_awaited()
+            browser.backend.assert_not_awaited()
+
     async def test_credential_redirect_and_foreign_get_stopped_before_follow(self):
         browser = SmsBrowser('/unused')
         browser.response_session = type('CDP', (), {'send': AsyncMock()})()
