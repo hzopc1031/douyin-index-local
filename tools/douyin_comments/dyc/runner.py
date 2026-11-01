@@ -120,44 +120,73 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
     return code, result
 
 
-async def login(args, *, backend=None, wait_seconds=180, control=None):
+async def login(args, *, backend=None, wait_seconds=None, control=None):
     state = private_dir(args.state_dir)
     control = control or Control()
     install_signals(control)
     qr = state / ("login-qr-" + uuid.uuid4().hex + ".png")
     log = Log(state)
     code, reason = 4, "login_timeout"
+    wait_seconds = min(getattr(args, "wait_seconds", 180) if wait_seconds is None else wait_seconds, 600)
     try:
         counter = DailyCounter(state)
         async with Browser(args.profile_dir, control, Budget(counter), Pacer(),
-                           display=args.display, backend=backend) as browser:
-            await control.run(browser.page.goto(site.FAKE_ORIGIN if backend else site.LOGIN_URL,
-                                                 wait_until="domcontentloaded"))
-            current = await browser.state()
-            if current["risk"]:
-                raise Stop(3, "verification_widget")
-            if current["inside"]:
-                code, reason = 0, "logged_in"
-            else:
-                locator = browser.page.locator(site.SIGNALS["qr"]).first
-                png = await control.run(locator.screenshot(type="png"))
-                with os.fdopen(private_open(qr, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as stream:
-                    stream.write(png)
-                log.event("qr_ready")
-                # Stdout remains exactly one final JSON line. This path is usable
-                # while the command is waiting; the final JSON reports deletion.
-                import sys
-                print("QR PNG: " + str(qr), file=sys.stderr, flush=True)
-                deadline = asyncio.get_running_loop().time() + min(wait_seconds, 180)
-                while asyncio.get_running_loop().time() < deadline:
-                    control.check()
-                    current = await browser.state(deadline=deadline)
-                    if current["risk"]:
-                        raise Stop(3, "verification_widget")
-                    if current["inside"]:
-                        code, reason = 0, "logged_in"
-                        break
-                    await control.run(asyncio.sleep(0.1))
+                           display=args.display, backend=backend, login_mode=True) as browser:
+            try:
+                if not backend:
+                    from .login_ui import prepare, snapshot, watch_http
+                    watch_http(browser)
+                    print("DISPLAY: " + str(browser.display.name), file=__import__("sys").stderr, flush=True)
+                await control.run(browser.page.goto(site.FAKE_ORIGIN if backend else site.LOGIN_URL,
+                                                     wait_until="domcontentloaded"))
+                current = await browser.state()
+                if current["risk"]:
+                    raise Stop(3, "verification_widget")
+                if current["inside"]:
+                    code, reason = 0, "logged_in"
+                else:
+                    if not backend:
+                        await control.run(prepare(browser))
+                        png = await control.run(snapshot(browser.page))
+                    else:
+                        locator = browser.page.locator(site.SIGNALS["qr"]).first
+                        png = await control.run(locator.screenshot(type="png"))
+                    with os.fdopen(private_open(qr, os.O_WRONLY | os.O_CREAT | os.O_EXCL), "wb") as stream:
+                        stream.write(png)
+                    log.event("qr_ready")
+                    # Stdout remains exactly one final JSON line. This path is usable
+                    # while the command is waiting; the final JSON reports deletion.
+                    import sys
+                    print("QR PNG: " + str(qr), file=sys.stderr, flush=True)
+                    deadline = asyncio.get_running_loop().time() + wait_seconds
+                    refresh_at = asyncio.get_running_loop().time() + 20
+                    while asyncio.get_running_loop().time() < deadline:
+                        control.check()
+                        current = await browser.state(deadline=deadline)
+                        if current["risk"]:
+                            raise Stop(3, "verification_widget")
+                        if current["inside"]:
+                            code, reason = 0, "logged_in"
+                            break
+                        if not backend and asyncio.get_running_loop().time() >= refresh_at:
+                            png = await control.run(snapshot(browser.page))
+                            with os.fdopen(private_open(qr), "wb") as stream:
+                                stream.write(png)
+                            log.event("qr_refreshed")
+                            refresh_at = asyncio.get_running_loop().time() + 20
+                        await control.run(asyncio.sleep(0.1))
+            except Stop as error:
+                # Capture a challenge while this browser is still open, including
+                # failures before the QR. Never capture credentials or solve it.
+                if not backend and error.reason in ("verification_widget", "access_denied", "rate_limited"):
+                    try:
+                        png = await asyncio.wait_for(snapshot(browser.page, verification=True), 4)
+                        with os.fdopen(private_open(state / "login-verify.png"), "wb") as stream:
+                            stream.write(png)
+                        print("VERIFY PNG: " + str(state / "login-verify.png"), file=__import__("sys").stderr, flush=True)
+                    except Exception:
+                        pass
+                raise
     except Stop as error:
         code, reason = error.code, error.reason
     except Exception:

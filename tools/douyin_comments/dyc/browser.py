@@ -1,6 +1,7 @@
 """Owned headed Chromium, event-captured templates, page-context XHR only."""
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from .runtime import Display, Profile, browser_defaults, check_memory
 
 REPLAY_HEADER = "x-dyc-replay"
 STATE_TIMEOUT_SECONDS = 2
+LOGIN_STATE_TIMEOUT_SECONDS = 15
 
 STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
@@ -121,7 +123,7 @@ def _kill_owned(records):
 class Browser:
     def __init__(self, profile, control, budget, pacer, *, display=None,
                  backend=None, memory_minimum=2 * 1024**3, timeout_ms=20000,
-                 skip_video_ids=()):
+                 skip_video_ids=(), login_mode=False):
         self.profile = Profile(profile)
         self.control, self.budget, self.pacer = control, budget, pacer
         self.display = Display(display)
@@ -146,6 +148,8 @@ class Browser:
         self.watcher = None
         self.video_id = None
         self.closing = False
+        self.login_mode = login_mode
+        self.state_gate = asyncio.Lock()
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -382,11 +386,28 @@ class Browser:
                 self.accepted.pop(request, None)
 
     async def state(self, *, deadline=None):
+        # One scan at a time: foreground checks and the watcher used to queue
+        # duplicate renderer work during the initial SPA navigation.
+        try:
+            async with asyncio.timeout_at(deadline) if deadline is not None else nullcontext():
+                await self.control.run(self.state_gate.acquire())
+        except asyncio.TimeoutError:
+            self.control.stop(4 if self.login_mode else 5,
+                              "login_timeout" if self.login_mode else "state_check_timeout")
+            self.control.check()
+        try:
+            return await self._state(deadline=deadline)
+        finally:
+            self.state_gate.release()
+
+    async def _state(self, *, deadline=None):
         self.control.check()
         combined = dict(risk=False, out=False, inside=False)
         if not self.page:
             return combined
-        end = asyncio.get_running_loop().time() + STATE_TIMEOUT_SECONDS
+        started = asyncio.get_running_loop().time()
+        end = started + (LOGIN_STATE_TIMEOUT_SECONDS if self.login_mode else STATE_TIMEOUT_SECONDS)
+        login_deadline = self.login_mode and deadline is not None and deadline <= end
         if deadline is not None:
             end = min(end, deadline)
         try:
@@ -398,14 +419,24 @@ class Browser:
                         result = await self.control.run(frame.evaluate(STATE_JS, site.SIGNALS))
                         for key in combined:
                             combined[key] |= result[key]
+                        # A known challenge must never wait behind a slow child.
+                        if combined["risk"]:
+                            self.control.stop(3, "verification_widget")
+                            self.control.check()
                     except Stop:
                         raise
                     except Exception:
                         # Navigation can detach a frame; preflight still requires a positive signal.
                         continue
         except asyncio.TimeoutError:
-            self.control.stop(3, "state_check_timeout")
+            self.control.stop(4 if login_deadline else 5,
+                              "login_timeout" if login_deadline else "state_check_timeout")
             self.control.check()
+        finally:
+            elapsed = asyncio.get_running_loop().time() - started
+            if self.login_mode and elapsed >= 2:
+                import sys
+                print(f"STATE SCAN: {elapsed:.2f}s frames={len(self.page.frames)}", file=sys.stderr, flush=True)
         return combined
 
     async def watch(self):

@@ -37,6 +37,77 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
         return Browser(self.root / "profile", self.control,
                        Budget(DailyCounter(self.root / "state")), FastPacer(), backend=fake)
 
+    async def test_login_slow_renderer_and_concurrent_watcher_share_scan_gate(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        active = maximum = calls = 0
+
+        class SlowFrame:
+            async def evaluate(frame, *_):
+                nonlocal active, maximum, calls
+                active += 1
+                calls += 1
+                maximum = max(maximum, active)
+                try:
+                    started.set()
+                    await release.wait()
+                    return dict(risk=False, out=True, inside=False)
+                finally:
+                    active -= 1
+
+        browser = self.browser(FakeSite())
+        browser.login_mode = True
+        browser.page = Namespace(frames=[SlowFrame()])
+        watcher = asyncio.create_task(browser.watch())
+        foreground = asyncio.create_task(browser.state())
+        try:
+            await started.wait()
+            # Beyond the old two-second production bound; no threshold patch.
+            await asyncio.sleep(2.1)
+            self.assertFalse(self.control.event.is_set())
+            self.assertEqual(calls, 1)
+            release.set()
+            self.assertEqual(await asyncio.wait_for(foreground, 1), dict(risk=False, out=True, inside=False))
+            self.assertEqual(maximum, 1)
+        finally:
+            watcher.cancel()
+            foreground.cancel()
+            await asyncio.gather(watcher, foreground, return_exceptions=True)
+
+    async def test_login_scan_still_has_bounded_environment_timeout(self):
+        deadline = ManualDeadline()
+
+        class HungFrame:
+            async def evaluate(frame, *_):
+                deadline.expire()
+                await asyncio.Event().wait()
+
+        browser = self.browser(FakeSite())
+        browser.login_mode = True
+        browser.page = Namespace(frames=[HungFrame()])
+        start = asyncio.get_running_loop().time()
+        with browser_asyncio(timeout_at=deadline):
+            with self.assertRaises(Stop) as caught:
+                await browser.state()
+        self.assertEqual((caught.exception.code, caught.exception.reason), (5, "state_check_timeout"))
+        self.assertEqual(len(deadline.requested), 1)
+        self.assertGreaterEqual(deadline.requested[0], start + 15)
+
+    async def test_detected_challenge_does_not_wait_for_slow_child(self):
+        class RiskFrame:
+            async def evaluate(frame, *_):
+                return dict(risk=True, out=False, inside=False)
+
+        class HungFrame:
+            async def evaluate(frame, *_):
+                self.fail("known risk must stop before scanning another frame")
+
+        browser = self.browser(FakeSite())
+        browser.login_mode = True
+        browser.page = Namespace(frames=[RiskFrame(), HungFrame()])
+        with self.assertRaises(Stop) as caught:
+            await browser.state()
+        self.assertEqual((caught.exception.code, caught.exception.reason), (3, "verification_widget"))
+
     async def test_scan_has_one_deadline_across_all_frames(self):
         evaluated, cancelled = [], []
         deadline = ManualDeadline()
@@ -62,7 +133,7 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Stop) as caught:
                 await asyncio.wait_for(browser.state(), 30)
         end = asyncio.get_running_loop().time()
-        self.assertEqual((caught.exception.code, caught.exception.reason), (3, "state_check_timeout"))
+        self.assertEqual((caught.exception.code, caught.exception.reason), (5, "state_check_timeout"))
         self.assertEqual(len(deadline.requested), 1)
         self.assertLessEqual(start + 2, deadline.requested[0])
         self.assertLessEqual(deadline.requested[0], end + 2)
@@ -110,7 +181,7 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(Frame, "evaluate", hung), patch("dyc.browser.STATE_TIMEOUT_SECONDS", 60):
                 with self.assertRaises(Stop) as caught:
                     await asyncio.wait_for(browser.preflight(site.FAKE_ORIGIN, wait_seconds=0.15), 2)
-                self.assertEqual((caught.exception.code, caught.exception.reason), (3, "state_check_timeout"))
+                self.assertEqual((caught.exception.code, caught.exception.reason), (5, "state_check_timeout"))
                 await asyncio.wait_for(browser.watcher, 1)
             self.assertTrue(cancelled.is_set())
             self.assertEqual(browser.budget.used, 0)
@@ -177,7 +248,7 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
         args = Namespace(profile_dir=self.root / "profile", state_dir=self.root / "state", display=None)
         with patch.object(Frame, "evaluate", hung_after_qr), patch("dyc.browser.STATE_TIMEOUT_SECONDS", 60):
             code, result = await asyncio.wait_for(login(args, backend=fake, wait_seconds=0.2), 8)
-        self.assertEqual((code, result["exit_reason"]), (3, "state_check_timeout"))
+        self.assertEqual((code, result["exit_reason"]), (4, "login_timeout"))
         self.assertTrue(cancelled.is_set())
         self.assertTrue(images_seen)
         self.assertFalse(Path(result["qr_path"]).exists())

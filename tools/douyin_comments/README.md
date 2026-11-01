@@ -13,6 +13,8 @@
 bin/dyc check-env
 bin/dyc selftest --out /tmp/dyc-smoke-output
 bin/dyc login
+# 扫码等待最长 600 秒；默认仍为 180 秒
+bin/dyc login --wait-seconds 600
 bin/dyc fetch 'https://www.douyin.com/video/<id>' 'https://v.douyin.com/<short>/' --urls-file urls.txt --out ~/dyc-output/my-batch --top 30
 # 等价的 Python 入口（不经过 systemd 内存 scope 包装）：
 .venv/bin/python -m dyc --help
@@ -44,7 +46,7 @@ bin/dyc check-env
 bin/dyc selftest
 ```
 
-标准库 + `playwright==1.64.1`；已用 Python 3.13 验证。服务器需已有 Xvfb 和对应版本的 Chromium。
+标准库 + `playwright==1.64.1`；使用 Python 3.12。服务器需已有 Xvfb 和对应版本的 Chromium。
 未设置 `PLAYWRIGHT_BROWSERS_PATH` 且 `/opt/ms-playwright` 存在时自动使用它；不自动下载浏览器。
 `bin/dyc` 在用户 systemd manager 可用时使用 `systemd-run --user --scope --quiet -p MemoryMax=1500M`。
 不可用时向 stderr 发警告并继续，**此时不强制内存上限**；`DYC_NO_SCOPE=1` 可显式关闭 scope。
@@ -58,10 +60,18 @@ bin/dyc selftest
 状态目录默认 `~/.local/state/dyc`（`--state-dir` / `DYC_STATE_DIR`），同样要求 0700。
 浏览器登录资料持久保存于自己的 profile，不读取现有指数工具或系统浏览器资料。
 
-`login` 截取二维码区域；等待期间在 stderr 给出私有 PNG 路径，供操作人安全取图扫码。
-最长等待 180 秒；成功、超时、SIGINT/SIGTERM 都删除 PNG；结束 JSON 中的路径是已删除文件的位置。
-资料目录仍含登录态，应按凭据保护，不提交、不上传。首次真实访问及小号扫码前仍需按项目约定先回报；
-本实现和离线验收均未做真实访问或真实扫码。
+`login` 查找正常登录入口并截取二维码区域（未找到则有界等待后报 `login_qr_missing`，不把普通页面当二维码）；等待期间在 stderr 给出私有 PNG 路径，供操作人安全取图扫码。
+每 20 秒重新截图覆盖同一路径，输入框和手机号形态文本遮盖；不自动解决验证挑战。
+默认等待 180 秒，`--wait-seconds 600` 可延长至最多 600 秒；成功、超时、SIGINT/SIGTERM 都删除 PNG；结束 JSON 中的路径是已删除文件的位置。
+登录期间 document/XHR/fetch 的 HTTP 403/429 立即保护性停止。登录扫描使用 15 秒总期限，
+前台与监视器串行扫描，适应首次 SPA 加载；抓取检查仍为 2 秒。扫描超时仍停止、禁止请求，
+但返回环境错误 5 / `state_check_timeout`，不会当作已证实风控。扫码等待到期返回 4 / `login_timeout`。
+已检测到验证码立即停止，不等其它 frame；验证截图在浏览器关闭前写入 `login-verify.png`，同样遮盖输入框和手机号。
+慢扫描只输出耗时和 frame 数，不输出页面内容、URL 或会话。
+资料目录仍含登录态，应按凭据保护，不提交、不上传。首次真实访问及扫码需用户授权。
+2026-11-01 11:07（东京时间 UTC+9）经授权在腾讯云尝试一次独立登录，二维码生成前因
+`state_check_timeout`（退出码 3）保护性停止，未重试或抓取。
+尚未完成真实扫码、页面选择器校准或二维码刷新验证；该超时本身不能证明平台风控。
 
 ## 限制、退出与风险
 
