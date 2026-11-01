@@ -130,25 +130,34 @@ $('#qrStart').onclick=()=>qrAction('start');$('#qrRefresh').onclick=()=>qrAction
 let smsTimer=null,smsEnabled=false,smsInitialized=false,smsLoading=false,smsActing=false;
 let smsCancelling=false,smsRevision=0;
 let smsSnapshot=null,smsFrame=null,smsFrameLoading=false,smsFrameRequest=0,smsGesture=null;
+let smsLoggedIn=false;
+function setSmsLoginStatus(state){
+ smsLoggedIn=state?.browser==='browser_ready'&&['cookie_present','qr_session'].includes(state.login_state);
+ if(smsSnapshot)renderSms(smsSnapshot);
+}
 const smsActive=s=>['opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login'].includes(s);
 const smsManual=d=>['verify_send','verify_login'].includes(d?.state)&&d.verification_mode==='manual';
 function resetSmsGesture(){const g=smsGesture;smsGesture=null;if(g){clearTimeout(g.timer);const image=$('#smsImage');if(image.hasPointerCapture?.(g.pointer))image.releasePointerCapture(g.pointer)}$('#smsFinger').hidden=true}
 function clearSmsFrame(){resetSmsGesture();smsFrameRequest++;smsFrameLoading=false;const image=$('#smsImage');if(image.getAttribute('src'))URL.revokeObjectURL(image.src);if(smsFrame&&smsFrame.url!==image.src)URL.revokeObjectURL(smsFrame.url);smsFrame=null;image.onload=null;image.onerror=null;image.hidden=true;image.removeAttribute('src')}
 function setSmsMode(mode){smsEnabled=mode==='sms';$('#smsLoginCard').hidden=!smsEnabled;if(smsEnabled&&!smsInitialized){smsInitialized=true;loadSms()}if(!smsEnabled){smsRevision++;smsInitialized=false;clearTimeout(smsTimer);clearSmsFrame();for(const id of ['#smsPhone','#smsCode','#smsText'])$(id).value=''}}
 function renderSms(data){
+ // A newly completed SMS round is newer than the last 15-second status read.
+ // Re-rendering an old terminal snapshot must not override a later logout.
+ if(data.state!==smsSnapshot?.state&&['succeeded','already_logged_in'].includes(data.state))smsLoggedIn=true;
  const active=smsActive(data.state),verify=['verify_send','verify_login'].includes(data.state),manual=smsManual(data),canCode=['code_sent','code_invalid'].includes(data.state),busy=Boolean(smsActing||smsCancelling);
- if(!manual||smsSnapshot?.challenge_epoch!==data.challenge_epoch)clearSmsFrame();
+ if(smsLoggedIn||!manual||smsSnapshot?.challenge_epoch!==data.challenge_epoch)clearSmsFrame();
  smsSnapshot=data;clearTimeout(smsTimer);smsTimer=null;
- $('#smsState').textContent=verify&&data.verification_mode==='auto'?'自动验证中…':data.message||'尚未开始短信登录';
- $('#smsNumber').textContent=/^1[3-9][0-9]\*{4}[0-9]{4}$/.test(data.phone||'')?data.phone:'';
- $('#smsPhoneForm').hidden=active;$('#smsStart').disabled=busy;
- $('#smsCodeForm').hidden=!canCode;$('#smsSubmit').disabled=busy||!canCode||data.attempts_left<1;
+ $('#smsState').textContent=smsLoggedIn?'已登录 · 已检测到登录凭据（有效性以最近取数为准）':verify&&data.verification_mode==='auto'?'自动验证中…':['succeeded','already_logged_in'].includes(data.state)?'当前登录状态已变化，请检查页面状态或重新登录':data.message||'尚未开始短信登录';
+ const phone=/^1[3-9][0-9]\*{4}[0-9]{4}$/.test(data.phone||'')?data.phone:'';
+ $('#smsNumber').textContent=phone||(smsLoggedIn?'账号信息：当前会话未提供脱敏手机号':'');
+ $('#smsPhoneForm').hidden=active||smsLoggedIn;$('#smsStart').disabled=busy;
+ $('#smsCodeForm').hidden=smsLoggedIn||!canCode;$('#smsSubmit').disabled=busy||!canCode||data.attempts_left<1;
  $('#smsResend').disabled=busy||!canCode||data.resend_in>0;$('#smsResend').textContent=data.resend_in>0?data.resend_in+' 秒后重发':'重新发送';
- $('#smsCountdown').textContent=active&&data.resend_in>0?'发送倒计时：'+data.resend_in+' 秒':'';
- $('#smsVerification').hidden=!verify;$('#smsVerifyHint').textContent=data.verification_mode==='desktop'?'请改用远程桌面接着完成当前验证。':data.verification_mode==='auto'?'正在本机尝试验证，请稍候。':'请在截图中点击或拖动完成验证。';
+ $('#smsCountdown').textContent=!smsLoggedIn&&active&&data.resend_in>0?'发送倒计时：'+data.resend_in+' 秒':'';
+ $('#smsVerification').hidden=smsLoggedIn||!verify;$('#smsVerifyHint').textContent=data.verification_mode==='desktop'?'请改用远程桌面接着完成当前验证。':data.verification_mode==='auto'?'正在本机尝试验证，请稍候。':'请在截图中点击或拖动完成验证。';
  $('#smsRefresh').hidden=!manual;$('#smsRefresh').disabled=busy;$('#smsTextPanel').hidden=!manual;$('#smsTextSend').disabled=busy;
- $('#smsCancel').hidden=!active;$('#smsCancel').disabled=smsCancelling||Boolean(smsActing&&smsActing!=='pointer');
- if(manual&&data.frame_id&&!smsGesture&&!busy)loadSmsFrame(data);
+ $('#smsCancel').hidden=smsLoggedIn||!active;$('#smsCancel').disabled=smsCancelling||Boolean(smsActing&&smsActing!=='pointer');
+ if(!smsLoggedIn&&manual&&data.frame_id&&!smsGesture&&!busy)loadSmsFrame(data);
  if(active&&smsEnabled)smsTimer=setTimeout(loadSms,1000);
 }
 async function loadSmsFrame(data,force=false){
@@ -215,7 +224,7 @@ $('#smsImage').onpointerup=e=>{
 $('#smsImage').onpointercancel=resetSmsGesture;$('#smsImage').onlostpointercapture=()=>{if(smsGesture)resetSmsGesture()};
 // End SMS login.
 
-async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h,j]=await Promise.all([api('status'),api('history'),api('jobs')]);datasets=h.datasets;jobs=j.jobs;qrEnabled=state.login_mode==='qr';$('#qrLoginCard').hidden=!qrEnabled;$('#desktopLoginMode').hidden=state.login_mode!=='desktop';setSmsMode(state.login_mode);if(qrEnabled&&!qrInitialized){qrInitialized=true;loadQr()}if(!qrEnabled){qrInitialized=false;clearTimeout(qrTimer);qrTimer=null;}$('#statPlatforms').textContent=platforms.filter(p=>p.available).length;$('#statKeywords').textContent=state.counts.keywords;$('#statPoints').textContent=state.counts.points;$('#statAttempts').textContent=state.daily_online_attempts+' / '+state.limits.online_attempts_per_day+(state.cooldown_remaining_seconds>0?' · 冷却剩余 '+state.cooldown_remaining_seconds+' 秒':'');
+async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h,j]=await Promise.all([api('status'),api('history'),api('jobs')]);datasets=h.datasets;jobs=j.jobs;qrEnabled=state.login_mode==='qr';$('#qrLoginCard').hidden=!qrEnabled;$('#desktopLoginMode').hidden=state.login_mode!=='desktop';setSmsLoginStatus(state);setSmsMode(state.login_mode);if(qrEnabled&&!qrInitialized){qrInitialized=true;loadQr()}if(!qrEnabled){qrInitialized=false;clearTimeout(qrTimer);qrTimer=null;}$('#statPlatforms').textContent=platforms.filter(p=>p.available).length;$('#statKeywords').textContent=state.counts.keywords;$('#statPoints').textContent=state.counts.points;$('#statAttempts').textContent=state.daily_online_attempts+' / '+state.limits.online_attempts_per_day+(state.cooldown_remaining_seconds>0?' · 冷却剩余 '+state.cooldown_remaining_seconds+' 秒':'');
  const paused=state.paused,ready=state.browser==='browser_ready',last=state.last_result;
  const names={login_in_progress:'登录进行中',manual_resume_required:'登录已结束，等待手动恢复',bridge_timeout:'浏览器桥接连续超时',authentication_required:'需要重新登录',verification_required:'需要人工验证',rate_limited:'抖音限频',access_denied:'抖音拒绝访问',browser_unavailable:'浏览器连接不可用',request_failed:'最近取数失败'};
  const label=browserLoginLabel(state)+(paused?' · 采集仍暂停':'');
@@ -225,7 +234,7 @@ async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h
  detail.textContent='状态检查：'+new Date().toLocaleTimeString('zh-CN')+'（页面打开时每 15 秒更新） · '+(last?'最近在线取数：'+fmt(last.at)+'，'+(last.ok?'成功':names[last.code]||'失败'):'尚无在线取数验证记录')+'。页面预检不会请求抖音指数，不能提前判断服务端限频。';
  document.title=(paused||!ready?'⚠ '+label+' | ':'')+'指数工作台';
 
- renderHistory();renderJobs();if(!$('#insightEnd').value)$('#insightEnd').value=reportBatch?.query.end_date||$('#queryEnd').value;if(!$('#insightStart').value)$('#insightStart').value=reportBatch?.query.start_date||$('#queryStart').value;await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}finally{refreshing=false}}
+ renderHistory();renderJobs();if(!$('#insightEnd').value)$('#insightEnd').value=reportBatch?.query.end_date||$('#queryEnd').value;if(!$('#insightStart').value)$('#insightStart').value=reportBatch?.query.start_date||$('#queryStart').value;await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){setSmsLoginStatus(null);toast(e.message);$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}finally{refreshing=false}}
 $('#refreshButton').onclick=refresh;
 $('#globalRefresh').onclick=async()=>{const b=$('#globalRefresh');b.disabled=true;b.textContent='刷新中…';try{platforms=(await api('platforms')).platforms;drawPlatforms();await refresh();if(!document.querySelector('[data-section=api]').hidden)await loadKeys()}catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='刷新'}};
 $('#resumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{}});toast('已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};

@@ -23,14 +23,60 @@ function fixture(){
 }
 
 test('all states and buttons, masked number only',async()=>{
- const f=fixture();f.run('smsEnabled=true');
  for(const state of ['idle','opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login','succeeded','already_logged_in','rate_limited','failed','timeout','cancelled']){
+  const f=fixture();f.run('smsEnabled=true');
   const verify=state.startsWith('verify_'),active=['opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login'].includes(state);
   await f.render({state,verification_mode:verify?'manual':null,resend_in:60,attempts_left:3,phone:'138****8000'});
-  assert.equal(f.$('#smsPhoneForm').hidden,active);assert.equal(f.$('#smsCodeForm').hidden,!['code_sent','code_invalid'].includes(state));assert.equal(f.$('#smsVerification').hidden,!verify);assert.equal(f.$('#smsCancel').hidden,!active);assert.equal(f.$('#smsNumber').textContent,'138****8000');
+  assert.equal(f.$('#smsPhoneForm').hidden,active||['succeeded','already_logged_in'].includes(state));assert.equal(f.$('#smsCodeForm').hidden,!['code_sent','code_invalid'].includes(state));assert.equal(f.$('#smsVerification').hidden,!verify);assert.equal(f.$('#smsCancel').hidden,!active);assert.equal(f.$('#smsNumber').textContent,'138****8000');
   assert.equal(f.run('smsTimer!==null'),active);
  }
- await f.render({phone:'13800138000'});assert.equal(f.$('#smsNumber').textContent,'');
+ const f=fixture();await f.render({phone:'13800138000'});assert.equal(f.$('#smsNumber').textContent,'');
+});
+test('restored browser login hides idle SMS form without sending anything',async()=>{
+ for(const login_state of ['cookie_present','qr_session']){
+  const f=fixture();await f.render({state:'idle'});
+  f.run(`setSmsLoginStatus({browser:'browser_ready',login_state:'${login_state}'})`);
+  assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));
+  assert(f.$('#smsNumber').textContent.includes('未提供脱敏手机号'));
+  await f.render({state:'idle'});assert(f.$('#smsPhoneForm').hidden);
+  assert.equal(f.calls.length,0);
+ }
+ assert(html.includes('setSmsLoginStatus(state);setSmsMode(state.login_mode)'));
+});
+test('status arriving before SMS snapshot still hides stale code and verification UI',async()=>{
+ for(const state of ['idle','code_sent','verify_login']){
+  const f=fixture();f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+  await f.render({state,phone:'138****8000',verification_mode:'manual',frame_id:1,resend_in:60});
+  for(const id of ['#smsPhoneForm','#smsCodeForm','#smsVerification','#smsCancel'])assert(f.$(id).hidden);
+  assert.equal(f.$('#smsNumber').textContent,'138****8000');assert.equal(f.$('#smsCountdown').textContent,'');
+  assert.equal(f.calls.length,0);
+ }
+});
+test('new SMS success hides forms immediately; later invalid status wins over terminal snapshot',async()=>{
+ for(const state of ['succeeded','already_logged_in']){
+  for(const login_state of ['expired','rejected','no_session_cookie','unknown']){
+   const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+   await f.render({state,phone:'138****8000',message:'官方窗口已登录'});
+   assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+   assert(f.$('#smsState').textContent.startsWith('已登录'));
+   f.run(`setSmsLoginStatus({browser:'login_required',login_state:'${login_state}'})`);
+   await f.render({state});assert(!f.$('#smsPhoneForm').hidden);
+   assert(!f.$('#smsState').textContent.includes('已登录'));assert.equal(f.calls.length,0);
+  }
+ }
+});
+test('connection loss and logout restore form; only masked phone is displayed',async()=>{
+ const f=fixture();await f.render({state:'idle'});
+ for(const state of ["{browser:'unavailable',login_state:'unknown'}",'null',"{browser:'browser_ready',login_state:'rejected'}"]){
+  f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+  f.run(`setSmsLoginStatus(${state})`);assert(!f.$('#smsPhoneForm').hidden);
+ }
+ f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+ for(const phone of ['13800138000','<img src=x onerror=alert(1)>','138****8000 extra']){
+  await f.render({phone});assert.equal(f.$('#smsNumber').textContent,'账号信息：当前会话未提供脱敏手机号');
+ }
+ assert(html.includes('catch(e){setSmsLoginStatus(null);toast(e.message)'));
 });
 test('auto/manual/remote-desktop display and countdown',async()=>{
  const f=fixture();await f.manual();assert(!f.$('#smsRefresh').hidden);
