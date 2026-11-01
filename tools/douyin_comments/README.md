@@ -59,7 +59,7 @@ bin/dyc selftest
 状态目录默认 `~/.local/state/dyc`（`--state-dir` / `DYC_STATE_DIR`），同样要求 0700。
 浏览器登录资料持久保存于自己的 profile，不读取现有指数工具或系统浏览器资料。
 
-`login` 点击语义明确的页头“登录”按钮；弹窗已打开时不重复点击。公开页面跳转到 `/jingxuan`，主页面的 `#login-panel-new` 内短信与扫码区域同时可见，无需切换短信标签。二维码为 `#douyin_login_comp_scan_code img[aria-label="二维码"]`，最多等待 60 秒且须图片加载完成才截取（未找到报 `login_qr_missing`，空容器不算二维码）；等待期间在 stderr 给出私有 PNG 路径，供操作人安全取图扫码。
+`login` 点击语义明确的页头“登录”按钮；弹窗已打开时不重复点击。公开页面跳转到 `/jingxuan`，主页面的 `#login-panel-new` 内短信与扫码区域同时可见，无需切换短信标签。二维码为 `#douyin_login_comp_scan_code img[aria-label="二维码"]`，最多等待 60 秒且须图片加载完成才截取（未找到报 `login_qr_missing`，空容器不算二维码）；准备期间持续复查登录态；若持久会话恢复则直接成功，无需二维码。扫码等待期间在 stderr 给出私有 PNG 路径，供操作人安全取图扫码。
 每 20 秒重新截图覆盖同一路径，输入框和手机号形态文本遮盖；不自动解决验证挑战。
 默认等待 180 秒，`--wait-seconds 600` 可延长至最多 600 秒；成功、超时、SIGINT/SIGTERM 都删除 PNG；结束 JSON 中的路径是已删除文件的位置。
 登录期间 document/XHR/fetch 的 HTTP 403/429 立即保护性停止。登录扫描使用 15 秒总期限，

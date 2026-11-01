@@ -142,11 +142,12 @@ async def login(args, *, backend=None, wait_seconds=None, control=None):
                 current = await browser.state()
                 if current["risk"]:
                     raise Stop(3, "verification_widget")
+                if not current["inside"] and not backend:
+                    current["inside"] = await control.run(prepare(browser))
                 if current["inside"]:
                     code, reason = 0, "logged_in"
                 else:
                     if not backend:
-                        await control.run(prepare(browser))
                         png = await control.run(snapshot(browser.page))
                     else:
                         locator = browser.page.locator(site.SIGNALS["qr"]).first

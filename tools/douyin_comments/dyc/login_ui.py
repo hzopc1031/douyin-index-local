@@ -29,6 +29,7 @@ def watch_http(browser):
 
 
 async def prepare(browser):
+    """Return True for a restored session, False for a loaded QR image."""
     page = browser.page
     # The header button opens a main-document panel after /jingxuan navigation.
     # SMS and QR are side by side; never click the SMS submit div or broad text.
@@ -37,8 +38,11 @@ async def prepare(browser):
         async with asyncio.timeout(PREPARE_SECONDS):
             while True:
                 browser.control.check()
+                current = await browser.state()
+                if current["inside"]:
+                    return True
                 if await ready_qr(page):
-                    return
+                    return False
                 panel = page.locator(site.LOGIN_PANEL).filter(visible=True)
                 if not clicked and not await panel.count():
                     login = page.get_by_role("button", name="登录", exact=True).filter(visible=True)

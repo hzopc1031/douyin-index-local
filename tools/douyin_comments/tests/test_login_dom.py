@@ -3,6 +3,7 @@ import asyncio
 import base64
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from dyc.browser import Browser
 from dyc.errors import Control, Stop
 from dyc.fake import FakeSite, FastPacer
 from dyc.login_ui import prepare, snapshot
+from dyc.runner import login
 
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC')
 PANEL = '''<meta charset="utf-8"><article id="login-panel-new"><div id="douyin_login_comp_scan_code">
@@ -106,3 +108,33 @@ class LoginDomTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Stop) as caught:
                 await asyncio.wait_for(pending, 2)
             self.assertEqual(caught.exception.reason, 'verification_widget')
+
+    async def test_session_restored_during_prepare_succeeds_without_qr(self):
+        class Fixture(FakeSite):
+            def html(self, _):
+                return '<div data-dyc-login="no">Synthetic pending session</div>'
+
+        fake = Fixture()
+        class OfflineBrowser(Browser):
+            def __init__(self, *args, **kwargs):
+                kwargs['backend'] = fake
+                super().__init__(*args, **kwargs)
+
+        async def restore_during_prepare(browser):
+            self.assertFalse((await browser.state())['inside'])
+            await browser.page.evaluate("""() => setTimeout(() =>
+                document.querySelector('[data-dyc-login]').setAttribute('data-dyc-login', 'yes'), 100)""")
+            return await prepare(browser)
+
+        args = Namespace(profile_dir=Path(self.tmp.name) / 'profile',
+                         state_dir=Path(self.tmp.name) / 'state', display=None, wait_seconds=2)
+        with patch('dyc.runner.Browser', OfflineBrowser), patch.object(site, 'LOGIN_URL', site.FAKE_ORIGIN), \
+                patch('dyc.login_ui.prepare', side_effect=restore_during_prepare) as preparation, \
+                patch('dyc.login_ui.snapshot') as screenshot:
+            code, result = await login(args)
+        self.assertEqual((code, result['exit_reason']), (0, 'logged_in'))
+        preparation.assert_awaited_once()
+        screenshot.assert_not_called()
+        self.assertFalse(Path(result['qr_path']).exists())
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(fake.foreign, [])
