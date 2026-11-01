@@ -21,6 +21,7 @@ from dyc.errors import Control, Stop
 from dyc.fake import FakeSite, FastPacer
 from dyc.runner import login
 from dyc.runtime import Budget, DailyCounter, Profile
+from tests.browser_helpers import ManualDeadline, browser_asyncio
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,12 +39,17 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scan_has_one_deadline_across_all_frames(self):
         evaluated, cancelled = [], []
+        deadline = ManualDeadline()
 
         class SlowFrame:
             async def evaluate(frame, *_):
                 evaluated.append(frame)
                 try:
-                    await asyncio.sleep(0.1)
+                    if len(evaluated) == 2:
+                        # Expire the shared scan deadline in the second frame,
+                        # independent of how long the first frame took on CPU.
+                        deadline.expire()
+                        await asyncio.Event().wait()
                     return dict(risk=False, out=False, inside=True)
                 except asyncio.CancelledError:
                     cancelled.append(frame)
@@ -51,10 +57,16 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
 
         browser = self.browser(FakeSite())
         browser.page = Namespace(frames=[SlowFrame() for _ in range(10)])
-        with patch("dyc.browser.STATE_TIMEOUT_SECONDS", 0.15):
+        start = asyncio.get_running_loop().time()
+        with browser_asyncio(timeout_at=deadline):
             with self.assertRaises(Stop) as caught:
-                await asyncio.wait_for(browser.state(), 0.6)
+                await asyncio.wait_for(browser.state(), 30)
+        end = asyncio.get_running_loop().time()
         self.assertEqual((caught.exception.code, caught.exception.reason), (3, "state_check_timeout"))
+        self.assertEqual(len(deadline.requested), 1)
+        self.assertLessEqual(start + 2, deadline.requested[0])
+        self.assertLessEqual(deadline.requested[0], end + 2)
+        self.assertTrue(deadline.timers[0].expired())
         self.assertEqual(len(evaluated), 2)
         self.assertEqual(cancelled, [evaluated[-1]])
         self.assertTrue(self.control.event.is_set())

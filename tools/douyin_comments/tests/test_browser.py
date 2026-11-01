@@ -22,9 +22,11 @@ from dyc.browser import Browser, REPLAY_HEADER, _processes
 from dyc.errors import Control, Stop
 from dyc.fake import FakeSite, FastPacer, fixture_comment, fixture_page
 from dyc.runner import fetch, login
+from dyc.output import Log
 from dyc.models import Video
 from dyc.paging import collect
 from dyc.runtime import Budget, DailyCounter
+from tests.browser_helpers import DiscoveryDeadline, ManualDeadline, SeedRace, browser_asyncio
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = os.environ.get("DYC_REQUIRE_BROWSER_TESTS") == "1"
@@ -346,43 +348,84 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
             await browser.fetch("100", "10001", "41")
         self.assertEqual(fake.foreign, [])
 
-    async def test_abort_on_timeout(self):
-        fake = FakeSite("timeout")
-        async with self.browser(fake, timeout_ms=100) as browser:
+    async def check_xhr_timeouts(self, *, retry):
+        started = asyncio.Queue()
+        failed = {}
+
+        class HeldReplay(FakeSite):
+            async def deliver(self, route):
+                if site.request_kind(route.request.url) and self.calls:
+                    params = {key: values[0] for key, values in parse_qs(urlsplit(route.request.url).query).items()}
+                    self.calls.append((site.request_kind(route.request.url), params))
+                    event = failed[route.request] = asyncio.Event()
+                    started.put_nowait(event)
+                    # Never race a delayed response against the XHR's timer.
+                    # Let the real browser abort release the admission gate.
+                    await event.wait()
+                    return
+                await super().deliver(route)
+
+        fake = HeldReplay()
+        async with self.browser(fake) as browser:
+            self.assertEqual((browser.timeout_ms, browser.request_timeout), (20000, 22))
+            await browser.page.clock.install(time="2026-01-01")
+            await browser.page.clock.pause_at("2026-01-02")
+            browser.context.on("requestfailed", lambda request: failed[request].set() if request in failed else None)
             await browser.preflight(site.FAKE_ORIGIN)
             await browser.open_video(site.FAKE_ORIGIN + "/video/100")
-            result = await browser.fetch("100", None, "0")
-            self.assertEqual(result, {"kind": "timeout"})
-            self.assertIsNone(browser.expected)
-            self.assertEqual(await browser.page.evaluate("window.abortCount"), 1)
-            self.assertEqual(len(fake.calls), 2)
+            pending = asyncio.create_task(
+                collect(Video("100", site.FAKE_ORIGIN + "/video/100"), browser) if retry
+                else browser.fetch("100", None, "0"))
+            try:
+                for attempt in range(2 if retry else 1):
+                    aborted = await asyncio.wait_for(started.get(), 30)
+                    await browser.page.clock.run_for(19999)
+                    self.assertFalse(pending.done())
+                    self.assertEqual(await browser.page.evaluate("window.abortCount"), attempt)
+                    await browser.page.clock.run_for(1)
+                    await asyncio.wait_for(aborted.wait(), 30)
+                if retry:
+                    with self.assertRaises(Stop) as ctx:
+                        await asyncio.wait_for(pending, 30)
+                    self.assertEqual((ctx.exception.code, ctx.exception.reason), (3, "repeated_timeout"))
+                else:
+                    self.assertEqual(await asyncio.wait_for(pending, 30), {"kind": "timeout"})
+                self.assertIsNone(browser.expected)
+                self.assertEqual(browser.budget.used, 3 if retry else 2)
+                self.assertEqual(len(fake.calls), 3 if retry else 2)
+                self.assertEqual(await browser.page.evaluate("window.abortCount"), 2 if retry else 1)
+            finally:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
         self.assertEqual(fake.foreign, [])
+
+    async def test_abort_on_timeout(self):
+        await self.check_xhr_timeouts(retry=False)
 
     async def test_timeout_retry_is_counted_and_limited(self):
-        fake = FakeSite("timeout")
-        async with self.browser(fake, timeout_ms=100) as browser:
-            await browser.preflight(site.FAKE_ORIGIN)
-            await browser.open_video(site.FAKE_ORIGIN + "/video/100")
-            with self.assertRaises(Stop) as ctx:
-                await collect(Video("100", site.FAKE_ORIGIN + "/video/100"), browser)
-            self.assertEqual((ctx.exception.code, ctx.exception.reason), (3, "repeated_timeout"))
-            self.assertEqual(browser.budget.used, 3)  # native seed + two attempts
-            self.assertEqual(len(fake.calls), 3)
-            self.assertEqual(await browser.page.evaluate("window.abortCount"), 2)
-        self.assertEqual(fake.foreign, [])
+        await self.check_xhr_timeouts(retry=True)
 
     async def test_cancellation_while_waiting_for_request_gate(self):
+        waiting = asyncio.Event()
+
+        class ObservedLock(asyncio.Lock):
+            async def acquire(lock):
+                if lock.locked():
+                    waiting.set()
+                return await super().acquire()
+
         fake = FakeSite()
         async with self.browser(fake) as browser:
             await browser.preflight(site.FAKE_ORIGIN)
             await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            browser.gate = ObservedLock()
             await browser.gate.acquire()
             try:
                 pending = asyncio.create_task(browser.fetch("100", None, "0"))
-                await asyncio.sleep(0.05)
+                await asyncio.wait_for(waiting.wait(), 30)
                 self.control.stop(2, "interrupted")
                 with self.assertRaises(Stop) as ctx:
-                    await asyncio.wait_for(pending, 0.5)
+                    await asyncio.wait_for(pending, 30)
                 self.assertEqual(ctx.exception.reason, "interrupted")
             finally:
                 browser.gate.release()
@@ -398,7 +441,24 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def test_captcha_mid_request_in_iframe_stops_entire_batch(self):
-        fake = FakeSite("captcha-mid")
+        class CaptchaDuringReplay(FakeSite):
+            async def deliver(self, route):
+                kind = site.request_kind(route.request.url)
+                if kind and self.calls:
+                    params = {key: values[0] for key, values in parse_qs(urlsplit(route.request.url).query).items()}
+                    self.calls.append((kind, params))
+                    # Admit the replay first, then show the challenge while its
+                    # response stays pending. Neither side uses a wall timer.
+                    await route.request.frame.evaluate("""() => {
+                        const challenge = document.createElement('iframe');
+                        challenge.srcdoc = '<div data-dyc-risk="yes">synthetic iframe challenge</div>';
+                        document.body.appendChild(challenge);
+                    }""")
+                    await asyncio.Event().wait()
+                    return
+                await super().deliver(route)
+
+        fake = CaptchaDuringReplay()
         code, result = await fetch(self.args(), backend=fake, pacer=FastPacer())
         self.assertEqual(code, 3)
         self.assertEqual(result["exit_reason"], "verification_widget")
@@ -469,6 +529,25 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def test_failed_initial_page_still_deduplicates_resolved_video_aliases(self):
+        class FailedBrowser(Browser):
+            def __init__(browser, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                browser.failed_seed_settled = asyncio.Event()
+                browser.seed_ready = DiscoveryDeadline(browser.failed_seed_settled.wait)
+
+            def on_finished(browser, request):
+                accepted = browser.accepted.get(request)
+                super().on_finished(request)
+                if (accepted and accepted[1][1] == "100" and request.failure
+                        and not browser.backend.reply_seed):
+                    browser.failed_seed_settled.set()
+
+            async def on_response(browser, response):
+                accepted = browser.accepted.get(response.request)
+                await super().on_response(response)
+                if accepted and accepted[1][1:3] == ("100", "reply"):
+                    browser.failed_seed_settled.set()
+
         class FailedSeed(FakeSite):
             async def deliver(self, route):
                 if site.request_kind(route.request.url) == "top":
@@ -478,9 +557,6 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                         await route.abort("failed")
                         return
                 await super().deliver(route)
-
-        def browser(*args, **kwargs):
-            return Browser(*args, timeout_ms=100, **kwargs)
 
         for first in ("/video/100", "/short/synthetic-first"):
             for reply_seed in (False, True):
@@ -492,7 +568,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                     args.urls = [site.FAKE_ORIGIN + path for path in
                                  (first, "/short/synthetic-alias", "/video/100", "/video/200")]
                     fake = FailedSeed(reply_seed=reply_seed)
-                    with patch("dyc.runner.Browser", side_effect=browser):
+                    with patch("dyc.runner.Browser", FailedBrowser):
                         code, result = await fetch(args, backend=fake, pacer=FastPacer())
                     self.assertEqual((code, result["exit_reason"]), (2, "partial"), result)
                     self.assertEqual([v["video_id"] for v in result["videos"]], ["100", "200"])
@@ -547,28 +623,28 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(fake.foreign, [])
 
     async def test_slow_seed_response_is_exported_before_next_video(self):
+        # Delay decoding after HTTP completion, then expire discovery. This
+        # proves neither headers nor requestfinished may release the seed gate.
+        race = SeedRace(self, hold_body=True)
+
         class SlowSeed(FakeSite):
             async def deliver(self, route):
                 if site.request_kind(route.request.url):
                     video = parse_qs(urlsplit(route.request.url).query)[site.PARAM["video"]][0]
                     self.calls.append(video)
-                    if video == "100":
-                        # Reproduce the original 15-second discovery / 22-second
-                        # admitted-request race using the production deadlines.
-                        await asyncio.sleep(16)
                     await route.fulfill(status=200, content_type="application/json",
                                         body=json.dumps(fixture_page(
                                             [fixture_comment(int(video) * 100 + 1)], 0, False, 1)))
                 else:
+                    if urlsplit(route.request.url).path == "/video/200":
+                        race.stages.append("next_video")
                     await super().deliver(route)
 
-        class BetweenVideos(FastPacer):
-            async def between_videos(self):
-                await asyncio.sleep(2)
-
         args, fake = self.args(), SlowSeed()
-        code, result = await fetch(args, backend=fake, pacer=BetweenVideos())
+        with patch("dyc.runner.Browser", race.browser_type):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
         self.assertEqual((code, result["requests"]), (0, 2), result)
+        race.assert_settled(next_video=True)
         self.assertEqual([(v["status"], v["top_count"], v["pages"]) for v in result["videos"]],
                          [("complete", 1, 1), ("complete", 1, 1)])
         with (args.out / "comments.csv").open(encoding="utf-8-sig", newline="") as stream:
@@ -578,14 +654,15 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def test_missing_top_seed_settles_admitted_reply_before_skip(self):
+        race = SeedRace(self, root="10001", late=True)
+
         class ReplyOnly(FakeSite):
             def html(self, video_id):
                 html = super().html(video_id)
                 if video_id == "100":
-                    # Admit a reply near the discovery deadline, with no top
-                    # response. Its body finishes after that deadline.
+                    # Send only after discovery starts; hold through its expiry.
                     html = html.replace("seed.send();", "")
-                    html = html.replace("reply.send();", "setTimeout(() => reply.send(), 1500);")
+                    html = html.replace("reply.send();", "window.sendSeed = () => reply.send();")
                 return html
 
             async def deliver(self, route):
@@ -595,15 +672,17 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                     video = params[site.PARAM["video"]][0]
                     if video == "100":
                         self.calls.append((kind, video))
-                        await asyncio.sleep(1.2)
+                        await race.hold()
                         await route.fulfill(status=200, content_type="application/json",
                                             body=json.dumps(fixture_page([fixture_comment(10100)], 0, False, 1)))
                         return
+                elif urlsplit(route.request.url).path == "/video/200":
+                    race.stages.append("next_video")
                 await super().deliver(route)
 
         instances = []
         def browser(*args, **kwargs):
-            instance = Browser(*args, timeout_ms=100, **kwargs)
+            instance = race.browser_type(*args, **kwargs)
             instances.append(instance)
             return instance
 
@@ -617,6 +696,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         with patch("dyc.runner.Browser", side_effect=browser):
             code, result = await fetch(args, backend=fake, pacer=CheckSettled())
         self.assertEqual((code, result["exit_reason"]), (2, "partial"), result)
+        race.assert_settled(next_video=True)
         first, second = result["videos"]
         self.assertEqual((first["reason"], first["reply_count"], first["pages"]),
                          ("comment_template_missing", 1, 1))
@@ -663,17 +743,22 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         await self.check_canonical_then_short_links(daily_used=2996)
 
     async def test_slow_initial_seed_is_exported_before_next_video(self):
+        race = SeedRace(self)
+
         class SlowSeed(FakeSite):
             async def deliver(self, route):
                 if site.request_kind(route.request.url) and not self.calls:
-                    # Reproduce the real 15-second discovery / 22-second
-                    # request deadline gap without altering asyncio's clock.
-                    await asyncio.sleep(16)
+                    await race.hold()
+                elif urlsplit(route.request.url).path == "/video/200":
+                    race.stages.append("next_video")
                 await super().deliver(route)
+
         fake = SlowSeed()
         args = self.args()
-        code, result = await fetch(args, backend=fake, pacer=FastPacer())
-        self.assertEqual((code, result["requests"]), (0, 8))
+        with patch("dyc.runner.Browser", race.browser_type):
+            code, result = await fetch(args, backend=fake, pacer=FastPacer())
+        self.assertEqual((code, result["requests"]), (0, 8), result)
+        race.assert_settled(next_video=True)
         self.assertEqual([(v["video_id"], v["status"], v["pages"], v["top_count"], v["reply_count"])
                           for v in result["videos"]],
                          [("100", "complete", 4, 2, 21), ("200", "complete", 4, 2, 21)])
@@ -685,23 +770,27 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def test_late_admitted_top_seed_can_complete_after_discovery_deadline(self):
+        race = SeedRace(self, late=True)
+
         class LateSeed(FakeSite):
             def html(self, video_id):
-                return super().html(video_id).replace("seed.send();", "setTimeout(() => seed.send(), 1500);")
+                return super().html(video_id).replace("seed.send();", "window.sendSeed = () => seed.send();")
 
             async def deliver(self, route):
                 if site.request_kind(route.request.url):
                     self.calls.append(route.request.url)
-                    await asyncio.sleep(1.2)
+                    await race.hold()
                     await route.fulfill(status=200, content_type="application/json",
                                         body=json.dumps(fixture_page([fixture_comment(10001)], 0, False, 1)))
                 else:
                     await super().deliver(route)
 
         fake = LateSeed()
-        async with self.browser(fake, timeout_ms=100) as browser:
+        async with race.browser_type(self.root / "profile", self.control,
+                                     Budget(DailyCounter(self.root / "state")), FastPacer(), backend=fake) as browser:
             await browser.preflight(site.FAKE_ORIGIN)
             await browser.open_video(site.FAKE_ORIGIN + "/video/100")
+            race.assert_settled()
             self.assertFalse(browser.active)
             self.assertFalse(browser.accepted)
             self.assertFalse(browser.seeding)
@@ -715,25 +804,27 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsettled_seed_stops_batch_without_starting_next_video(self):
         cancelled = asyncio.Event()
+        deadline = ManualDeadline()
 
         class HungSeed(FakeSite):
             async def deliver(self, route):
                 if site.request_kind(route.request.url):
                     self.calls.append(route.request.url)
                     try:
+                        # Expire the actual request timer only after admission.
+                        deadline.expire()
                         await asyncio.Event().wait()
                     finally:
                         cancelled.set()
                 else:
                     await super().deliver(route)
 
-        def browser(*args, **kwargs):
-            return Browser(*args, timeout_ms=100, **kwargs)
-
         args, fake = self.args(), HungSeed()
-        with patch("dyc.runner.Browser", side_effect=browser):
+        with browser_asyncio(timeout=deadline):
             code, result = await fetch(args, backend=fake, pacer=FastPacer())
         self.assertEqual((code, result["exit_reason"], result["requests"]), (3, "unsettled_request", 1))
+        self.assertEqual(deadline.requested, [22])
+        self.assertTrue(deadline.timers[0].expired())
         self.assertTrue(cancelled.is_set())
         self.assertNotIn("/video/200", fake.navigations)
         self.assertTrue(all(v["top_count"] == 0 and v["status"] == "partial" for v in result["videos"]))
@@ -1169,18 +1260,30 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def test_login_qr_mode_and_deletion_timeout_and_success(self):
-        for scenario, expected in (("login-expired", 4), ("login-after", 0)):
-            with self.subTest(scenario=scenario):
-                fake = FakeSite(scenario)
-                task = asyncio.create_task(login(self.args(), backend=fake, wait_seconds=2 if expected == 0 else 0.2))
-                seen = False
-                while not task.done():
-                    images = list((self.root / "state").glob("*.png"))
-                    for image in images:
-                        seen = True
-                        self.assertEqual(image.stat().st_mode & 0o777, 0o600)
-                    await asyncio.sleep(0.02)
-                code, result = await task
+        for expected in (4, 0):
+            with self.subTest(expected=expected):
+                fake, seen = FakeSite("login-expired"), []
+                original = Log.event
+
+                def qr_ready(log, event):
+                    if event == "qr_ready":
+                        images = list((self.root / "state").glob("*.png"))
+                        self.assertEqual(len(images), 1)
+                        self.assertEqual(images[0].stat().st_mode & 0o777, 0o600)
+                        seen.extend(images)
+                    original(log, event)
+
+                class LoginAfterQr(Browser):
+                    async def state(browser, **kwargs):
+                        if seen and expected == 0:
+                            await browser.page.evaluate("""() => document.querySelector('[data-dyc-login]')
+                                .setAttribute('data-dyc-login', 'yes')""")
+                        return await super().state(**kwargs)
+
+                with patch("dyc.runner.Browser", LoginAfterQr), patch.object(Log, "event", qr_ready):
+                    # Success is signalled after the QR exists. Zero exercises
+                    # an expired login window without a polling/screenshot race.
+                    code, result = await login(self.args(), backend=fake, wait_seconds=30 if expected == 0 else 0)
                 self.assertEqual(code, expected, result)
                 self.assertTrue(seen)
                 self.assertFalse(Path(result["qr_path"]).exists())
@@ -1189,12 +1292,16 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_login_qr_cleanup_on_cancellation(self):
         control = Control()
         fake = FakeSite("login-expired")
-        task = asyncio.create_task(login(self.args(), backend=fake, control=control))
-        while not list((self.root / "state").glob("*.png")):
-            self.assertFalse(task.done())
-            await asyncio.sleep(0.02)
-        control.stop(2, "interrupted")
-        code, result = await task
+        original = Log.event
+
+        def cancel_after_qr(log, event):
+            original(log, event)
+            if event == "qr_ready":
+                self.assertEqual(len(list((self.root / "state").glob("*.png"))), 1)
+                control.stop(2, "interrupted")
+
+        with patch.object(Log, "event", cancel_after_qr):
+            code, result = await login(self.args(), backend=fake, control=control)
         self.assertEqual(code, 2)
         self.assertFalse(Path(result["qr_path"]).exists())
         self.assertEqual(fake.foreign, [])
@@ -1215,6 +1322,24 @@ class BrowserProcessTests(unittest.TestCase):
     def setUp(self):
         if not shutil.which("Xvfb") and not REQUIRED:
             self.skipTest("Xvfb unavailable")
+
+    def test_selftest_unsets_inherited_debugp(self):
+        # Exercise real Playwright protocol traffic, including synthetic signed
+        # URLs, exclusively via selftest's context-level in-memory routes.
+        for value in ("1", "0"):
+            with self.subTest(DEBUGP=value), tempfile.TemporaryDirectory() as temp:
+                result = subprocess.run(
+                    [sys.executable, "-m", "dyc", "selftest", "--out", str(Path(temp) / "out")],
+                    cwd=ROOT, env={**os.environ, "DEBUGP": value},
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(len(result.stdout.splitlines()), 1)
+                data = json.loads(result.stdout)
+                self.assertEqual((data["exit_reason"], data["requests"]), ("complete", 8))
+                for marker in ("SEND", "RECV", "synthetic-sdk-signature", "synthetic-fresh-token"):
+                    # Do not echo a protocol payload if this assertion fails.
+                    self.assertFalse(marker in result.stdout + result.stderr, marker)
 
     def test_selftest_one_json_and_no_real_profile(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -16,11 +16,20 @@ from dyc.runner import fetch
 
 
 class LargeBatch(FakeSite):
+    def __init__(self):
+        super().__init__()
+        # Prepare the same 30,000 comments before browser deadlines start.
+        # Compact UTF-8 bytes avoid repeated JSON escaping across Playwright/CDP
+        # while preserving every field in the normal collection/export pipeline.
+        self.body = json.dumps(fixture_page(
+            [fixture_comment(i) for i in range(1, 30001)], 0, False, 30000),
+            ensure_ascii=False, separators=(",", ":")).encode()
+
     async def deliver(self, route):
         if site.request_kind(route.request.url):
             self.calls.append("top")
-            await route.fulfill(status=200, content_type="application/json", body=json.dumps(
-                fixture_page([fixture_comment(i) for i in range(1, 30001)], 0, False, 30000)))
+            await route.fulfill(status=200, content_type="application/json",
+                                body=self.body)
         else:
             await super().deliver(route)
 

@@ -98,6 +98,7 @@ def main(argv=None):
     # Never let inherited Playwright debug flags dump signed URLs to a terminal.
     os.environ.pop("DEBUG", None)
     os.environ.pop("PWDEBUG", None)
+    os.environ.pop("DEBUGP", None)  # Even "0" enables raw protocol logging.
     args = None
     identity = None
     try:

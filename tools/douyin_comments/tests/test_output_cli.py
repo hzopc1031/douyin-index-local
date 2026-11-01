@@ -126,6 +126,22 @@ class OutputTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_check_env_unsets_inherited_debugp(self):
+        # DEBUGP is checked for presence/truthiness; even "0" enables tracing.
+        for value in ("1", "0"):
+            with self.subTest(DEBUGP=value), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                result = subprocess.run(
+                    [sys.executable, "-m", "dyc", "check-env",
+                     "--profile-dir", str(root / "profile"), "--state-dir", str(root / "state")],
+                    cwd=ROOT, env={**os.environ, "DEBUGP": value},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(len(result.stdout.splitlines()), 1)
+                self.assertEqual(json.loads(result.stdout)["exit_reason"], "ready")
+                self.assertEqual(result.stderr, "")
+
     def check_path_interpreter_fallback(self, *, no_scope):
         with tempfile.TemporaryDirectory(prefix="dyc-wrapper-path-") as temp:
             root = Path(temp)

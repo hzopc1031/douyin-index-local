@@ -94,6 +94,12 @@ bin/dyc selftest
 DYC_REQUIRE_BROWSER_TESTS=1 xvfb-run -a /tmp/dycvenv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
+在上述命令末尾加 `-v --durations 0` 可记录每项测试耗时（Python 3.13）。慢 seed 测试用事件控制
+“请求获准 → discovery 到期 → 等待解码完成 → 下一视频”的顺序，同时核对 CSV、请求预算和未完成请求；
+XHR 超时测试用 Playwright 虚拟时钟核对 19,999 ms 时未 abort、20,000 ms 时 abort 及最多一次重试。
+这些测试不会真实等待 16/22 秒，也不缩短生产的 20 秒 XHR、22 秒请求/discovery 或限速设置。
+真实 renderer 截止和进程信号清理测试仍使用有界计时；浏览器启动、导出及清理耗时会随共享机器负载变化。
+
 浏览器测试实际运行 `headless=False` Chromium；在任何导航前安装 context 级路由，假域名从内存响应，
 其它请求一律 abort，WebSocket 也关闭，service worker 禁用。不需要真实账号，不运行 Python HTTP 客户端或本地接收服务。
 `selftest` 使用同一完整 pipeline、临时 profile/state 和仅供假页面使用的快速时钟，绝不触及真实 profile。
