@@ -11,9 +11,11 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import threading
 import time
+import unicodedata
 from urllib.parse import quote, unquote, urlsplit
 
 from . import site
@@ -22,6 +24,7 @@ from .errors import Stop
 from .login_ui import ready_qr
 from .runtime import Display, Profile, browser_defaults, check_memory
 from .sms_state import reject
+from .sms_cdp import TargetGuard
 
 # Fixed copy/adaptation of the 2026-10-31 login-B selectors; see SMS_LOGIN.md.
 PHONE = '#douyin_login_comp_mobile_code input#normal-input'
@@ -87,6 +90,14 @@ class Metadata:
 class Capture:
     png: bytes
     metadata: Metadata
+    prompt: str = ''
+
+
+@dataclass(repr=False)
+class Challenge:
+    element: object
+    rect: dict
+    frame: object
 
 
 class SmsBrowser:
@@ -100,6 +111,7 @@ class SmsBrowser:
         self.driver_pid = None
         self.response_session = None
         self.guard_tasks = set()
+        self.target_guard = None
         self.private_values = []
         self.fatal = False
         self.auto_attempts = 0
@@ -124,9 +136,24 @@ class SmsBrowser:
                    base64.b64encode(v.encode()).decode() in value for v in self.private_values)
 
     async def route(self, route):
+        try:
+            await self._route(route)
+        except Exception:
+            # Never let Playwright log an unhandled route exception containing
+            # a URL or input. Missing guard coverage fails closed.
+            self.fatal = True
+            try:
+                await route.abort()
+            except Exception:
+                pass
+
+    async def _route(self, route):
         request = route.request
         if self.fatal or self.cancel.is_set():
             await route.abort()
+            return
+        if request.frame.page != self.page:
+            await route.abort()  # auth is confined to the owned page, never popups
             return
         if self.backend:
             await self.backend(route)
@@ -179,9 +206,8 @@ class SmsBrowser:
             self.page = await self.context.new_page()
             self.page.set_default_timeout(3000)
             self.response_session = await self.context.new_cdp_session(self.page)
-            self.response_session.on('Fetch.requestPaused', self.guard_response)
-            await self.response_session.send('Fetch.enable', dict(patterns=[
-                dict(urlPattern='*', requestStage='Response')]))
+            self.target_guard = TargetGuard(self)
+            await self.target_guard.start(self.response_session)
             await self.reset()
         except BaseException:
             await self.close()
@@ -191,13 +217,14 @@ class SmsBrowser:
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
             self.fatal = True
 
-    def guard_response(self, event):
-        task = asyncio.create_task(self.check_response(event))
+    def guard_response(self, event, session=None):
+        task = asyncio.create_task(self.check_response(event, session))
         self.guard_tasks.add(task)
         task.add_done_callback(self.guard_tasks.discard)
 
-    async def check_response(self, event):
+    async def check_response(self, event, session=None):
         """Chromium pauses before redirects, which Playwright routes may skip."""
+        session = session or self.response_session
         request_id = event['requestId']
         try:
             status = event.get('responseStatusCode', 0)
@@ -218,13 +245,13 @@ class SmsBrowser:
                 if denied:
                     self.fatal = True
             if denied:
-                await self.response_session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
+                await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
             else:
-                await self.response_session.send('Fetch.continueRequest', dict(requestId=request_id))
+                await session.send('Fetch.continueRequest', dict(requestId=request_id))
         except Exception:
             self.fatal = True
             try:
-                await self.response_session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
+                await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
             except Exception:
                 pass
 
@@ -297,26 +324,82 @@ class SmsBrowser:
                 element = candidates.nth(index)
                 rect = await element.bounding_box()
                 if rect and rect['width'] >= 40 and rect['height'] >= 40:
-                    return element, rect
+                    owner = frame
+                    if await element.evaluate('(e) => e.tagName') == 'IFRAME':
+                        handle = await element.element_handle()
+                        owner = await handle.content_frame() if handle else None
+                        if owner is not None:
+                            element = owner.locator('body')
+                    return Challenge(element, rect, owner)
         return None
 
+    async def safe_prompt(self, challenge):
+        text = unicodedata.normalize('NFKC', await challenge.element.inner_text(timeout=1000))[:2000]
+        # Only recognizable instructions cross the boundary, never arbitrary
+        # page text. Hide long numbers and exact credentials, including digits
+        # separated by spaces/punctuation. Render this as textContent on phone.
+        allowed = re.compile(r'(?:请)?(?:(?:依次|按顺序)?(?:点击|点选)|拖动|旋转)[\u3400-\u9fffA-Za-z0-9\s:：、,，。!！“”‘’「」【】()（）-]{1,80}')
+        for line in text.splitlines():
+            line = line.strip()
+            digits = re.sub(r'\D', '', line)
+            if (allowed.fullmatch(line) and not re.search(r'\d{4,}', digits)
+                    and not self.contains_private(line) and
+                    not any(value in digits for value in self.private_values)):
+                return line
+        return ''
+
     async def capture(self, challenge):
-        _, rect = challenge
+        rect = challenge.rect
         viewport = self.page.viewport_size
         x, y = max(0, rect['x']), max(0, rect['y'])
         w = min(rect['x'] + rect['width'], viewport['width']) - x
         h = min(rect['y'] + rect['height'], viewport['height']) - y
         if w < 40 or h < 40:
             reject('frame_unavailable')
-        png = await self.page.screenshot(type='png', clip=dict(x=x, y=y, width=w, height=h),
-                                        style=REDACT_STYLE, animations='disabled', timeout=3000)
+        marker = secrets.token_hex(16)
+        try:
+            # Short Chinese/letter-only leaf labels can be click targets. They
+            # cannot contain a phone or six-digit SMS code. All numbers and
+            # longer/arbitrary prose stay hidden; safe instructions are sent
+            # separately. Clone immutable safe text: unmasking the live node
+            # could expose an input reflected by a concurrent DOM update.
+            await challenge.element.evaluate(r'''(root, marker) => {
+              for (const e of [root, ...root.querySelectorAll('*')]) {
+                if (!e.children.length && !e.matches('input, textarea, script, style, [contenteditable]')
+                    && /^[\u3400-\u9fffA-Za-z]{1,4}$/.test(e.textContent.trim())) {
+                  const rect=e.getBoundingClientRect(), computed=getComputedStyle(e);
+                  if (!rect.width || !rect.height || computed.visibility === 'hidden') continue;
+                  const label=root.ownerDocument.createElement('span');
+                  label.textContent=e.textContent.trim();
+                  label.setAttribute('data-dyc-safe-label', marker);
+                  Object.assign(label.style, {position:'fixed', left:rect.left+'px', top:rect.top+'px',
+                    width:rect.width+'px', height:rect.height+'px', font:computed.font,
+                    textAlign:computed.textAlign, lineHeight:computed.lineHeight,
+                    zIndex:'2147483647', pointerEvents:'none'});
+                  root.ownerDocument.body.append(label);
+                }
+              }
+            }''', marker)
+            style = REDACT_STYLE + f'''[data-dyc-safe-label="{marker}"] {{
+              color: white !important; -webkit-text-fill-color: white !important;
+              background-color: #172633 !important; }}'''
+            png = await self.page.screenshot(type='png', clip=dict(x=x, y=y, width=w, height=h),
+                                            style=style, animations='disabled', timeout=3000)
+        finally:
+            try:
+                await challenge.element.evaluate('''(root, marker) => {
+                  for (const e of root.ownerDocument.querySelectorAll('[data-dyc-safe-label]'))
+                    if (e.getAttribute('data-dyc-safe-label') === marker) e.remove();
+                }''', marker)
+            except Exception:
+                pass
         if len(png) > 500_000:
             reject('frame_unavailable')
-        return Capture(png, Metadata(x, y, w, h))
+        return Capture(png, Metadata(x, y, w, h), await self.safe_prompt(challenge))
 
     @staticmethod
     def identity(capture):
-        return hashlib.sha256(capture.png).digest(), capture.metadata
+        return hashlib.sha256(capture.png).digest(), capture.metadata, capture.prompt
 
     async def frame(self, verification):
         self.require_origin()
@@ -328,7 +411,7 @@ class SmsBrowser:
             self.last_frame = self.identity(capture)
             self.frame_token = secrets.token_urlsafe(24)
             return dict(image=base64.b64encode(capture.png).decode(), frame=self.frame_token,
-                        width=capture.metadata.width, height=capture.metadata.height)
+                        width=capture.metadata.width, height=capture.metadata.height, prompt=capture.prompt)
         qr = await ready_qr(self.page)
         if qr is None:
             reject('frame_unavailable')
@@ -372,7 +455,9 @@ class SmsBrowser:
         challenge = await self.challenge()
         if challenge is None:
             return
-        element, _ = challenge
+        if challenge.frame != self.page.main_frame:
+            return  # all child-frame challenges remain manual, regardless of URL
+        element = challenge.element
         # Cross-origin iframe or any ambiguous/rotation challenge is manual.
         text = await element.inner_text(timeout=1000)
         if ('旋转' in text or '转正' in text or not any(hint in text for hint in
@@ -426,6 +511,8 @@ class SmsBrowser:
         self.last_frame = None
         self.frame_token = ''
         records = _processes(self.driver_pid) if self.driver_pid else {}
+        if self.target_guard:
+            self.target_guard.closing = True
         try:
             async with asyncio.timeout(5):
                 if self.context:
@@ -442,6 +529,8 @@ class SmsBrowser:
                 task.cancel()
             await asyncio.gather(*self.guard_tasks, return_exceptions=True)
             self.guard_tasks.clear()
+            if self.target_guard:
+                await self.target_guard.close()
             if self.solver:
                 await self.solver.close()
             await self.display.close()

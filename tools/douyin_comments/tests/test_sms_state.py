@@ -171,6 +171,26 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser.close.assert_awaited_once()
         self.assertEqual(self.session.state, 'cancelled')
 
+    async def test_explicit_cancel_does_not_probe_or_solve_a_challenge(self):
+        self.session.state = 'verification'
+        self.browser.observe.return_value = 'verification'
+        result = await self.action('cancel')
+        self.assertEqual(result['state'], 'cancelled')
+        self.browser.observe.assert_not_awaited()
+        self.browser.auto_step.assert_not_awaited()
+        self.browser.close.assert_awaited_once()
+
+    async def test_mode_change_drops_old_challenge_before_probing(self):
+        self.session.state = 'verification'
+        self.browser.observe.return_value = 'verification'
+        async def reset():
+            self.browser.observe.assert_not_awaited()
+            self.browser.observe.return_value = 'pending'
+        self.browser.reset.side_effect = reset
+        result = await self.action('mode', mode='qr')
+        self.assertEqual((result['state'], result['mode']), ('ready', 'qr'))
+        self.browser.auto_step.assert_not_awaited()
+
     async def test_success_requires_browser_observation_and_persistence(self):
         await self.action('send', phone=PHONE)
         self.browser.observe.return_value = 'succeeded'

@@ -52,7 +52,9 @@
     if (data.image) {
       frameId = data.frame;
       $('frame').src = 'data:image/png;base64,' + data.image;
-      $('hint').textContent = data.state === 'verification' ? '请在图中拖动滑块或点选。文字和输入框已遮盖。' : '请用抖音 App 扫码；可在另一屏幕展示此二维码。';
+      $('hint').textContent = data.state === 'verification'
+        ? (data.prompt || '请在图中拖动滑块或点选。文字和输入框已遮盖。')
+        : '请用抖音 App 扫码；可在另一屏幕展示此二维码。';
     }
   }
   async function run(fn) {

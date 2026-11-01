@@ -191,6 +191,83 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                 await browser.send(PHONE)
             self.assertEqual(self.sends, 0)
 
+    async def test_manual_prompt_order_is_visible_sanitized_and_bound_to_frame(self):
+        async with self.browser() as browser:
+            await browser.send(PHONE)
+            browser.private_values.append(CODE)
+            await browser.page.evaluate("challenge('请依次点击：春、夏、秋')")
+            first = await browser.frame(True)
+            self.assertEqual(first['prompt'], '请依次点击:春、夏、秋')
+            await browser.page.locator('#hint').evaluate("e => e.textContent='请依次点击：秋、夏、春'")
+            with self.assertRaisesRegex(LoginError, 'stale_frame'):
+                await browser.pointer(first['frame'], [[.5,.5,0]])
+            second = await browser.frame(True)
+            self.assertEqual(first['image'], second['image'])
+            self.assertNotEqual(first['prompt'], second['prompt'])
+            await browser.page.locator('#echo').evaluate("e => e.textContent='春'")
+            label_one = await browser.frame(True)
+            await browser.page.locator('#echo').evaluate("e => e.textContent='秋'")
+            label_two = await browser.frame(True)
+            self.assertNotEqual(label_one['image'], label_two['image'])
+            self.assertEqual(await browser.page.locator('[data-dyc-safe-label]').count(), 0)
+            for text in ('请点击：' + PHONE, '请点击：' + CODE, '请点击：' + ' '.join(CODE)):
+                await browser.page.locator('#hint').evaluate('(e, text) => e.textContent=text', text)
+                data = await browser.frame(True)
+                self.assertEqual(data['prompt'], '')
+                self.assertNotIn(PHONE, str(data))
+                self.assertNotIn(CODE, str(data))
+
+    async def test_cross_origin_gap_stays_manual_and_redirect_cannot_escape(self):
+        solver = type('Solver', (), {'solve': AsyncMock(return_value=[[.1,.9,0],[.5,.9,10]]),
+                                      'close': AsyncMock()})()
+        original_backend = self.backend
+        async def frames(route):
+            url = route.request.url
+            if url == 'https://frame.invalid/flow':
+                await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + '''
+                <script>document.querySelector('#login-panel-new').remove();
+                document.querySelector('#header').remove();challenge();</script>''')
+            elif url == 'https://frame.invalid/post':
+                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/receiver'})
+            else:
+                await original_backend(route)
+        self.backend = frames
+        async with self.browser(solver) as browser:
+            await browser.page.evaluate('''() => { const f=document.createElement('iframe');
+              f.src='https://frame.invalid/flow'; f.style='position:fixed;left:10px;top:10px;width:400px;height:350px';
+              document.body.append(f); }''')
+            for _ in range(50):
+                frame = next((f for f in browser.page.frames if f.url == 'https://frame.invalid/flow'), None)
+                if frame and await frame.locator('#captcha_container').count():
+                    break
+                await asyncio.sleep(.05)
+            self.assertIsNotNone(frame)
+            await browser.auto_step()
+            solver.solve.assert_not_awaited()
+            self.assertEqual(browser.auto_attempts, 0)
+            self.assertTrue((await browser.frame(True))['image'])
+            # Independent request-stage sink: even if the production response
+            # guard regresses, NO redirected request can reach any real network.
+            sink = await browser.context.new_cdp_session(frame)
+            hops, tasks = [], set()
+            async def paused(event):
+                rid = event['requestId']
+                if event['request']['url'] != 'https://frame.invalid/post':
+                    hops.append('redirected')
+                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
+                else:
+                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
+            def launch(event):
+                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
+            sink.on('Fetch.requestPaused', launch)
+            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
+            try:
+                await frame.evaluate("() => fetch('/post', {method:'POST',body:'synthetic-credentials'}).catch(()=>{})")
+                self.assertEqual(hops, [])
+                self.assertTrue(browser.fatal)
+            finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
     async def test_unconfirmed_account_never_commits_cookie(self):
         async with self.browser() as browser:
             await browser.send(PHONE)

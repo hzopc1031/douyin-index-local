@@ -175,6 +175,22 @@ class LoginSession:
                 self.nonce = secrets.token_urlsafe(24)  # consumed before any await
             try:
                 async with asyncio.timeout(max(.001, min(25, self.deadline-self.clock()))):
+                    # Cancellation must never probe/solve another challenge or
+                    # perform any new online action before releasing the lease.
+                    if action == "cancel":
+                        await self.finish("cancelled")
+                        return self.public()
+                    if action == "mode":
+                        if obj["mode"] not in ("sms", "qr"):
+                            reject()
+                        # Switching to the fallback must not first complete
+                        # the old SMS challenge and trigger its pending send.
+                        await self.browser.reset()
+                        self.mode, self.state = obj["mode"], "ready"
+                        self.code_allowed = False
+                        self.masked_phone = ""
+                        await self.poll()
+                        return self.public()
                     await self.poll()
                     if self.state in TERMINAL:
                         return self.public()
@@ -205,19 +221,10 @@ class LoginSession:
                             await self.browser.submit(code)
                         finally:
                             code = None
-                    elif action == "mode":
-                        if obj["mode"] not in ("sms", "qr"):
-                            reject()
-                        await self.browser.reset()
-                        self.mode, self.state = obj["mode"], "ready"
-                        self.code_allowed = False
-                        self.masked_phone = ""
                     elif action == "pointer":
                         if self.state != "verification":
                             reject("wrong_state")
                         await self.browser.pointer(obj["frame"], obj["points"])
-                    elif action == "cancel":
-                        await self.finish("cancelled")
                     if action == "frame":
                         picture = await self.browser.frame(self.state == "verification")
                         return dict(self.public(), **picture)
