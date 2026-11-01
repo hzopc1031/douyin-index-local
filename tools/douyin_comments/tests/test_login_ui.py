@@ -37,9 +37,10 @@ class LoginUiTests(unittest.IsolatedAsyncioTestCase):
         page = Mock(frames=frames)
         locator = page.locator.return_value.filter.return_value
         locator.count = AsyncMock(return_value=1)
-        locator.first.screenshot = AsyncMock(return_value=b'synthetic png')
+        locator.nth.return_value.evaluate = AsyncMock(return_value=True)
+        locator.nth.return_value.screenshot = AsyncMock(return_value=b'synthetic png')
         self.assertEqual(await snapshot(page), b'synthetic png')
-        masks = locator.first.screenshot.call_args.kwargs['mask']
+        masks = locator.nth.return_value.screenshot.call_args.kwargs['mask']
         self.assertEqual(len(masks), 4)
         for frame in frames:
             frame.locator.assert_called_once_with('input, textarea')

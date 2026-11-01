@@ -1,7 +1,7 @@
-"""ALL site-specific strings and schema interpretation. UNCALIBRATED.
+"""Site-specific strings and schema interpretation. Collection is UNCALIBRATED.
 
-Only synthetic fixtures have validated these assumptions. Edit this module when
-an explicitly authorized real-page calibration establishes different signals.
+Public login panel/QR selectors were calibrated on 2026-11-01. Account signals
+and collection schema still rely on synthetic fixtures pending live validation.
 """
 
 from dataclasses import dataclass
@@ -32,10 +32,14 @@ SIGNALS = {
     "captcha": ('[id*="captcha"]', '[class*="captcha-verify"]',
                 '[data-e2e="verify-dialog"]', 'iframe[src*="captcha"]',
                 'iframe[src*="verify"]', '[data-dyc-risk="yes"]'),
-    "qr": '[data-e2e="login-qr-code"]',
+    "qr": ('#douyin_login_comp_scan_code img[aria-label="二维码"], '
+           '[data-e2e="login-qr-code"]'),
     "title": '[data-e2e="video-desc"]',
     "count": '[data-e2e="comment-count"]',
 }
+# Public login DOM calibrated on Tencent, 2026-11-01 (no login submitted).
+# Overall CALIBRATED stays false until account signals and collection are verified.
+LOGIN_PANEL = '#login-panel-new, #douyin_login_comp_flat_panel'
 FIELDS = dict(status="status_code", comments="comments", cursor="cursor",
               more="has_more", total="total", id="cid", text="text",
               created="create_time", likes="digg_count",
