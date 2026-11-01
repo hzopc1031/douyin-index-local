@@ -52,3 +52,16 @@ class LoginUiTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Stop):
             await prepare(SimpleNamespace(control=control, page=page))
         page.get_by_text.assert_not_called()
+
+    async def test_stop_observers_have_independent_tracebacks(self):
+        control = Control()
+        control.stop(3, 'verification_widget')
+        observed = []
+        for _ in range(2):
+            try:
+                control.check()
+            except Stop as error:
+                observed.append(error)
+        self.assertEqual([(e.code, e.reason) for e in observed], [(3, 'verification_widget')] * 2)
+        self.assertIsNot(observed[0], observed[1])
+        self.assertIsNone(control.error.__traceback__)

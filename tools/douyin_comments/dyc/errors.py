@@ -21,7 +21,9 @@ class Control:
 
     def check(self):
         if self.error:
-            raise self.error
+            # Several tasks observe the same stop. Sharing an exception object
+            # also shares mutable tracebacks, including still-suspended frames.
+            raise Stop(self.error.code, self.error.reason)
 
     async def run(self, awaitable):
         task = asyncio.ensure_future(awaitable)
