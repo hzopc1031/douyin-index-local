@@ -45,8 +45,10 @@ class GapWorker:
                 self.process = context.Process(target=worker, args=(child,), daemon=True)
                 self.process.start()
                 child.close()
-            self.connection.send((capture, challenge))
             async with asyncio.timeout(10):
+                # Pipe backpressure must not block the HTTP loop or its expiry
+                # clock. Killing/closing the child also releases this send.
+                await asyncio.to_thread(self.connection.send, (capture, challenge))
                 while self.process.is_alive():
                     if self.connection.poll():
                         return self.connection.recv()

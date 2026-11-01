@@ -110,6 +110,21 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(value.encode('utf-16-le'), data, path.name)
         with Profile(self.profile):
             pass
+        async with self.browser() as reopened:
+            restored = await reopened.context.cookies(site.FAKE_ORIGIN)
+            self.assertEqual({c['name'] for c in restored}, {'sessionid'})
+            self.assertGreater(restored[0]['expires'], 0)
+
+    async def test_official_cookie_expiration_preserved(self):
+        import time
+        expiration = int(time.time()) + 3600
+        async with self.browser() as browser:
+            await browser.page.evaluate('success()')
+            await browser.context.add_cookies([dict(name='sessionid', value='synthetic-persistent-token',
+                domain='dyc.invalid', path='/', secure=True, expires=expiration)])
+            await browser.persist()
+            cookies = await browser.persistent.cookies(site.FAKE_ORIGIN)
+            self.assertEqual(cookies[0]['expires'], expiration)
 
     async def test_screenshots_hide_reflected_numbers_and_inputs_before_capture(self):
         async with self.browser() as browser:

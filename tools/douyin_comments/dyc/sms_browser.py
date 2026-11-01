@@ -13,6 +13,7 @@ import math
 import os
 import secrets
 import threading
+import time
 from urllib.parse import quote, unquote, urlsplit
 
 from . import site
@@ -36,6 +37,7 @@ RECTS = dict(slider_handle='.secsdk-captcha-drag-icon',
 COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
                 'sid_guard', 'sid_ucp_v1', 'ssid_ucp_v1', 'passport_csrf_token',
                 'passport_csrf_token_default', 'ttwid'}
+SESSION_COOKIE_SECONDS = 86400
 ASSET_DOMAINS = ('douyin.com', 'douyinpic.com', 'douyinvod.com', 'byteimg.com',
                  'bytedance.com', 'bytegecko.com', 'zijieapi.com', 'snssdk.com',
                  'pstatp.com', 'bytedance.net', 'ibytedtos.com')
@@ -403,6 +405,14 @@ class SmsBrowser:
                 not self.contains_private(json.dumps(cookie))]
         if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') for c in safe):
             raise Stop(4, 'login_cookie_missing')
+        # Chromium discards session-only cookies on a clean restart. Give only
+        # these allowlisted login cookies a conservative local 24-hour horizon;
+        # this never extends the platform's server-side session validity. Keep
+        # every explicit official Expires value unchanged. Restoring whole tabs
+        # would navigate before our network guards and is deliberately avoided.
+        for cookie in safe:
+            if cookie.get('expires', -1) < 0:
+                cookie['expires'] = time.time() + SESSION_COOKIE_SECONDS
         await self.persistent.add_cookies(safe)
 
     async def close(self):
