@@ -1,4 +1,5 @@
 """Exercise the actual mobile HTML/JS through Playwright's in-memory routes."""
+import asyncio
 import json
 from pathlib import Path
 import tempfile
@@ -37,6 +38,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                                                                  is_mobile=True, has_touch=True, service_workers='block')
             requests = []
             console = []
+            frame_requested, release_frame = asyncio.Event(), asyncio.Event()
             async def frontend(route):
                 req = route.request
                 if not req.url.startswith(ORIGIN + '/'):
@@ -47,6 +49,10 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 requests.append((req.method, target))
                 status, extra, data = await app.dispatch(req.method, target, headers,
                                                         (req.post_data or '').encode())
+                if (target == '/api' and json.loads(req.post_data or '{}').get('action') == 'frame'
+                        and not frame_requested.is_set()):
+                    frame_requested.set()
+                    await release_frame.wait()
                 if isinstance(data, dict):
                     data = json.dumps(data).encode()
                 await route.fulfill(status=status, headers=HEADERS | {'Content-Type': 'application/json'} | extra, body=data)
@@ -64,6 +70,9 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.locator('#login').wait_for(state='visible')
                 self.assertEqual(await page.locator('#token').input_value(), '')
                 await page.locator('#qrMode').click()
+                await asyncio.wait_for(frame_requested.wait(), 5)
+                self.assertTrue(await page.locator('#smsMode').is_disabled())
+                release_frame.set()
                 await page.locator('#frame').wait_for(state='visible')
                 self.assertTrue(await page.locator('#sms').is_hidden())
                 await page.locator('#smsMode').click()
@@ -84,5 +93,6 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(foreign)
                 self.assertTrue(all(method == 'POST' for method, path in requests if path in ('/auth', '/api')))
             finally:
+                release_frame.set()
                 await front.close()
                 await app.close()

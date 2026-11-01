@@ -14,15 +14,21 @@
     csrf: '连接来源校验失败，请使用终端显示的完整私网网址。', busy: '正在处理上一项操作，请稍候。',
     wrong_state: '当前不能执行此操作；可切换登录方式或结束会话。'};
   function clearInputs() { for (const id of ['token', 'phone', 'code']) $(id).value = ''; }
+  function controls() {
+    for (const id of ['unlock', 'send', 'submit', 'smsMode', 'qrMode', 'refresh', 'cancel'])
+      $(id).disabled = busy || Boolean(gesture) || terminal.has(state?.state);
+    if (state) {
+      $('send').disabled ||= state.resend_in > 0 || !['ready', 'code_sent'].includes(state.state);
+      $('submit').disabled ||= state.state !== 'code_sent';
+    }
+  }
   function render(data) {
     state = data; nonce = data.nonce;
     $('status').textContent = messages[data.state] || '正在准备。';
     $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
     $('picture').hidden = !(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state);
     $('details').textContent = `${data.phone || ''} 剩余 ${data.expires_in} 秒；发码冷却 ${data.resend_in} 秒；自动缺口尝试 ${data.auto_attempts}/3`;
-    $('send').disabled = data.resend_in > 0 || !['ready', 'code_sent'].includes(data.state);
-    $('submit').disabled = data.state !== 'code_sent';
-    for (const id of ['smsMode', 'qrMode', 'cancel']) $(id).disabled = terminal.has(data.state);
+    controls();
     if (terminal.has(data.state)) {
       clearInputs(); $('frame').removeAttribute('src'); frameId = ''; csrf = ''; nonce = '';
     }
@@ -51,11 +57,11 @@
   }
   async function run(fn) {
     if (busy || gesture) return;
-    busy = true; $('error').textContent = '';
+    busy = true; controls(); $('error').textContent = '';
     try { await fn(); }
     catch (error) { $('error').textContent = error.message.startsWith('操作') || Object.values(errors).includes(error.message)
       ? error.message : '连接中断。请回终端查看；已提交的操作不要重复发送。'; }
-    finally { busy = false; }
+    finally { busy = false; controls(); }
   }
   async function action(action, extra = {}) {
     const result = await post('/api', {action, nonce, ...extra});
@@ -87,6 +93,7 @@
     event.preventDefault(); $('frame').setPointerCapture(event.pointerId);
     const start = performance.now(); const p = point(event, start); p[2] = 0;
     gesture = {start, points: [p], frame: frameId, id: event.pointerId};
+    controls();
   };
   $('frame').onpointermove = event => {
     if (!gesture || gesture.id !== event.pointerId) return;
@@ -97,11 +104,11 @@
     if (!gesture || gesture.id !== event.pointerId) return;
     const saved = gesture; gesture = null;
     const p = point(event, saved.start);
-    if (p[2] > 5000) { $('error').textContent = '拖动请在 5 秒内完成，然后刷新截图。'; return; }
+    if (p[2] > 5000) { controls(); $('error').textContent = '拖动请在 5 秒内完成，然后刷新截图。'; return; }
     if (p[2] > saved.points.at(-1)[2]) saved.points.push(p);
     run(() => action('pointer', {frame: saved.frame, points: saved.points}));
   };
-  $('frame').onpointercancel = () => { gesture = null; };
+  $('frame').onpointercancel = () => { gesture = null; controls(); };
   window.addEventListener('pagehide', () => { clearInputs(); csrf = nonce = frameId = ''; $('frame').removeAttribute('src'); });
   setInterval(() => {
     if (!csrf || terminal.has(state?.state) || busy || gesture) return;
