@@ -4,6 +4,11 @@
 
 ## 启动与使用
 
+2026-11-02 调试入口允许 `--origin` 指定任意 HTTPS 域名，包括 `trycloudflare.com` 隧道；
+不再要求 `.ts.net` 后缀。仍须传精确 origin（不含路径、查询串或片段），显式端口仍限 1024–65535；
+Host、Origin 和 CSRF 校验保持不变。隧道示例：
+`--origin https://discretion-spokesman-pose-fair.trycloudflare.com`。
+
 服务器在 `~/douyin-comments` 已有独立环境时：
 
 ```sh

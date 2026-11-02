@@ -42,7 +42,7 @@ def parser():
     login = subs.add_parser("login", parents=[common], help="Wait for human login; refreshed private QR path on stderr")
     login.add_argument("--wait-seconds", type=positive, default=180, help="Login wait, at most 600 seconds")
     mobile = subs.add_parser("login-web", parents=[common], help="Short-lived private phone SMS/QR login (loopback only)")
-    mobile.add_argument("--origin", required=True, help="Exact Tailscale HTTPS origin, e.g. https://host.tailnet.ts.net:8444")
+    mobile.add_argument("--origin", required=True, help="Exact HTTPS origin, e.g. https://host.trycloudflare.com")
     mobile.add_argument("--port", type=positive, default=8766, help="Loopback port (default 8766)")
     mobile.add_argument("--no-token", action="store_true", help="Open phone login directly; supports background operation")
     mobile.add_argument("--token-ttl", type=positive, default=1800, help="Token validity in seconds (default 1800)")

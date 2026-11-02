@@ -31,7 +31,7 @@ HEADERS = {'Cache-Control': 'no-store, max-age=0', 'Pragma': 'no-cache',
 def origin_checked(value):
     try:
         url = urlsplit(value)
-        if (url.scheme != 'https' or not url.hostname or not url.hostname.endswith('.ts.net')
+        if (url.scheme != 'https' or not url.hostname
                 or url.username or url.password or url.path or url.query or url.fragment
                 or not re.fullmatch(r'[a-z0-9.-]+(?::[0-9]{1,5})?', url.netloc)
                 or url.port is not None and not 1024 <= url.port <= 65535):

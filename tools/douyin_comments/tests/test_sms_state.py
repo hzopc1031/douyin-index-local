@@ -383,12 +383,28 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b'200 OK', writer.data)
         self.assertIn(b'text/html', writer.data)
 
-    def test_only_exact_tailscale_https_origin(self):
-        self.assertEqual(origin_checked(ORIGIN), ORIGIN)
+    def test_exact_https_origin_accepts_non_tailscale_hosts(self):
+        for value in (ORIGIN, 'https://dyc.example.com', 'https://dyc.example.com:8444',
+                      'https://discretion-spokesman-pose-fair.trycloudflare.com'):
+            self.assertEqual(origin_checked(value), value)
         for value in ('http://dyc.example.ts.net', ORIGIN+'/', ORIGIN+'?phone='+PHONE,
-                      'https://user@dyc.ts.net', 'https://evil.invalid', 'https://dyc.ts.net:107'):
+                      'https://user@dyc.ts.net', 'https://', ORIGIN+'#fragment',
+                      'https://dyc.ts.net:107'):
             with self.assertRaises(Stop):
                 origin_checked(value)
+
+    async def test_tunnel_origin_keeps_exact_header_and_csrf_checks(self):
+        origin = 'https://discretion-spokesman-pose-fair.trycloudflare.com'
+        self.app = WebApp(origin_checked(origin), 'synthetic-owner-token',
+                          lambda: self.session, clock=self.clock)
+        self.headers.update(host=origin.removeprefix('https://'), origin=origin)
+        await self.auth()
+        self.assertEqual((await self.request('/api', {'action': 'status'}))[0], 200)
+        for change in ({'origin': ORIGIN}, {'host': 'dyc.example.ts.net:8444'},
+                       {'origin': ''}, {'x-dyc-csrf': ''}):
+            status, _, data = await self.request('/api', {'action': 'status'}, self.headers | change)
+            self.assertEqual((status, data['error']), (403, 'csrf'))
+        self.browser.send.assert_not_awaited()
 
     async def test_launcher_binds_only_loopback_and_writes_token_only_to_tty(self):
         class Terminal(io.StringIO):
