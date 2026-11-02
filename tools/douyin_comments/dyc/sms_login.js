@@ -37,6 +37,8 @@
     let raw = JSON.stringify(data);
     for (const key of Object.keys(data)) delete data[key];
     try {
+      // /auth and mode changes can take 90 seconds. Keep the request pending;
+      // busy suppresses polling until it completes, with no client-side retry.
       const pending = fetch(path, {method: 'POST', cache: 'no-store', credentials: 'same-origin',
         headers: {'Content-Type': 'application/json', 'X-Dyc-CSRF': csrf}, body: raw});
       raw = '';
@@ -85,7 +87,7 @@
   $('unlock').onclick = unlock;
   if (noToken) {
     $('auth').hidden = true;
-    $('status').textContent = '正在准备手机登录。';
+    $('status').textContent = '正在准备手机登录，可能需要约 90 秒，请保持页面打开。';
     $('expiry').textContent = '登录会话最长 10 分钟；遇到安全验证或访问限制会停止。';
     unlock();
   }

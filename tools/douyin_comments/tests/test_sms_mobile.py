@@ -37,7 +37,11 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                     await route.abort()
             browser = SmsBrowser(Path(root) / 'profile', backend=official)
             await browser.start()
-            browser.start = AsyncMock()  # owned browser already active, no second profile
+            start_requested, release_start = asyncio.Event(), asyncio.Event()
+            async def delayed_start():
+                start_requested.set()
+                await release_start.wait()
+            browser.start = AsyncMock(side_effect=delayed_start)  # no second profile
             session = LoginSession(browser, SmsQuota(Path(root) / 'state'))
             app = WebApp(ORIGIN, 'synthetic-owner-token', lambda: session, no_token=no_token)
             front = await browser.persistent.browser.new_context(viewport=dict(width=390, height=844),
@@ -66,6 +70,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             await front.route_web_socket('**/*', lambda socket: socket.close())
             await front.add_cookies([dict(name='other_tool', value='synthetic-theme', url=ORIGIN)])
             page = await front.new_page()
+            await page.clock.install()
             page.on('console', lambda item: console.append(item.text))
             page.on('pageerror', lambda error: console.append(str(error)))
             try:
@@ -74,6 +79,13 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 if not no_token:
                     await page.locator('#token').fill('synthetic-owner-token')
                     await page.locator('#unlock').click()
+                await asyncio.wait_for(start_requested.wait(), 5)
+                # Simulate a mobile page waiting longer than the server budget.
+                # It must neither cancel /auth nor poll/retry while it is pending.
+                await page.clock.fast_forward(95_000)
+                self.assertEqual([r for r in requests if r[0] == 'POST'], [('POST', '/auth')])
+                self.assertTrue(await page.locator('#login').is_hidden())
+                release_start.set()
                 await page.locator('#login').wait_for(state='visible')
                 if no_token:
                     self.assertTrue(await page.locator('#auth').is_hidden())
@@ -106,6 +118,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(foreign)
                 self.assertTrue(all(method == 'POST' for method, path in requests if path in ('/auth', '/api')))
             finally:
+                release_start.set()
                 release_frame.set()
                 await front.close()
                 await app.close()

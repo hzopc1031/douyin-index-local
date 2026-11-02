@@ -48,6 +48,24 @@ ASSET_DOMAINS = ('douyin.com', 'douyinpic.com', 'douyinvod.com', 'byteimg.com',
                  'pstatp.com', 'bytedance.net', 'ibytedtos.com', 'douyinstatic.com',
                  'bytegoofy.com', 'bytetos.com', 'bytescm.com', 'yhgfb-cn-static.com')
 AUTH_DOMAINS = ('douyin.com', 'zijieapi.com', 'snssdk.com')
+LOGIN_PANEL_SECONDS = 60
+# SDK scripts and static data observed on the official login landing page.
+# These hosts do NOT inherit the general API/POST permission above.
+LOGIN_STATIC_DOMAINS = ('applogcdn.com', 'ibytedapm.com', 'bytednsdoc.com',
+                        'bytetcc.com', 'effectcdn.com', 'byteeffecttos.com')
+
+
+def login_static(url, method, resource):
+    parsed = urlsplit(url)
+    if (method not in ('GET', 'HEAD') or
+            not in_domains(parsed.hostname or '', LOGIN_STATIC_DOMAINS)):
+        return False
+    if resource.lower() in ('script', 'stylesheet', 'image', 'font', 'media'):
+        return True
+    # fetch/XHR is also used to load SDK bundles/data. An arbitrary config or
+    # reporting endpoint is not a static asset just because it uses GET.
+    return resource.lower() in ('xhr', 'fetch') and parsed.path.lower().endswith(
+        ('.js', '.css', '.wasm', '.json', '.bin', '.zip'))
 
 # All DOM text (including reflected codes), form fields and editable content
 # are hidden BEFORE rasterization, in every frame. The trusted phone UI gives
@@ -109,7 +127,7 @@ class SmsBrowser:
         self.diagnostic = None
         self.fatal_reason = ''
         self.fatal_context = None
-        self.step('initializing', 'browser startup', 35)
+        self.step('initializing', 'browser startup', 90)
         self.startup_limits = startup_limits
         self.profile = Profile(profile)
         self.display = Display()  # always owned; never use :107 or inherited DISPLAY
@@ -244,7 +262,8 @@ class SmsBrowser:
         host = parsed.hostname or ''
         allowed = (parsed.scheme == 'https' and parsed.port in (None, 443) and
                    not parsed.username and not parsed.password and
-                   in_domains(host, ASSET_DOMAINS) and
+                   (in_domains(host, ASSET_DOMAINS) or
+                    login_static(request.url, request.method, request.resource_type)) and
                    not self.contains_private(request.url) and
                    request.method in ('GET', 'HEAD', 'POST', 'OPTIONS'))
         if request.method == 'POST':
@@ -334,8 +353,12 @@ class SmsBrowser:
                 # POST and credential-bearing redirects are always rejected.
                 source = urlsplit(request['url'])
                 asset = event.get('resourceType') in ('Script', 'Stylesheet', 'Image', 'Font', 'Media')
-                approved_asset = (asset and in_domains(source.hostname or '', ASSET_DOMAINS)
-                                  and in_domains(target.hostname or '', ASSET_DOMAINS))
+                resource = event.get('resourceType', '')
+                approved_asset = (
+                    (asset and in_domains(source.hostname or '', ASSET_DOMAINS) or
+                     login_static(source.geturl(), request['method'], resource)) and
+                    (asset and in_domains(target.hostname or '', ASSET_DOMAINS) or
+                     login_static(target.geturl(), request['method'], resource)))
                 denied = denied or (request['method'] not in ('GET', 'HEAD') or
                           target.scheme != 'https' or target.port not in (None, 443) or
                           target.username is not None or target.password is not None or
@@ -365,8 +388,8 @@ class SmsBrowser:
         self.step('navigate', 'DOMContentLoaded on fixed login URL', 15)
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
-        self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', 20)
-        deadline = time.monotonic() + 20
+        self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', LOGIN_PANEL_SECONDS)
+        deadline = time.monotonic() + LOGIN_PANEL_SECONDS
         clicked = False
         while time.monotonic() < deadline:
             self.require_origin()

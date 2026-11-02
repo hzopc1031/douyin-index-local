@@ -115,7 +115,7 @@ class WebApp:
                     self.starting = True
                     try:
                         self.session = self.factory()
-                        async with asyncio.timeout(35):
+                        async with asyncio.timeout(90):
                             await self.session.browser.start()
                         cookie = secrets.token_urlsafe(32)
                         self.cookie_hash = hashlib.sha256(cookie.encode()).digest()

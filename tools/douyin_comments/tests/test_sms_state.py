@@ -246,6 +246,20 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         status, _, data = await self.request('/api', {'action': 'status'})
         self.assertEqual((status, data['error']), (403, 'csrf'))
 
+    async def test_auth_and_mode_allow_full_panel_wait_with_startup_headroom(self):
+        original = asyncio.timeout
+        budgets = []
+        def capture(seconds):
+            budgets.append(seconds)
+            return original(seconds)
+        with patch('dyc.sms_web.asyncio.timeout', capture):
+            await self.auth()
+            self.assertEqual(budgets, [90])
+            budgets.clear()
+            await self.request('/api', dict(action='mode', nonce=self.session.nonce, mode='qr'))
+            self.assertEqual(budgets, [90])
+        self.browser.reset.assert_awaited_once()
+
     async def test_unrelated_cookies_accepted_duplicate_auth_rejected(self):
         await self.auth()
         own = self.headers['cookie']

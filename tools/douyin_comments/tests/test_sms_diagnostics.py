@@ -4,8 +4,9 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from dyc.errors import Stop
 from dyc.sms_browser import SmsBrowser
@@ -13,6 +14,55 @@ from dyc.sms_state import LoginSession, SmsQuota
 
 
 class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_phone_can_become_editable_after_old_twenty_second_deadline(self):
+        browser = SmsBrowser('/unused')
+        now = 0
+        phone = Mock(is_visible=AsyncMock(return_value=True))
+        phone.is_editable = AsyncMock(side_effect=lambda: now >= 24)
+        panel = Mock(count=AsyncMock(return_value=1))
+        panel.filter.return_value = panel
+        browser.page = Mock(url=browser.url)
+        browser.page.goto = AsyncMock()
+        browser.page.locator.side_effect = lambda selector: phone if 'normal-input' in selector else panel
+        browser.challenge = AsyncMock(return_value=None)
+        browser.inside = AsyncMock(return_value=False)
+        async def advance(_):
+            nonlocal now
+            now += 4
+        with patch('dyc.sms_browser.time', SimpleNamespace(monotonic=lambda: now)), \
+             patch('dyc.sms_browser.asyncio', SimpleNamespace(sleep=advance)):
+            await browser.reset()
+        self.assertEqual(now, 24)
+        self.assertEqual(browser.stage_timeout, 60)
+        browser.page.goto.assert_awaited_once()
+
+    async def test_new_cdn_permissions_are_static_only(self):
+        cases = [
+            ('lf-static.applogcdn.com', '/sdk.js', 'script', 'GET', True),
+            ('lf3-short.ibytedapm.com', '/sdk.js', 'script', 'GET', True),
+            ('lf3-static.bytednsdoc.com', '/sdk.json', 'fetch', 'GET', True),
+            ('lf3-config.bytetcc.com', '/common_config', 'xhr', 'GET', False),
+            ('lf6-effectcdn-tos.byteeffecttos.com', '/model.wasm', 'fetch', 'GET', True),
+            ('lf3.effectcdn.com', '/style.css', 'stylesheet', 'GET', True),
+            ('lf-static.applogcdn.com', '/sdk.js', 'script', 'POST', False),
+            ('lf3-short.ibytedapm.com', '/report', 'fetch', 'POST', False),
+            ('lf3-short.ibytedapm.com', '/report', 'fetch', 'GET', False),
+            ('lf3-short.ibytedapm.com', '/login', 'document', 'GET', False),
+            ('lf-static.applogcdn.com.evil.invalid', '/sdk.js', 'script', 'GET', False),
+            ('invalid', '/sdk.js', 'script', 'GET', False),
+        ]
+        for host, path, resource, method, allowed in cases:
+            with self.subTest(host=host, resource=resource, method=method):
+                browser = SmsBrowser('/unused')
+                browser.page = Mock()
+                request = Mock(url='https://' + host + path, method=method, resource_type=resource)
+                request.frame.page = browser.page
+                request.is_navigation_request.return_value = resource == 'document'
+                route = Mock(request=request, abort=AsyncMock(), continue_=AsyncMock())
+                await browser._route(route)
+                self.assertEqual(route.continue_.await_count, int(allowed))
+                self.assertEqual(route.abort.await_count, int(not allowed))
+
     async def test_timeout_redacts_url_title_exception_and_writes_private_evidence(self):
         with tempfile.TemporaryDirectory() as root:
             browser = SmsBrowser(Path(root) / 'profile', state_dir=root)
@@ -56,6 +106,9 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
     async def test_only_allowlisted_static_redirects_can_cross_hosts(self):
         cases = [
             ('Script', 'GET', 'https://lf3.byteimg.com/app.js', False),
+            ('Script', 'GET', 'https://lf-static.applogcdn.com/sdk.js', False),
+            ('Script', 'POST', 'https://lf-static.applogcdn.com/sdk.js', True),
+            ('XHR', 'GET', 'https://lf-static.applogcdn.com/report', True),
             ('Stylesheet', 'GET', 'https://lf3.byteimg.com/app.css', False),
             ('Script', 'GET', 'https://evil.invalid/app.js', True),
             ('Script', 'POST', 'https://lf3.byteimg.com/app.js', True),

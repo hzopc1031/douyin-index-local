@@ -185,7 +185,9 @@ class LoginSession:
                     reject("replayed_action")
                 self.nonce = secrets.token_urlsafe(24)  # consumed before any await
             try:
-                async with asyncio.timeout(max(.001, min(25, self.deadline-self.clock()))):
+                # Switching mode also reloads the login panel (60-second wait).
+                budget = 90 if action == 'mode' else 25
+                async with asyncio.timeout(max(.001, min(budget, self.deadline-self.clock()))):
                     # Cancellation must never probe/solve another challenge or
                     # perform any new online action before releasing the lease.
                     if action == "cancel":
