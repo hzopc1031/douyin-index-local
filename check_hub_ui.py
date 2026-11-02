@@ -64,6 +64,7 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [])
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['missing_latest'] and i==6 else 12000+i*900,
                                     composite_index=30000+i*1200) for i in range(7)])
@@ -183,7 +184,7 @@ def run(output=None):
                 assert '—' in page.locator('#trendSummary').inner_text()
                 fixture['audience']='missing'
                 page.evaluate('loadInsights()')
-                assert '尚无' in page.locator('#audienceSummary').inner_text()
+                assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
                 page.locator('[data-platform=baidu]').click()
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
