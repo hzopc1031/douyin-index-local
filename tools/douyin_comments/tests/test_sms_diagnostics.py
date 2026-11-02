@@ -175,3 +175,15 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                          ('POST', 'sdk.amemv.com', '/register'))
         self.assertTrue(event['allowed'])
         self.assertNotIn('secret', log.getvalue())
+
+    async def test_websocket_does_not_connect_after_stop_or_cancel(self):
+        for stopped in ('fatal', 'cancel'):
+            browser = SmsBrowser('/unused')
+            if stopped == 'fatal':
+                browser.fatal = True
+            else:
+                browser.cancel.set()
+            socket = Mock(url='wss://sdk.bytedance.com/register', close=AsyncMock(), connect_to_server=Mock())
+            await browser.websocket(socket)
+            socket.close.assert_awaited_once()
+            socket.connect_to_server.assert_not_called()

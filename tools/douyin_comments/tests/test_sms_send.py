@@ -98,6 +98,16 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_send([('/report', 200, {'code': 0}), failed, ('/sms', 200, {})])
         self.assertEqual(result['outcome'], 'business_failed')
 
+    async def test_platform_stop_outcomes_take_precedence_over_success(self):
+        success = ('/passport/precheck', 200, {'code': 0})
+        for reason, outcome in (('Security verification required', 'verification_required'),
+                                ('too many', 'rate_limited'), ('risk control', 'access_denied')):
+            stopped = ('/send_code', 200, {'code': 9, 'description': reason})
+            for responses in ((success, stopped), (stopped, success)):
+                with self.subTest(outcome=outcome, responses=responses):
+                    result = await self.run_send(responses)
+                    self.assertEqual(result['outcome'], outcome)
+
     async def test_redirected_get_late_body_and_old_response(self):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))

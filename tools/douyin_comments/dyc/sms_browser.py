@@ -327,7 +327,7 @@ class SmsBrowser:
         return ''
 
     async def websocket(self, socket):
-        reason = self.blocked_url(socket.url)
+        reason = 'stopped' if self.fatal or self.cancel.is_set() else self.blocked_url(socket.url)
         if reason:
             audit('request_guard', session=self.audit_id, allowed=False, reason=reason,
                   **self.request_metadata(socket.url, 'GET'))
@@ -599,7 +599,10 @@ class SmsBrowser:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        result = next((r for r in results if r['outcome'] == 'accepted'), None)
+        result = next((r for r in results if r['outcome'] in
+                       ('verification_required', 'rate_limited', 'access_denied')), None)
+        if result is None:
+            result = next((r for r in results if r['outcome'] == 'accepted'), None)
         if result is None:
             result = next((r for r in results if r['outcome'] != 'unconfirmed'),
                           results[-1] if results else sms_result(None, None))
