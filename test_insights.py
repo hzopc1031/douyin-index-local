@@ -217,6 +217,22 @@ class InsightApiTests(_ApiTests):
         self.assertFalse(data['live_request'])
         self.assertFalse(self.calls)
         self.assertEqual(before, (self.hub.store.get('daily'), self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]))
+        # A listed historical range must remain readable after the online window moves on.
+        response = await self.client.get('/api/v1/insights', params={
+            'keyword': '酵素', 'kind': 'audience', 'start_date': old['start_date'], 'end_date': old['end_date']}, headers=headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['status'], 'available')
+        # Historical reads must not relax either online submission endpoint.
+        for path, query in [('insights/queries', old), ('queries', {k:v for k,v in old.items() if k != 'kind'})]:
+            response = await self.client.post('/api/v1/'+path, json=query,
+                                             headers={**self.bearer, 'Idempotency-Key': 'reject-old-'+path.replace('/', '-')})
+            self.assertEqual(response.status, 400)
+            self.assertEqual((await response.json())['error']['code'], 'invalid_dates')
+        for start, end in [('2022-01-08','2022-01-07'), ('2022-01-01','2025-01-07'), ('invalid','2022-01-07')]:
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': '酵素', 'kind': 'audience', 'start_date': start, 'end_date': end}, headers=headers)
+            self.assertEqual(response.status, 400)
+        self.assertFalse(self.calls)
         self.assertEqual((await self.client.get('/api/v1/insights/ranges?keyword=酵素&kind=audience')).status, 401)
         for params in ['keyword=酵素', 'keyword=&kind=audience', 'keyword=酵素&kind=unknown',
                        'keyword=酵素&kind=audience&extra=1', 'keyword=酵素&keyword=其他&kind=audience']:

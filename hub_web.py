@@ -590,7 +590,7 @@ def mount(app, hub):
         body={'platform':request.query.get('platform','douyin'),'keywords':[request.query.get('keyword')],
               'kind':request.query.get('kind'),'end_date':request.query.get('end_date')}
         if request.query.get('start_date'):body['start_date']=request.query['start_date']
-        query=validate_insight(body)
+        query=validate_insight(body, historical=True)
         result=s.insight(query)
         newer_no_data=None
         if result and result.get('no_data'):

@@ -94,6 +94,16 @@ def run(output=None):
                 if output and width == 430:
                     page.screenshot(path=str(output/'hub-audience-uncollected.png'))
 
+                # Complete server history must retain not-yet-created tasks from this session.
+                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['酵素'],start_date:'2026-10-25',end_date:'2026-10-31'},'synthetic-pending');renderReportProgress();loadInsights()")
+                assert '待提交' in page.locator('#audienceData').inner_text()
+                assert '继续提交未确认任务' in page.locator('#audienceData').inner_text()
+                assert not page.locator('#collectAudience').count()
+                page.evaluate("reportBatch.entries.find(e=>e.body.kind==='audience').error='synthetic disconnect';loadInsights()")
+                assert '提交未确认' in page.locator('#audienceData').inner_text()
+                assert not writes
+                page.evaluate('reportBatch=null;renderReportProgress()')
+
                 for status, attempt, title in [
                     ('no_data', None, '平台无数据'),
                     ('not_collected', dict(status='failed', error_code='business_error'), '采集失败'),

@@ -190,7 +190,8 @@ INDEX_HUB_REQUIRE_BROWSER_TESTS=1 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 xvfb-run -a .
   此时「未采集」还提示无法排除更早任务曾失败/跳过。
 - **完整历史列表需重启 gateway**：`hub_store.py`、`hub_web.py` 新增只读
   `GET /api/v1/insights/ranges`，列出全部已存日期段及每段最近任务状态，
-  无数据库迁移，不需要重启 desktop。现有接口没有全历史分页能力，这是新增后端的原因。
+  无数据库迁移，不需要重启 desktop。`hub_insights.py` 和日期校验另将只读历史与在线限制分开，
+  过了近两年的已存范围仍可读取，在线提交仍限近两年。现有接口没有全历史分页能力，这是新增后端的原因。
 
 离线验证新增 `.venv/bin/python check_audience_ui.py --screenshots /workspace/content/dev`，
 覆盖 430/1280px 四种空态、两段切换、完整列表/旧网关回退、过期响应和打开查询但不提交。

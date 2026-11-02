@@ -366,13 +366,14 @@ function knownAudienceJobs(keyword){
  return [...jobs,...current].filter(j=>j.query.kind==='audience'&&j.query.platform==='douyin'&&j.query.keywords[0]===keyword).sort((a,b)=>(b.created_at||0)-(a.created_at||0));
 }
 async function audienceHistory(keyword){
+ const pending=(reportBatch?.entries||[]).filter(e=>!e.jobId&&e.body.kind==='audience'&&e.body.keywords[0]===keyword).map(e=>({...e.body,status:'not_submitted',unconfirmed:Boolean(e.error)}));
  if(audienceRangesSupported){
-  try{return {...await api('insights/ranges?'+new URLSearchParams({keyword,kind:'audience'})),complete:true}}
-  catch(e){if(e.status===404)audienceRangesSupported=false;else return {ranges:[],attempts:[],complete:false,unavailable:true}}
+  try{const history=await api('insights/ranges?'+new URLSearchParams({keyword,kind:'audience'}));return {...history,attempts:[...pending,...history.attempts],complete:true}}
+  catch(e){if(e.status===404)audienceRangesSupported=false;else return {ranges:[],attempts:pending,complete:false,unavailable:true}}
  }
  const known=knownAudienceJobs(keyword);
  return {complete:false,ranges:known.filter(j=>j.status==='succeeded'&&j.result&&!j.result.no_data).map(j=>({...j.query,status:'available'})),
-  attempts:known.map(j=>({...j.query,status:j.status,error_code:j.error?.code,updated_at:j.updated_at}))};
+  attempts:[...pending,...known.map(j=>({...j.query,status:j.status,error_code:j.error?.code,updated_at:j.updated_at}))]};
 }
 function renderAudienceRanges(history,current){
  const ranges=new Map();
@@ -388,9 +389,9 @@ function renderAudienceEmpty(data,history){
  const attempt=history.attempts.find(j=>j.start_date===start&&j.end_date===end);
  let title,detail,collect=false;
  // Saved data wins above; otherwise use the latest task only if it postdates the saved empty answer.
- const taskIsNewer=attempt&&(!data.result?.metadata?.fetched_at||attempt.updated_at>=Date.parse(data.result.metadata.fetched_at)/1000);
+ const taskIsNewer=attempt&&(attempt.status==='not_submitted'||!data.result?.metadata?.fetched_at||attempt.updated_at>=Date.parse(data.result.metadata.fetched_at)/1000);
  if(taskIsNewer&&['queued','running','not_submitted'].includes(attempt.status)){
-  title='人群采集待完成';detail='当前模块：'+statusName(attempt.status)+'。可在下方任务进度或「采集任务」查看，不会自动重复提交。';
+  title='人群采集待完成';detail=attempt.status==='not_submitted'?'当前模块'+(attempt.unconfirmed?'提交未确认':'待提交')+'。请展开下方任务进度，点击「继续提交未确认任务」，沿用原批次继续。':'当前模块：'+statusName(attempt.status)+'。可在下方任务进度或「采集任务」查看，不会自动重复提交。';
  }else if(taskIsNewer&&attempt.error_code==='skipped_trend_no_data'){
   title='趋势无数据已跳过';detail='该词趋势无数据，已跳过本日期段的人群采集；没有发起人群请求，也未消耗该模块的在线次数。';
  }else if(taskIsNewer&&['failed','partial'].includes(attempt.status)){

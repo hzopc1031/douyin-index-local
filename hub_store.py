@@ -42,7 +42,7 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
 
 
-def validate_query(body):
+def validate_query(body, *, historical=False):
     if type(body) is not dict or set(body) - {'platform', 'keywords', 'start_date', 'end_date'}:
         raise HubError('invalid_query', '仅接受 platform、keywords、start_date、end_date。')
     if body.get('platform', 'douyin') != 'douyin':
@@ -61,12 +61,14 @@ def validate_query(body):
             earliest = today.replace(year=today.year-2)
         except ValueError:
             earliest = today.replace(year=today.year-2, day=28)
-        if end.isoformat() != end_text or end >= today or start < earliest:
+        if end.isoformat() != end_text or end >= today or (not historical and start < earliest):
             raise ValueError
         if not 0 <= (end-start).days < 731 or ('start_date' in body and body['start_date'] != start.isoformat()):
             raise ValueError
     except (ValueError, TypeError, OverflowError):
-        raise HubError('invalid_dates', '日期格式 YYYY-MM-DD，仅接受最近两个日历年内的过去日期；截止日以官方页面为准。') from None
+        message = ('日期格式 YYYY-MM-DD，须为过去日期，起止有序且最多 731 天。' if historical else
+                   '日期格式 YYYY-MM-DD，仅接受最近两个日历年内的过去日期；截止日以官方页面为准。')
+        raise HubError('invalid_dates', message) from None
     return {'platform': 'douyin', 'keywords': list(words), 'start_date': start.isoformat(),
             'end_date': end.isoformat()}
 
