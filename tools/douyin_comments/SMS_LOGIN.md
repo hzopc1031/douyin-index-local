@@ -7,11 +7,15 @@
 服务器在 `~/douyin-comments` 已有独立环境时：
 
 ```sh
-systemd-run --user --unit=dyc-sms-login --collect \
-  bash -c '. "$HOME/douyin-comments/env.sh"; exec "$HOME/douyin-comments/app/tools/douyin_comments/bin/dyc" login-web --no-token --port 8766 --origin https://tencent-cvm.taila04aef.ts.net:8444'
+cd ~/douyin-comments
+. ./env.sh
+nohup app/tools/douyin_comments/bin/dyc login-web --no-token --port 8766 \
+  --origin https://tencent-cvm.taila04aef.ts.net:8444 \
+  >> login-web.log 2>&1 < /dev/null &
+echo $! > login-web.pid
 ```
 
-只绑定 `127.0.0.1:8766`。HTTP 服务启动及本机 `curl http://127.0.0.1:8766/` 不启动浏览器、不发短信；手机页面加载后自动建立登录会话并打开独立浏览器。免口令模式在手机访问前持续等待，不需要 TTY，不生成或打印口令。不要重复启动已有进程。
+只绑定 `127.0.0.1:8766`。HTTP 服务启动及本机 `curl http://127.0.0.1:8766/` 不启动浏览器、不发短信；手机页面加载后自动建立登录会话并打开独立浏览器。此服务器用户未启用 linger，使用 nohup 保持后台运行。免口令模式在手机访问前持续等待，不需要 TTY，不生成或打印口令。不要重复启动已有进程。
 
 Tailscale 管理员用独立 HTTPS 8444 映射到 `http://127.0.0.1:8766`，保留其它映射。手机连接该 tailnet 后打开完整 HTTPS 地址，直接看到手机号、发送验证码和 6 位短信验证码输入框；刷新页面恢复当前会话。输入只在手机和登录进程内处理，不记入日志。发送或提交后清空输入框。
 
@@ -39,14 +43,18 @@ DYC_REQUIRE_BROWSER_TESTS=1 "$DYC_PYTHON" -m unittest discover -s tests -p 'test
 
 ## 登录后核对与停止
 
-用户确认手机成功提示；管理员检查 `journalctl --user -u dyc-sms-login --no-pager` 的 `login_succeeded` / `exit_code:0`。两者仅表示本次 dyc 成功信号及保存完成；随后用一条公开视频、`--top 30 --max-pages 3` 验证重新打开 profile 后的评论采集。遇验证码、403/429 或登录失效就停。
+用户确认手机成功提示；管理员检查 `~/douyin-comments/login-web.log` 的 `login_succeeded` / `exit_code:0`。两者仅表示本次 dyc 成功信号及保存完成；随后用一条公开视频、`--top 30 --max-pages 3` 验证重新打开 profile 后的评论采集。遇验证码、403/429 或登录失效就停。
 
 指数只在已有工作台界面核对登录状态，不发起指数查询；管理员用 `systemctl show douyin-index-desktop.service douyin-index-gateway.service -p Id -p ActiveState -p MainPID -p NRestarts` 比较前后进程状态。进程运行不等于账号已登录，不能据此声称双端登录验证通过。
 
-停止登录服务：
+停止登录服务（核对 PID 对应本次命令，成功自动退出后不必再停）：
 
 ```sh
-systemctl --user stop dyc-sms-login.service
+pid=$(cat ~/douyin-comments/login-web.pid)
+case "$(ps -p "$pid" -o args=)" in
+  *" -m dyc login-web --no-token --port 8766 "*) kill -TERM "$pid" ;;
+  *) echo 'login-web 已退出或 PID 已变化，未发送信号' ;;
+esac
 ```
 
 管理员只撤本次映射：`tailscale serve --bg --https=8444 off`，不使用 reset 或 Funnel。成功退出后无需再停止进程。保留短信计数、登录 profile 和所有结果。
