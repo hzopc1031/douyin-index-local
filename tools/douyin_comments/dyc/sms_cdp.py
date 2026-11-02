@@ -1,4 +1,4 @@
-"""Install response interception before any child target runs JavaScript.
+"""Install response interception on child targets that support Fetch.
 
 An iframe can start its first POST before a framenavigated callback runs, and
 enabling Fetch while that POST is paused is too late for its response. Use
@@ -14,6 +14,13 @@ from .errors import Stop
 
 def failure():
     return Stop(4, 'login_redirect_guard_failed')
+
+
+class ProtocolError(Stop):
+    """Keep only the numeric code, never the credential-bearing CDP message."""
+    def __init__(self, code):
+        super().__init__(4, 'login_redirect_guard_failed')
+        self.protocol_error_code = code if type(code) is int else None
 
 
 class Target:
@@ -56,7 +63,7 @@ class Target:
                 if 'error' in data:
                     code = data['error'].get('code')
                     self.protocol_error_code = code if type(code) is int else None
-                    pending.set_exception(failure())
+                    pending.set_exception(ProtocolError(code))
                 else:
                     pending.set_result(data.get('result', {}))
         else:
@@ -78,21 +85,31 @@ class Target:
         elif method == 'Fetch.requestPaused':
             self.owner.browser.guard_response(params, self)
 
+    async def optional_domain(self, method, params):
+        try:
+            await self.send(method, params)
+        except ProtocolError as error:
+            # Some worklets/worker/iframe targets do not implement these CDP
+            # domains. Keep the owning page guard and let the component load.
+            # A timeout, closed transport or other protocol failure is distinct.
+            if error.protocol_error_code != -32601:
+                raise
+
     async def initialize(self):
         method = 'fetch_enable'
         try:
             # Dedicated-worker requests are intercepted by the owning page's
             # Fetch agent. Worker targets themselves
             # do not expose Fetch; invoking it fails with method-not-found.
-            # Keep recursive attachment; iframe targets still need their own
-            # Fetch agent before any child script runs. Other target kinds fail
-            # closed if they cannot install the guard.
+            # Probe other types (including future/unknown types) by capability.
+            # The authorized login-debug fallback skips an unsupported child
+            # Fetch agent; it does not claim that all such traffic is guarded.
             if self.info.get('type') != 'worker':
-                await self.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
+                await self.optional_domain('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
             # Recursion is necessary: a page's child iframe/worker may itself
-            # create another target. Each is held until its guard is installed.
+            # create another target. Install supported guards before resuming.
             method = 'auto_attach'
-            await self.send('Target.setAutoAttach', dict(autoAttach=True, waitForDebuggerOnStart=True, flatten=False))
+            await self.optional_domain('Target.setAutoAttach', dict(autoAttach=True, waitForDebuggerOnStart=True, flatten=False))
             method = 'resume_target'
             await self.send('Runtime.runIfWaitingForDebugger')
             ready = self.owner.ready.get(self.info['targetId'])
@@ -109,7 +126,8 @@ class Target:
                 ready = self.owner.ready.get(self.info['targetId'])
                 if ready is not None and not ready.done():
                     ready.set_exception(failure())
-            # Do not resume an unguarded child, even on protocol/version errors.
+            # Unexpected failures still stop preparation; only explicit
+            # method-not-found on the optional domains permits resumption.
 
     def stop(self):
         self.closed = True

@@ -1,4 +1,4 @@
-"""Child-target interception must precede its first script; failure never resumes."""
+"""Guard supported children; unsupported domains must not freeze login loading."""
 import asyncio
 from contextlib import redirect_stdout, redirect_stderr
 import io
@@ -10,7 +10,8 @@ from dyc.sms_cdp import Target
 
 
 class TargetTests(unittest.IsolatedAsyncioTestCase):
-    async def check_initialization(self, fail=False, kind="iframe"):
+    async def check_initialization(self, errors=None, kind="iframe", fatal=False):
+        errors = errors or {}
         methods = []
         owner = SimpleNamespace(browser=SimpleNamespace(fatal=False), ready={}, closing=False)
         target = None
@@ -19,31 +20,55 @@ class TargetTests(unittest.IsolatedAsyncioTestCase):
                 message = json.loads(params['message'])
                 methods.append(message['method'])
                 result = {'id': message['id'], 'result': {}}
-                if fail and message['method'] == 'Fetch.enable':
-                    result = {'id': message['id'], 'error': {'code': -32601, 'message': 'synthetic private browser error'}}
+                if message['method'] in errors:
+                    result = {'id': message['id'], 'error': {'code': errors[message['method']], 'message': 'synthetic private browser error'}}
                 asyncio.get_running_loop().call_soon(target.receive, json.dumps(result))
         target = Target(owner, Parent(), 'synthetic-session', {'targetId': 'synthetic-target', 'type': kind})
+        ready = asyncio.get_running_loop().create_future()
+        owner.ready['synthetic-target'] = ready
         output = io.StringIO()
         with redirect_stdout(output), redirect_stderr(output):
             await target.initialize()
         self.assertEqual(output.getvalue(), '')
-        self.assertEqual(owner.browser.fatal, fail)
+        self.assertEqual(owner.browser.fatal, fatal)
         self.assertFalse(target.pending)
-        if fail:
+        self.assertTrue(ready.done())
+        if fatal:
+            self.assertIsNotNone(ready.exception())
+            command = {'Fetch.enable': 'fetch_enable', 'Target.setAutoAttach': 'auto_attach',
+                       'Runtime.runIfWaitingForDebugger': 'resume_target'}[methods[-1]]
             self.assertEqual(owner.browser.fatal_context, dict(target_type=kind,
-                command='fetch_enable', protocol_error_code=-32601))
+                command=command, protocol_error_code=errors[methods[-1]] if type(errors[methods[-1]]) is int else None))
+        else:
+            self.assertTrue(ready.result())
         return methods
 
     async def test_guard_and_recursive_pause_before_resume(self):
         self.assertEqual(await self.check_initialization(),
                          ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
-    async def test_failed_guard_never_resumes_child(self):
-        self.assertEqual(await self.check_initialization(fail=True), ['Fetch.enable'])
+    async def test_unexpected_guard_error_never_resumes_child(self):
+        for code in (-32000, -32602, None, '-32601', True):
+            with self.subTest(code=code):
+                self.assertEqual(await self.check_initialization(errors={'Fetch.enable': code}, fatal=True), ['Fetch.enable'])
 
     async def test_worker_uses_owner_fetch_agent_and_keeps_recursive_attach(self):
         self.assertEqual(await self.check_initialization(kind='worker'),
                          ['Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
-    async def test_unsupported_target_preserves_type_and_numeric_protocol_code(self):
-        self.assertEqual(await self.check_initialization(fail=True, kind='worklet'), ['Fetch.enable'])
+    async def test_unsupported_fetch_resumes_all_child_types(self):
+        for kind in ('worklet', 'service_worker', 'shared_worker', 'iframe', 'unknown', 'future_target'):
+            with self.subTest(kind=kind):
+                self.assertEqual(await self.check_initialization(errors={'Fetch.enable': -32601}, kind=kind),
+                    ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+
+    async def test_unsupported_recursive_attach_still_resumes_worklet(self):
+        self.assertEqual(await self.check_initialization(kind='worklet', errors={
+            'Fetch.enable': -32601, 'Target.setAutoAttach': -32601}),
+            ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+
+    async def test_unexpected_attach_or_resume_error_remains_fatal(self):
+        for method in ('Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'):
+            with self.subTest(method=method):
+                await self.check_initialization(errors={method: -32000}, fatal=True)
+        await self.check_initialization(errors={'Runtime.runIfWaitingForDebugger': -32601}, fatal=True)

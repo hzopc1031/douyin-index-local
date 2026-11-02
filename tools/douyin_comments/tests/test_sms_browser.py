@@ -333,6 +333,35 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def test_audio_worklet_runs_and_phone_stays_editable(self):
+        async with self.browser() as browser:
+            async with asyncio.timeout(8):
+                result = await browser.page.evaluate("""async () => {
+                    const context = new OfflineAudioContext(1, 128, 48000);
+                    const url = URL.createObjectURL(new Blob([`
+                        class Ready extends AudioWorkletProcessor {
+                            constructor() { super(); this.port.postMessage('ready'); }
+                            process() { return true; }
+                        }
+                        registerProcessor('ready', Ready);
+                    `], {type:'application/javascript'}));
+                    try {
+                        await context.audioWorklet.addModule(url);
+                        const node = new AudioWorkletNode(context, 'ready');
+                        const ready = new Promise(resolve => node.port.onmessage = e => resolve(e.data));
+                        node.connect(context.destination);
+                        await context.startRendering();
+                        return await ready;
+                    } finally { URL.revokeObjectURL(url); }
+                }""")
+            self.assertEqual(result, 'ready')
+            self.assertFalse(browser.fatal)
+            self.assertTrue(await browser.page.locator('#normal-input').is_visible())
+            self.assertTrue(await browser.page.locator('#normal-input').is_editable())
+            self.assertEqual(self.sends, 0)
+            self.assertEqual(self.submits, 0)
+            self.assertEqual(self.foreign, 0)
+
     async def test_unconfirmed_account_never_commits_cookie(self):
         async with self.browser() as browser:
             await browser.send(PHONE)
