@@ -42,7 +42,7 @@ SAFE_ERRORS = {
     'response_format': '平台返回格式异常，请检查官方页面。',
     'cooldown': '采集进程仍处于请求冷却期，任务已回到队列。',
     'busy': '采集进程正忙，任务已回到队列。',
-    'skipped_trend_no_data': '该词趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
+    'skipped_trend_no_data': '该词在相同日期段趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
     'no_data': '平台未返回该关键词在此日期范围的有效指数；可能未收录或该范围无数据，不代表指数为零。',
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
     'request_failed': '本次取数未完成，未自动重试。',
@@ -186,9 +186,11 @@ class Hub:
             with self.store.db:
                 self.store.db.execute('UPDATE jobs SET cache_hit=1 WHERE id=?', (row['id'],))
             return True
-        if query.get('kind') and self.store.trend_no_data(query['keywords'][0]):
+        source_trend = self.store.trend_no_data(query) if query.get('kind') else None
+        if source_trend:
             code = 'skipped_trend_no_data'
-            self.store.update_job(row['id'], 'no_data', error={'code': code, 'message': SAFE_ERRORS[code]})
+            self.store.update_job(row['id'], 'no_data', error={
+                'code': code, 'message': SAFE_ERRORS[code], 'source_trend': source_trend})
             return True
         now = time.time()
         if now - self.store.get('last_attempt_at', 0) < 15:

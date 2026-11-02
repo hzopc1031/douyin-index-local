@@ -319,34 +319,42 @@ class Store:
                 return result
         return None
 
-    def trend_no_data(self, keyword, within_seconds=86400):
+    def trend_no_data(self, query, within_seconds=86400):
+        """Return the empty trend's provenance only for this exact query range."""
+        keyword = query['keywords'][0]
+        scope = {key: query[key] for key in ('platform', 'start_date', 'end_date')}
         latest = None
         for row in self.db.execute(
-                "SELECT query,status,result FROM jobs WHERE updated>=? "
+                "SELECT id,query,status,result FROM jobs WHERE updated>=? "
                 "AND status IN ('no_data','partial','succeeded') ORDER BY updated DESC,rowid DESC",
                 (time.time() - within_seconds,)):
-            query = json.loads(row['query'])
-            if not query.get('kind') and keyword in query.get('keywords', []):
+            trend = json.loads(row['query'])
+            if (not trend.get('kind') and keyword in trend.get('keywords', [])
+                    and all(trend.get(key) == value for key, value in scope.items())):
                 latest = row
                 break
         if latest is None:
-            return False
+            return None
         result = json.loads(latest['result']) if latest['result'] else {}
         rows = [r for r in result.get('rows', []) if r.get('keyword') == keyword]
         if any(r.get('search_index') is not None for r in rows):
-            return False
+            return None
         if not rows and latest['status'] != 'no_data':
-            return False
-        # Historical nonempty observations prevent classifying a known term as empty.
-        for row in self.db.execute('SELECT value FROM points WHERE keyword=? AND metric=?',
-                                   (keyword, 'search_index')):
+            return None
+        # A saved nonempty observation in this range still prevents a skip.
+        for row in self.db.execute('SELECT value FROM points WHERE platform=? AND keyword=? '
+                                   'AND metric=? AND day BETWEEN ? AND ?',
+                                   (scope['platform'], keyword, 'search_index',
+                                    scope['start_date'], scope['end_date'])):
             if json.loads(row['value']) is not None:
-                return False
-        for row in self.db.execute('SELECT result FROM datasets'):
+                return None
+        for row in self.db.execute('SELECT result FROM datasets WHERE json_extract(query,\'$.platform\')=?',
+                                   (scope['platform'],)):
             if any(r.get('keyword') == keyword and r.get('search_index') is not None
+                   and scope['start_date'] <= r.get('date', '') <= scope['end_date']
                    for r in json.loads(row['result']).get('rows', [])):
-                return False
-        return True
+                return None
+        return {'job_id': latest['id'], 'keyword': keyword, **scope}
 
     def job(self, identifier):
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
