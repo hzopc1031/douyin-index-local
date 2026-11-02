@@ -42,6 +42,15 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.stage_timeout, 60)
         browser.page.goto.assert_awaited_once()
 
+    async def test_disappearing_challenge_is_reread_without_an_action(self):
+        from playwright.async_api import TimeoutError as PlaywrightTimeout
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser._challenge = AsyncMock(side_effect=[PlaywrightTimeout('synthetic locator disappeared'), None])
+        self.assertIsNone(await browser.challenge())
+        self.assertEqual(browser._challenge.await_count, 2)
+        browser.page.click.assert_not_called()
+
     async def test_login_requests_only_block_comments_and_private_urls(self):
         domains = ('douyin.com', 'snssdk.com', 'zijieapi.com', 'bytedance.com',
                    'byteimg.com', 'bytednsdoc.com', 'ibytedtos.com', 'pstatp.com',

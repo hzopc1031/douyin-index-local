@@ -32,7 +32,7 @@ from .sms_cdp import TargetGuard
 PHONE = '#douyin_login_comp_mobile_code input#normal-input'
 CODE = '#douyin_login_comp_mobile_code input#button-input'
 MOBILE_PANEL = '#douyin_login_comp_mobile_code'
-SEND_TEXT = re.compile(r'^(?:获取|发送)(?:短信)?验证码$')
+SEND_TEXT = re.compile(r'^(?:重新)?(?:获取|发送)(?:短信)?验证码$')
 SMS_TABS = ('手机号验证码登录', '手机验证码登录', '短信验证码登录', '验证码登录',
             '手机号登录', '手机登录', '短信登录')
 SUBMIT = '#douyin_login_comp_btn_id'
@@ -217,7 +217,7 @@ class SmsBrowser:
                 self.last_read_error = dict(operation=self.operation, **info)
                 transient = (info['exception_type'] == 'Error' and info['category'] in
                              ('context_destroyed', 'frame_detached', 'element_detached'))
-                transient |= operation == 'phone_editable' and info['exception_type'] == 'TimeoutError'
+                transient |= operation in ('phone_editable', 'challenge_read') and info['exception_type'] == 'TimeoutError'
                 if not transient or attempt == 2:
                     raise
                 print(json.dumps(dict(event='browser_read_retry', attempt=attempt + 1,
@@ -529,8 +529,8 @@ class SmsBrowser:
 
     def send_button(self):
         panel = self.page.locator(MOBILE_PANEL).filter(visible=True).first
-        return panel.locator('button, [role="button"], #douyin_login_comp_button_input_id > span').filter(
-            has_text=SEND_TEXT).filter(visible=True)
+        return panel.get_by_role('button', name=SEND_TEXT).or_(
+            panel.locator('#douyin_login_comp_button_input_id > span').filter(has_text=SEND_TEXT)).filter(visible=True)
 
     async def sms_ready(self):
         return (await self.phone_ready() and
@@ -585,7 +585,7 @@ class SmsBrowser:
                   node.dataset.tag = e.tagName.toLowerCase();
                   node.dataset.checked = String(e.checked === true || e.getAttribute('aria-checked') === 'true');
                   node.dataset.disabled = String(e.disabled === true || e.getAttribute('aria-disabled') === 'true');
-                  const text = e.textContent.trim();
+                  const text = (e.getAttribute('aria-label') || e.textContent).trim();
                   node.textContent = labels.includes(text) ? text : '[redacted]';
                   root.append(node);
                 }
@@ -595,7 +595,8 @@ class SmsBrowser:
                 '#douyin_login_comp_button_input_id span', '#douyin_login_comp_scan_code',
                 '[role="tab"]', 'button', '#login-panel-new span, #douyin_login_comp_flat_panel span',
                 'input[type="checkbox"]', '[role="checkbox"]'],
-                labels=[*SMS_TABS, '扫码登录', '获取验证码', '发送验证码', '获取短信验证码', '发送短信验证码']))
+                labels=[*SMS_TABS, '扫码登录', '获取验证码', '发送验证码', '获取短信验证码', '发送短信验证码',
+                        '重新获取验证码', '重新发送验证码']))
             png = await self.diagnostic_snapshot()
             for suffix, data in (('.html', fragment.encode()), ('.png', png)):
                 with os.fdopen(private_open(folder / (stem + suffix), os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
@@ -934,9 +935,12 @@ class SmsBrowser:
         self.auto_attempts += 1  # charge before mouse-down, never reset on mode switch
         await self.replay(points, capture.metadata)
         # Mouse-up starts asynchronous verification; allow its response before declaring failure.
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and await self.challenge():
-            await asyncio.sleep(.1)
+        try:
+            async with asyncio.timeout(3):
+                while await self.challenge():
+                    await asyncio.sleep(.1)
+        except TimeoutError:
+            pass
 
     async def persist(self):
         self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)

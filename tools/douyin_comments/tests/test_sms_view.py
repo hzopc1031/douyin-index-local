@@ -65,7 +65,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             await browser.page.locator('#terms').check()
             await browser.page.evaluate("""() => {
                 document.querySelector('#douyin_login_comp_button_input_id span').outerHTML =
-                  '<button id="real-send" disabled onclick="send()"><span>获取验证码</span></button>';
+                  '<button id="real-send" aria-label="重新获取验证码" disabled onclick="send()"><span aria-hidden="true">↻</span></button>';
                 document.querySelector('#normal-input').addEventListener('input', () => {
                   document.querySelector('#real-send').disabled = false;
                 });
