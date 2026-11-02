@@ -114,9 +114,18 @@ def run(output=None):
                     fixture['status'] = status
                     fixture['attempts'] = [{**attempt, 'start_date':START, 'end_date':END, 'updated_at':1793600000}] if attempt else []
                     page.evaluate('loadInsights()')
-                    assert page.locator('#audienceData h3').inner_text() == title
+                    assert page.locator('#audienceData h3').inner_text().removesuffix('ⓘ').strip() == title
                     assert page.locator('#audienceSummary').inner_text().startswith(title)
                     assert not page.locator('#audienceData .rank-row').count()
+                    if title == '采集失败':
+                        assert '请到「采集任务」查看原因' in page.locator('#audienceSummary').inner_text()
+                        assert not page.locator('#audienceSummary .info-button').count()
+                    if title == '平台无数据':
+                        assert '不代表各分组数值为零' not in page.locator('#audienceData').inner_text()
+                        page.locator('#audienceData .info-button').click()
+                        assert '不代表各分组数值为零' in page.locator('#audienceData').inner_text()
+                        page.keyboard.press('Escape')
+                        page.locator('#resultPanel-audience h2').click()
                 # Failed reads are not failed collections, and old figures must disappear.
                 fixture.update(status='available', attempts=[])
                 page.evaluate('loadInsights()')
@@ -175,12 +184,16 @@ def run(output=None):
                 page.evaluate('refresh()')
                 page.locator('#keywordSelect').select_option('akg')
                 page.evaluate('loadInsights()')
+                assert '可能遗漏更早' not in page.locator('#audienceRanges').inner_text()
+                page.locator('#audienceRanges .info-button').click()
                 assert '可能遗漏更早' in page.locator('#audienceRanges').inner_text()
+                page.keyboard.press('Escape')
+                page.locator('#resultPanel-audience h2').click()
                 assert page.locator('[data-audience-range]').count() == 1
                 assert '无法确认是否曾失败或跳过' in page.locator('#audienceData').inner_text()
                 fixture['jobs'][0].update(status='no_data', error=dict(code='skipped_trend_no_data'))
                 page.evaluate("async range => {$('#insightStart').value=range.start_date;$('#insightEnd').value=range.end_date;await refresh()}", dict(start_date=START, end_date=END))
-                assert page.locator('#audienceData h3').inner_text() == '趋势无数据已跳过'
+                assert page.locator('#audienceData h3').inner_text().removesuffix('ⓘ').strip() == '趋势无数据已跳过'
                 page.locator('[data-platform=baidu]').click()
                 assert page.locator('#audienceRanges').inner_text() == ''
                 assert '尚未接入' in page.locator('#audienceData').inner_text()
