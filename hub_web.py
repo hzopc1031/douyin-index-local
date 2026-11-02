@@ -609,7 +609,9 @@ def mount(app, hub):
 
     async def history(request):
         require(request)
-        return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()]})
+        return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()],
+                      'latest_available_date': s.latest_available_date(),
+                      'latest_available_date_source': 'stored_search_index'})
 
     async def keys(request):
         require(request, admin=True)

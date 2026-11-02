@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
-from check_hub_ui import AUDIENCE, META, PLATFORMS, ROOT, START, END
+from check_hub_ui import AUDIENCE, META, PLATFORMS, ROOT, DEFAULT_START as START, END
 
 OLD_START, OLD_END = '2026-09-26', '2026-10-25'
 
@@ -48,7 +48,7 @@ def run(output=None):
                         data = dict(browser='browser_ready', login_state='cookie_present', login_mode='desktop',
                                     counts=dict(keywords=2, points=14), daily_online_attempts=0,
                                     limits=dict(online_attempts_per_day=50), cooldown_remaining_seconds=0, paused=None, last_result=None)
-                    elif path == 'history': data = dict(datasets=[dict(metadata={**META, 'keywords':['酵素','akg']}, fetched=1793498400)])
+                    elif path == 'history': data = dict(datasets=[dict(metadata={**META, 'keywords':['酵素','akg']}, fetched=1793498400)], latest_available_date=END)
                     elif path == 'jobs': data = dict(jobs=fixture['jobs'])
                     elif path == 'keys': data = dict(keys=[])
                     elif path == 'series': data = dict(points=[])

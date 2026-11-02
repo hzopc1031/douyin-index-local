@@ -60,7 +60,7 @@ OpenAPI 3.1 文档：`GET /api/v1/openapi.json`，需要有效 Key 或管理登�
 | GET `/jobs` | read | 最近三十个任务 |
 | GET `/jobs/{job_id}` | read | 任务状态、标准日序列与完整性 |
 | GET `/series` | read | 读取数据库趋势；必填 keyword，可选 platform、start_date、end_date |
-| GET `/history` | read | 最近三十组采集结果与口径 |
+| GET `/history` | read | 只读最近三十组采集结果与口径，以及本地已知最新搜索日 |
 | GET `/export.csv` | read | 同 series 参数，CSV 中缺失留空，关键词防表格公式注入 |
 | GET `/tls-certificate.pem` | read | 公共证书，绝不包含私钥 |
 | GET/POST `/keys`、DELETE `/keys/{id}` | 仅管理登录 | 创建、列出前缀或撤销密钥 |
@@ -222,3 +222,16 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 `GET /insights` 的历史读取不受滚动的近两年下界限制，仍校验日期格式、过去日期、
 起止顺序和最多 731 天；在线 POST 仍执行原有近两年限制。网页同时保留本会话未提交/
 未确认的任务状态，引导用户沿用原批次继续提交，不把它误标为需要新建查询。
+
+### 完整日期跳过策略与初始日期
+
+`skipped_trend_no_data` 只匹配扩展任务实际 `platform`、关键词、`start_date`、`end_date`，
+在最近 24 小时内取该完整范围最新成功/部分/无数据趋势任务；同段已有非空历史值时不跳过。
+关联词经现有截止日规则截短后，若没有完全一致的趋势日期段，则不跳过。
+任务 `error.source_trend` 包含 `job_id`、`platform`、`keyword`、`start_date`、`end_date`，
+说明这是中枢跳过，并非关联/人群平台返回无数据。没有数据库迁移，不更改旧任务记录。
+
+`GET /history` 另外返回 `latest_available_date`（YYYY-MM-DD 或 null）及
+`latest_available_date_source=stored_search_index`。日期取全部本地全国抖音搜索日值中
+非空且早于上海今天的最大日期；不是最近采集任务的请求截止日，也不是官方实时最新日期。
+页面首次初始化截至该日最近 30 天；未知时留空，未确认批次保留原日期，刷新不覆盖用户选择。

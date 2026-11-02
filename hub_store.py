@@ -426,6 +426,14 @@ class Store:
         return [dict(row) | {'metadata': json.loads(row['result'])['metadata']}
                 for row in self.db.execute('SELECT id,fetched,result FROM datasets ORDER BY fetched DESC LIMIT ?', (limit,))]
 
+    def latest_available_date(self):
+        """Latest locally known usable search day, not a claim about upstream freshness."""
+        row = self.db.execute(
+            "SELECT MAX(day) FROM points WHERE platform='douyin' AND metric='search_index' "
+            "AND region='全国' AND value!='null' AND day<?",
+            (dt.datetime.now(TZ).date().isoformat(),)).fetchone()
+        return row[0]
+
     def series(self, platform, keyword, start=None, end=None):
         if platform != 'douyin':
             raise HubError('platform_unavailable', '该平台尚未接入。', 422)

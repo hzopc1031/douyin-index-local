@@ -50,6 +50,27 @@ class StoreTests(unittest.TestCase):
         self.s.ingest(newer)
         self.assertEqual(len(self.s.history()), 2)
 
+    def test_latest_available_date_uses_all_valid_points_not_latest_dataset_range(self):
+        self.assertIsNone(self.s.latest_available_date())
+        result = public_result(fixture())
+        result['rows'][-1]['search_index'] = 0  # Zero is an observed value.
+        self.s.ingest(result)
+        for index in range(31):
+            older = public_result(fixture())
+            older['metadata']['start_date'] = '2024-12-01'
+            older['metadata']['end_date'] = '2024-12-07'
+            older['metadata']['fetched_at'] = (dt.datetime.now(TZ) + dt.timedelta(seconds=index+1)).isoformat()
+            for row in older['rows']:
+                row['date'] = row['date'].replace('2025-01', '2024-12')
+            self.s.ingest(older)
+        self.assertEqual(len(self.s.history()), 30)
+        self.assertTrue(all(d['metadata']['end_date'] == '2024-12-07' for d in self.s.history()))
+        with self.s.db:
+            self.s.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                              ('douyin', 'search_index', '全国', '合成词', '2025-01-08',
+                               'null', '123', time.time(), 'synthetic'))
+        self.assertEqual(self.s.latest_available_date(), END)
+
     def test_existing_duplicates_migrate_without_losing_points(self):
         from hub_store import encode
         result = public_result(fixture())
@@ -218,6 +239,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         datasets = (await response.json())['datasets']
         self.assertEqual(len(datasets), 1)
         self.assertEqual(datasets[0]['metadata']['end_date'], END)
+        body = await response.json()
+        self.assertEqual(body['latest_available_date'], END)
+        self.assertEqual(body['latest_available_date_source'], 'stored_search_index')
         self.assertEqual(self.calls, [])
 
     async def test_request_source_admin_only_and_idempotent(self):
