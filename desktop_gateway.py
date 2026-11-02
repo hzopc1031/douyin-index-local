@@ -6,6 +6,7 @@ import hmac
 import hashlib
 import secrets
 import json
+import logging
 import ssl
 import time
 from pathlib import Path
@@ -23,8 +24,16 @@ HUB_KEY = web.AppKey('hub', Hub)
 def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_throttle=None, vnc_port=5907, clock=time.monotonic):
     root = Path(root)
     state = state_dir(root)
-    credentials = json.loads((state / 'access.json').read_text())
-    expected = ('Basic ' + base64.b64encode((credentials['username'] + ':' + credentials['password']).encode()).decode()).encode()
+    # Only an explicit 0 disables administrator authentication; typos fail closed.
+    auth_enabled = os.environ.get('INDEX_HUB_AUTH_ENABLED', '1') != '0'
+    expected = None
+    if auth_enabled:
+        credentials = json.loads((state / 'access.json').read_text())
+        expected = ('Basic ' + base64.b64encode((credentials['username'] + ':' + credentials['password']).encode()).decode()).encode()
+    else:
+        logging.getLogger('index_hub.auth').warning(
+            'Administrator authentication disabled (INDEX_HUB_AUTH_ENABLED is 0); '
+            'anonymous requests have administrator access')
     hub = Hub(root, bridge)
     throttle = auth_throttle if auth_throttle is not None else AuthThrottle()
     rates = {}
@@ -52,14 +61,17 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
             ip = request.remote or 'unknown'
             auth = request.headers.get('Authorization', '')
             ticket_auth = request.path == '/websockify' and 'ticket' in request.query
-            retry_after = throttle.remaining(ip) if 'Authorization' in request.headers or ticket_auth else 0
+            # Explicit API keys retain their scopes even during anonymous access.
+            bearer_auth = is_api and auth.startswith('Bearer ')
+            anonymous_admin = not auth_enabled and not bearer_auth
+            retry_after = throttle.remaining(ip) if not anonymous_admin and ('Authorization' in request.headers or ticket_auth) else 0
             if retry_after:
                 throttle.reject(ip)
                 raise HubError('authentication_throttled', '认证失败次数过多，请稍后再试。', 429)
             principal = None
-            if hmac.compare_digest(auth.encode(), expected):
+            if anonymous_admin or (auth_enabled and hmac.compare_digest(auth.encode(), expected)):
                 principal = {'id': 'admin', 'admin': True, 'scopes': ['read', 'query']}
-            elif is_api and auth.startswith('Bearer '):
+            elif bearer_auth:
                 principal = hub.store.key_principal(auth[7:])
             if principal is None and ticket_auth:
                 expiry = tickets.pop(hashlib.sha256(request.query['ticket'].encode()).digest(), 0)
