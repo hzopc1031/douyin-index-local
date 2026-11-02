@@ -23,14 +23,133 @@ function fixture(){
 }
 
 test('all states and buttons, masked number only',async()=>{
- const f=fixture();f.run('smsEnabled=true');
  for(const state of ['idle','opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login','succeeded','already_logged_in','rate_limited','failed','timeout','cancelled']){
+  const f=fixture();f.run('smsEnabled=true');
+  if(['succeeded','already_logged_in'].includes(state))await f.render({state:'opening'});
   const verify=state.startsWith('verify_'),active=['opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login'].includes(state);
   await f.render({state,verification_mode:verify?'manual':null,resend_in:60,attempts_left:3,phone:'138****8000'});
-  assert.equal(f.$('#smsPhoneForm').hidden,active);assert.equal(f.$('#smsCodeForm').hidden,!['code_sent','code_invalid'].includes(state));assert.equal(f.$('#smsVerification').hidden,!verify);assert.equal(f.$('#smsCancel').hidden,!active);assert.equal(f.$('#smsNumber').textContent,'138****8000');
+  assert.equal(f.$('#smsPhoneForm').hidden,active||['succeeded','already_logged_in'].includes(state));assert.equal(f.$('#smsCodeForm').hidden,!['code_sent','code_invalid'].includes(state));assert.equal(f.$('#smsVerification').hidden,!verify);assert.equal(f.$('#smsCancel').hidden,!active);assert.equal(f.$('#smsNumber').textContent,'138****8000');
   assert.equal(f.run('smsTimer!==null'),active);
  }
- await f.render({phone:'13800138000'});assert.equal(f.$('#smsNumber').textContent,'');
+ const f=fixture();await f.render({phone:'13800138000'});assert.equal(f.$('#smsNumber').textContent,'');
+});
+test('restored browser login hides idle SMS form without sending anything',async()=>{
+ for(const login_state of ['cookie_present','qr_session']){
+  const f=fixture();await f.render({state:'idle'});
+  f.run(`setSmsLoginStatus({browser:'browser_ready',login_state:'${login_state}'})`);
+  assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));
+  assert(f.$('#smsNumber').textContent.includes('未提供脱敏手机号'));
+  await f.render({state:'idle'});assert(f.$('#smsPhoneForm').hidden);
+  assert.equal(f.calls.length,0);
+ }
+ assert(html.includes('Promise.all([loadHubStatus(),'));
+});
+test('status arriving before SMS snapshot still hides stale code and verification UI',async()=>{
+ for(const state of ['idle','code_sent','verify_login']){
+  const f=fixture();f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+  await f.render({state,phone:'138****8000',verification_mode:'manual',frame_id:1,resend_in:60});
+  for(const id of ['#smsPhoneForm','#smsCodeForm','#smsVerification','#smsCancel'])assert(f.$(id).hidden);
+  assert.equal(f.$('#smsNumber').textContent,'138****8000');assert.equal(f.$('#smsCountdown').textContent,'');
+  assert.equal(f.calls.length,0);
+ }
+});
+test('new SMS success hides forms immediately; later invalid status wins over terminal snapshot',async()=>{
+ for(const state of ['succeeded','already_logged_in']){
+  for(const login_state of ['expired','rejected','no_session_cookie','unknown']){
+   const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+   await f.render({state:'opening'});
+   await f.render({state,phone:'138****8000',message:'官方窗口已登录'});
+   assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+   assert(f.$('#smsState').textContent.startsWith('已登录'));
+   f.run(`setSmsLoginStatus({browser:'login_required',login_state:'${login_state}'})`);
+   await f.render({state});assert(!f.$('#smsPhoneForm').hidden);
+   assert(!f.$('#smsState').textContent.includes('已登录'));assert.equal(f.calls.length,0);
+  }
+ }
+});
+test('historical terminal snapshots cannot override current expired status on reload',async()=>{
+ for(const state of ['succeeded','already_logged_in']){
+  const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'expired'})");
+  await f.render({state,message:'官方窗口已登录'});
+  assert(!f.$('#smsPhoneForm').hidden);assert(!f.$('#smsState').textContent.includes('已登录'));
+  assert.equal(f.calls.length,0);
+ }
+});
+test('immediate successful action response hides form even without an opening snapshot',async()=>{
+ const f=fixture();f.run("smsEnabled=true;setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+ await f.render({state:'idle'});f.state.state='already_logged_in';
+ await f.run("smsAction('start',{phone:'13800138000'})");
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsState').textContent.startsWith('已登录'));
+ assert.equal(f.calls.filter(c=>c.body).length,1);
+});
+test('connection loss and logout restore form; only masked phone is displayed',async()=>{
+ const f=fixture();await f.render({state:'idle'});
+ for(const state of ["{browser:'unavailable',login_state:'unknown'}",'null',"{browser:'browser_ready',login_state:'rejected'}"]){
+  f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+  f.run(`setSmsLoginStatus(${state})`);assert(!f.$('#smsPhoneForm').hidden);
+ }
+ f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+ for(const phone of ['13800138000','<img src=x onerror=alert(1)>','138****8000 extra']){
+  await f.render({phone});assert.equal(f.$('#smsNumber').textContent,'账号信息：当前会话未提供脱敏手机号');
+ }
+ assert(source.includes('catch(e){setSmsLoginStatus(null,revision);throw e}'));
+});
+test('status response or failure started before SMS success cannot override it',async()=>{
+ for(const response of ["{browser:'login_required',login_state:'no_session_cookie'}",'null']){
+  const f=fixture();await f.render({state:'submitting'});
+  f.run('const earlierRevision=smsLoginRevision');
+  await f.render({state:'succeeded'});
+  f.run(`setSmsLoginStatus(${response},earlierRevision)`);
+  await f.render({state:'succeeded'});
+  assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));
+  f.run("setSmsLoginStatus({browser:'login_required',login_state:'expired'})");
+  assert(!f.$('#smsPhoneForm').hidden);
+ }
+ assert(source.includes('const revision=smsLoginRevision;'));
+});
+test('repeated terminal action is fresh confirmation after a status failure',async()=>{
+ const f=fixture();f.run('smsEnabled=true');await f.render({state:'opening'});
+ await f.render({state:'already_logged_in'});f.run('setSmsLoginStatus(null)');
+ assert(!f.$('#smsPhoneForm').hidden);
+ await f.run("smsAction('start',{phone:'13800138000'})");
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsState').textContent.startsWith('已登录'));
+ assert.equal(f.calls.filter(c=>c.body).length,1);
+});
+test('status renders login before SMS snapshot and survives a failed SMS read',async()=>{
+ const f=fixture();f.respond=async path=>{if(path==='status')return {browser:'browser_ready',login_state:'cookie_present'};throw Error('synthetic SMS read failure')};
+ await f.run('loadHubStatus()');assert(f.$('#smsPhoneForm').hidden);
+ f.run('smsEnabled=true');await f.run('loadSms()');
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+});
+test('status request failure clears login, but an older pending failure does not',async()=>{
+ const f=fixture();f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+ f.respond=async()=>{throw Error('synthetic status failure')};
+ await assert.rejects(f.run('loadHubStatus()'));assert(!f.$('#smsPhoneForm').hidden);
+ const pending=deferred();f.respond=()=>pending.promise;
+ await f.render({state:'submitting'});const request=f.run('loadHubStatus()');
+ await f.render({state:'succeeded'});pending.reject(Error('older status failure'));
+ await assert.rejects(request);assert(f.$('#smsPhoneForm').hidden);
+});
+test('actual dashboard refresh preserves confirmed login when history, jobs or charts fail',async()=>{
+ for(const failure of ['history','jobs','series']){
+  const f=fixture();await f.render({state:'idle'});
+  for(const id of ['#notice','#browserBadge'])f.$(id).classList={remove(){},toggle(){}};
+  f.$('#sessionDetail').textContent='';
+  f.respond=async path=>{
+   if(path===failure)throw Error('synthetic '+failure+' failure');
+   if(path==='status')return {browser:'browser_ready',login_state:'cookie_present',login_mode:'sms',counts:{keywords:0,points:0},daily_online_attempts:0,limits:{online_attempts_per_day:50}};
+   return path==='history'?{datasets:[]}:path==='jobs'?{jobs:[]}:f.state;
+  };
+  f.run(`let refreshing=false,datasets=[],jobs=[],platforms=[],qrEnabled=false,qrInitialized=false,qrTimer=null,reportBatch=null;
+   const document={title:''};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};
+   async function refreshReportBatch(){};async function loadInsights(){};async function loadSeries(){${failure==='series'?"throw Error('synthetic series failure')":''}}`);
+  f.run(html.slice(html.indexOf('async function refresh(){'),html.indexOf("$('#refreshButton').onclick")));
+  await f.run('refresh()');assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));assert(f.notices.length);
+  assert(!f.calls.some(c=>c.body));
+ }
 });
 test('auto/manual/remote-desktop display and countdown',async()=>{
  const f=fixture();await f.manual();assert(!f.$('#smsRefresh').hidden);
