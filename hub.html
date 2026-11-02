@@ -439,6 +439,11 @@ async function loadInsight(kind,target,revision,context){
   const dates=insightDates(kind,$('#insightStart').value,end);
   let [d,history]=await Promise.all([api('insights?'+new URLSearchParams({keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
   if(d.status!=='available'&&dates.end_date!==end&&dates.start_date<=dates.end_date)d=await api('insights?'+new URLSearchParams({keyword,kind,...dates}));
+  if(kind==='related'&&d.status!=='available'){
+   const saved=await api('insights/ranges?'+new URLSearchParams({keyword,kind}));
+   const range=saved.ranges.find(r=>r.status==='available'&&r.start_date===dates.start_date&&r.end_date<=dates.end_date);
+   if(range)d=await api('insights?'+new URLSearchParams({keyword,kind,start_date:range.start_date,end_date:range.end_date}));
+  }
   if(revision!==insightRevision||context!==insightContext())return;
   if(kind==='audience')renderAudienceRanges(history,d);
   if(d.status!=='available'){if(kind==='audience')renderAudienceEmpty(d,history);else insightMessage(kind,target,moduleState(kind)+' 关联词查询使用 '+dates.start_date+' 至 '+dates.end_date+'。');return}

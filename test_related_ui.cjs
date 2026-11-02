@@ -5,7 +5,7 @@ const $=id=>nodes[id]??={value:'',dataset:{},textContent:'',innerHTML:'',querySe
 const calls=[];
 const ctx=vm.createContext({$,URLSearchParams,esc:String,chosenPlatform:'douyin',
  sessionStorage:{getItem(){return null}},rangeError(){return ''},
- api:async path=>{calls.push(new URLSearchParams(path.split('?')[1]));return {status:'not_collected'}},
+ api:async path=>{if(path.startsWith('insights/ranges?'))return {ranges:[]};calls.push(new URLSearchParams(path.split('?')[1]));return {status:'not_collected'}},
  moduleState(){return '未采集'},insightMessage(kind,target,message){$(target).textContent=message}});
 vm.runInContext("let relatedLatestDate='2026-10-25';"+
  html.slice(html.indexOf('const insightTitles='),html.indexOf('let insightRevision=')),ctx);
@@ -34,6 +34,16 @@ vm.runInContext("let insightRevision=1;function insightContext(){return 'fixture
  calls.length=0;$('#insightEnd').value='2026-10-24';
  await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);
  assert.deepEqual(calls.map(p=>p.get('end_date')),['2026-10-24']);
+ calls.length=0;$('#insightEnd').value='2026-10-27';
+ vm.runInContext("relatedLatestDate='2026-10-26'",ctx);
+ ctx.api=async path=>{
+  if(path.startsWith('insights/ranges?'))return {ranges:[{status:'available',start_date:'2026-09-28',end_date:'2026-10-25'}]};
+  const params=new URLSearchParams(path.split('?')[1]);calls.push(params);
+  return params.get('end_date')==='2026-10-25'?{status:'available',result:ctx.result}:{status:'not_collected'};
+ };
+ await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);
+ assert.deepEqual(calls.map(p=>p.get('end_date')),['2026-10-27','2026-10-26','2026-10-25']);
+ assert($('#relatedData').innerHTML.includes('关联词数据截至 2026-10-25'));
  calls.length=0;$('#insightEnd').value='2026-10-27';
  ctx.api=async path=>{calls.push(new URLSearchParams(path.split('?')[1]));return {status:'available',result:{...ctx.result,metadata:{...ctx.result.metadata,end_date:'2026-10-27'}}}};
  await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);

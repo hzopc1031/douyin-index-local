@@ -543,8 +543,16 @@ def mount(app, hub):
         p = require(request, 'query')
         from hub_insights import validate_insight
         body = await read_json(request)
-        query = (validate_insight(body, latest_related_date=related_latest_date(s))
-                 if request.path.endswith('/insights/queries') else validate_query(body))
+        if request.path.endswith('/insights/queries'):
+            existing = s.db.execute('SELECT query FROM jobs WHERE owner=? AND idem=?',
+                                   (p['id'], request.headers.get('Idempotency-Key'))).fetchone()
+            previous = json.loads(existing['query']) if existing else None
+            limit = previous['end_date'] if previous and previous.get('kind') == 'related' else related_latest_date(s)
+            query = validate_insight(body, latest_related_date=limit)
+            if previous and query == {k: v for k, v in previous.items() if k != 'requested_end_date'}:
+                query = previous
+        else:
+            query = validate_query(body)
         # Transport peer only: do not trust caller-supplied X-Forwarded-For.
         user_agent = ''.join(c for c in request.headers.get('User-Agent', '') if ord(c) >= 32 and ord(c) != 127)[:512]
         source = {'kind': 'admin' if p.get('admin') else 'api_key',

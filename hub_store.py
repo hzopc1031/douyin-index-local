@@ -269,17 +269,28 @@ class Store:
         with self.db:
             self.db.execute('INSERT INTO insights VALUES(?,?,?,?)', (uuid.uuid4().hex,query_hash(query),stamp,encode(result)))
 
-    def insight(self, query, max_age=None):
-        row=self.db.execute('SELECT result,fetched FROM insights WHERE qhash=? ORDER BY fetched DESC LIMIT 1', (query_hash(query),)).fetchone()
-        if not row or (max_age is not None and time.time()-row['fetched']>max_age):return None
-        return json.loads(row['result'])
-
-    def latest_real_insight(self, query):
-        for row in self.db.execute('SELECT result FROM insights WHERE qhash=? ORDER BY fetched DESC', (query_hash(query),)):
+    def insight(self, query, max_age=None, *, real_only=False):
+        # Legacy clamp hashes include requested_end_date; match their metadata without rewriting storage.
+        rows = self.db.execute('''SELECT result,fetched FROM insights WHERE qhash=? OR (
+            ?='related' AND json_extract(result,'$.metadata.kind')='related'
+            AND json_extract(result,'$.metadata.platform')=?
+            AND json_extract(result,'$.metadata.keywords')=?
+            AND json_extract(result,'$.metadata.start_date')=?
+            AND (json_extract(result,'$.metadata.end_date')=? OR
+                 (? AND json_extract(result,'$.metadata.requested_end_date')=?)))
+            ORDER BY json_extract(result,'$.metadata.end_date')=? DESC, fetched DESC''',
+            (query_hash(query), query['kind'], query['platform'], encode(query['keywords']),
+             query['start_date'], query['end_date'], max_age is None, query['end_date'], query['end_date']))
+        for row in rows:
+            if max_age is not None and time.time()-row['fetched'] > max_age:
+                continue
             result = json.loads(row['result'])
-            if not result.get('no_data'):
+            if not real_only or not result.get('no_data'):
                 return result
         return None
+
+    def latest_real_insight(self, query):
+        return self.insight(query, real_only=True)
 
     def insight_ranges(self, keyword, kind):
         """Read all saved ranges and latest task metadata; never return raw results."""
