@@ -291,6 +291,7 @@ def run(output=None):
                 assert [path for path,_ in writes]==['queries','insights/queries','insights/queries']
                 assert writes[0][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
                 assert not page.locator('#queryDialog').is_visible()
+                page.wait_for_function('!refreshing')
                 fixture.update(login='expired', paused=dict(code='authentication_required'))
                 page.evaluate('refresh()')
                 assert '需要重新登录' in page.locator('#browserBadge').inner_text()

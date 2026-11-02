@@ -51,7 +51,7 @@ function openInfo(button){
  if(!popup.matches(':popover-open'))popup.showPopover();
  const rect=button.getBoundingClientRect();
  popup.style.left=Math.max(12,Math.min(rect.left,innerWidth-popup.offsetWidth-12))+'px';
- popup.style.top=Math.max(12,Math.min(rect.bottom,innerHeight-popup.offsetHeight-12))+'px';
+ popup.style.top=Math.max(12,Math.min(rect.bottom+popup.offsetHeight<=innerHeight-12?rect.bottom:rect.top-popup.offsetHeight,innerHeight-popup.offsetHeight-12))+'px';
 }
 document.addEventListener('beforetoggle',e=>{
  if(!e.target.matches('.info-popover'))return;
@@ -98,8 +98,9 @@ function renderHistory(){
  dateHint();
  $('#historyRows').innerHTML=datasets.length?datasets.map(d=>{const m=d.metadata;return '<tr><td><strong>'+m.keywords.map(esc).join('、')+'</strong></td><td>抖音 · 搜索指数</td><td>'+esc(m.start_date)+' — '+esc(m.end_date)+'</td><td><span class="status '+(m.complete?'succeeded':'partial')+'">'+(m.complete?'完整':Object.values(m.missing_search_dates||{}).every(a=>a.length===Math.round((new Date(m.end_date)-new Date(m.start_date))/86400000)+1)?'无有效日值':'有缺失')+'</span><br><small>'+({user_reported_match:'用户已报告逐日一致',pending:'页面核对待记录'})[m.verification]+'</small></td><td>'+esc(fmt(d.fetched))+'</td></tr>'}).join(''):'<tr><td colspan="5">暂无结果。提交首个查询后，历史会保存在这里。</td></tr>';
 }
-let initialRangesSet=false;
+let initialRangesSet=false,relatedLatestDate=null;
 function initializeRanges(history){
+ relatedLatestDate=history.related_latest_available_date||null;
  const latest=history.latest_available_date;
  const valid=typeof latest==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(latest)&&Number.isFinite(Date.parse(latest+'T00:00:00Z'));
  const hint=valid?'本地已知最新可用日：'+latest+'（已存有效搜索指数；不代表官方当前最新日）。':'尚无已知可用日，请先从官方页面确认截止日。';
@@ -379,6 +380,9 @@ function allDataTable(rows,columns,key){
  return '<details class="all-data" data-detail="'+esc(key)+'"><summary>展开全部 '+rows.length+' 条与原始指标</summary><div class="tablewrap"><table><thead><tr>'+columns.map(c=>'<th>'+c[1]+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+columns.map(([field,,isText])=>'<td>'+(isText?esc(r[field]):numberLabel(r[field]))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div></details>';
 }
 function insightMessage(kind,target,message){$(target).textContent=message;$('#'+kind+'Summary').textContent=message}
+function insightDates(kind,start,end){
+ return {start_date:start,end_date:kind==='related'&&relatedLatestDate&&end>relatedLatestDate?relatedLatestDate:end};
+}
 function renderInsight(kind,target,result){
  const meta=result.metadata,sort=$('#relatedSort').value;
  const context=[$('#keywordSelect').value,$('#insightStart').value,$('#insightEnd').value,chosenPlatform].join('|');
@@ -392,7 +396,7 @@ function renderInsight(kind,target,result){
    html+='<section class="insight-block"><h3>'+name+' <small class="tiny">'+rows.length+' 条</small></h3><p class="tiny">'+metric+' · 前 5 条</p>'+(rows.length?rankBars(rows,'keyword',sort)+allDataTable(rows,[['keyword','关联词',true],['relation_score','关联分（原值）'],['search_index','搜索指数'],['composite_index','综合指数']],key):'<p>官方返回空列表。</p>')+'</section>';
    if(key==='search_related')summary=(rows.length?rankBars(rows,'keyword',sort,3):'<p>暂无搜索关联词</p>');
   }
-  html+='</div>';explanation='搜索关联与内容关联分开呈现。概要显示搜索关联前 3 条，详情默认前 5 条；当前排序：'+metric+'。关联分不是概率。条形按当前排序指标相对最大值绘制，原始指标完整保留；关联不代表因果。';
+  html+='</div>';explanation='关联词数据截至 '+meta.end_date+'，使用 '+meta.start_date+' 至 '+meta.end_date+'。搜索关联与内容关联分开呈现。概要显示搜索关联前 3 条，详情默认前 5 条；当前排序：'+metric+'。关联分不是概率。条形按当前排序指标相对最大值绘制，原始指标完整保留；关联不代表因果。';
  }else{
   const dimensions=result.data.dimensions||[];
   for(const [i,dimension] of dimensions.entries()){
@@ -470,10 +474,26 @@ async function loadInsight(kind,target,revision,context){
  if(!keyword||!end){insightMessage(kind,target,'请选择关键词和截止日期。');return}
  if(rangeError('insight')){insightMessage(kind,target,rangeError('insight'));return}
  try{
-  const [d,history]=await Promise.all([api('insights?'+new URLSearchParams({keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
+  const dates=insightDates(kind,$('#insightStart').value,end);
+  let [d,history]=await Promise.all([api('insights?'+new URLSearchParams({keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
+  if(d.status!=='available'&&dates.end_date!==end&&dates.start_date<=dates.end_date)d=await api('insights?'+new URLSearchParams({keyword,kind,...dates}));
+  if(kind==='related'&&d.status!=='available'){
+   const saved=await api('insights/ranges?'+new URLSearchParams({keyword,kind}));
+   const range=saved.ranges.find(r=>r.status==='available'&&r.start_date===dates.start_date&&r.end_date<=dates.end_date);
+   if(range)d=await api('insights?'+new URLSearchParams({keyword,kind,start_date:range.start_date,end_date:range.end_date}));
+  }
   if(revision!==insightRevision||context!==insightContext()||readingInfo())return;
   if(kind==='audience')renderAudienceRanges(history,d);
-  if(d.status!=='available'){if(kind==='audience')renderAudienceEmpty(d,history);else if(d.status==='no_data'){const detail='平台未返回本日期段的关联词，不代表指数为零。';$(target).innerHTML=infoTip('无数据',detail);$('#relatedSummary').innerHTML=infoTip('无数据',detail)}else insightMessage(kind,target,moduleState(kind));return}
+  if(d.status!=='available'){
+   if(kind==='audience')renderAudienceEmpty(d,history);
+   else{
+    const entry=moduleEntry(kind),used=d.result?.metadata||entry?.lastJob?.query||entry?.body||dates;
+    const detail=(d.status==='no_data'?'平台未返回本日期段的关联词，不代表指数为零。 ':'')+'关联词查询使用 '+used.start_date+' 至 '+used.end_date+'。';
+    const message=infoTip(d.status==='no_data'?'无数据':moduleState(kind),detail);
+    $(target).innerHTML=message;$('#relatedSummary').innerHTML=infoTip(d.status==='no_data'?'无数据':moduleState(kind),detail);
+   }
+   return;
+  }
   renderInsight(kind,target,d.result);
  }catch(e){if(revision===insightRevision&&context===insightContext()&&!readingInfo())insightMessage(kind,target,'本模块读取失败：'+e.message)}
 }
@@ -489,7 +509,11 @@ try{const saved=JSON.parse(sessionStorage.getItem('index-report-batch')||'null')
 function saveBatch(){try{sessionStorage.setItem('index-report-batch',JSON.stringify(reportBatch))}catch{}}
 function makeReportBatch(query,id){
  const entries=[{path:'queries',label:'指数趋势 · '+query.keywords.join('、'),body:{...query}}];
- for(const word of query.keywords)for(const [kind,label] of [['related','关联词'],['audience','人群画像']])entries.push({path:'insights/queries',label:label+' · '+word,body:{...query,keywords:[word],kind}});
+ for(const word of query.keywords)for(const [kind,label] of [['related','关联词'],['audience','人群画像']]){
+  const dates=insightDates(kind,query.start_date,query.end_date);
+  if(dates.start_date>dates.end_date)throw Error('关联词可用截止日为 '+dates.end_date+'，开始日须不晚于该日。');
+  entries.push({path:'insights/queries',label:label+' · '+word,body:{...query,...dates,keywords:[word],kind}});
+ }
  return {id,query,entries:entries.map((entry,i)=>({...entry,idem:id+'-'+i,jobId:null,status:'not_submitted',error:null}))};
 }
 function renderReportProgress(){
@@ -515,9 +539,13 @@ async function refreshReportBatch(){
  if(!reportBatch)return;
  await Promise.all(reportBatch.entries.filter(e=>e.jobId).map(async entry=>{try{const {job}=await api('jobs/'+entry.jobId);entry.lastJob=job;entry.status=job.status;entry.cache_hit=job.cache_hit;entry.error=job.error?(job.error.message+(job.error.http_status?' HTTP '+job.error.http_status:'')+(job.error.business_code!=null?' 业务码 '+job.error.business_code:'')):null}catch(e){entry.error='状态读取失败：'+e.message}}));saveBatch();renderReportProgress();
 }
-function moduleState(kind){
+function moduleEntry(kind){
  const word=$('#keywordSelect').value,start=$('#insightStart').value,end=$('#insightEnd').value;
- const entry=reportBatch?.entries.find(e=>e.body.kind===kind&&e.body.keywords[0]===word&&e.body.start_date===start&&e.body.end_date===end);
+ return reportBatch?.entries.find(e=>e.body.platform===chosenPlatform&&e.body.kind===kind&&e.body.keywords[0]===word&&
+  ((e.body.start_date===start&&e.body.end_date===end)||(reportBatch.query.start_date===start&&reportBatch.query.end_date===end)));
+}
+function moduleState(kind){
+ const entry=moduleEntry(kind);
  if(!entry)return '未采集 · 请通过「新建完整查询」开始采集。';
  return entry.error?entry.error:entry.jobId?'当前模块：'+statusName(entry.status)+'。结果返回后自动更新。':'当前模块待提交，请展开下方任务进度继续提交未确认任务。';
 }

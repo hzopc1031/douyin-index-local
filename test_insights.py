@@ -181,6 +181,134 @@ class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.hub.store.update_job(queued['id'], 'failed')
 
 class InsightApiTests(_ApiTests):
+    async def test_related_replay_keeps_original_job_after_cutoff_advances(self):
+        from unittest.mock import patch
+        query = {**QUERY, 'kind': 'related', 'start_date': '2026-09-28', 'end_date': '2026-10-27'}
+        headers = {**self.bearer, 'Idempotency-Key': 'related-replay'}
+        with patch.object(self.hub.store, 'latest_available_date', return_value='2026-10-27') as latest:
+            first = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
+            job = (await first.json())['job']
+            latest.return_value = '2026-10-28'
+            replay = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
+            self.assertEqual(replay.status, 202)
+            self.assertEqual((await replay.json())['job'], job)
+            for changed in ({'keywords': ['其他词']}, {'end_date': '2026-10-26'},
+                            {'start_date': '2026-09-29'}):
+                conflict = await self.client.post('/api/v1/insights/queries',
+                    json={**query, **changed}, headers=headers)
+                self.assertEqual(conflict.status, 409)
+        self.assertEqual(self.calls, [])
+
+    async def test_related_replay_rejects_changed_end_before_cutoff(self):
+        from unittest.mock import patch
+        query = {**QUERY, 'kind': 'related', 'start_date': '2026-10-20', 'end_date': '2026-10-24'}
+        headers = {**self.bearer, 'Idempotency-Key': 'related-early-replay'}
+        with patch.object(self.hub.store, 'latest_available_date', return_value='2026-10-27'):
+            first = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
+            self.assertEqual(first.status, 202)
+            job = (await first.json())['job']
+            replay = await self.client.post('/api/v1/insights/queries',
+                json=dict(reversed(list(query.items()))), headers=headers)
+            self.assertEqual((await replay.json())['job'], job)
+            conflict = await self.client.post('/api/v1/insights/queries',
+                json={**query, 'end_date': '2026-10-25'}, headers=headers)
+            self.assertEqual(conflict.status, 409)
+        self.assertEqual(self.calls, [])
+
+    async def test_related_shifted_request_replay_preserves_dates(self):
+        from unittest.mock import patch
+        from test_insight_guards import FixedDatetime
+        query = {**QUERY, 'kind': 'related', 'start_date': '2026-10-26', 'end_date': '2026-10-27'}
+        headers = {**self.bearer, 'Idempotency-Key': 'related-shifted-replay'}
+        with patch('hub_insights.dt.datetime', FixedDatetime), \
+                patch('hub_insights.related_end_lag_days', return_value=3), \
+                patch.object(self.hub.store, 'latest_available_date', return_value=None) as latest:
+            first = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
+            self.assertEqual(first.status, 202)
+            job = (await first.json())['job']
+            self.assertEqual((job['query']['start_date'], job['query']['end_date']),
+                             ('2026-10-24', '2026-10-25'))
+            for latest_date in (None, '2026-10-27'):
+                latest.return_value = latest_date
+                replay = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
+                self.assertEqual(replay.status, 202)
+                self.assertEqual((await replay.json())['job'], job)
+        self.assertEqual(self.calls, [])
+
+    async def test_legacy_shifted_range_reads_original_dates_but_does_not_cache_them(self):
+        query = {**QUERY, 'kind': 'related', 'start_date': '2026-10-24', 'end_date': '2026-10-25',
+                 'requested_end_date': '2026-10-27'}
+        result = {'metadata': {**query, 'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()},
+                  'data': {'content_related': [], 'search_related': []}}
+        self.hub.store.save_insight(query, result)
+        original = list(self.hub.store.db.execute('SELECT * FROM insights').fetchone())
+        for start, end in [('2026-10-24', '2026-10-25'), ('2026-10-26', '2026-10-27')]:
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': QUERY['keywords'][0], 'kind': 'related', 'start_date': start, 'end_date': end},
+                headers=self.bearer)
+            data = await response.json()
+            self.assertEqual(data['status'], 'available')
+            self.assertEqual(data['result'], result)
+        for start in ('2026-10-23', '2026-10-25', '2026-10-27'):
+            self.assertIsNone(self.hub.store.insight({**query, 'start_date': start, 'end_date': '2026-10-27'}))
+        requested = {k: v for k, v in query.items() if k != 'requested_end_date'}
+        self.assertIsNone(self.hub.store.cached({**requested, 'start_date': '2026-10-26', 'end_date': '2026-10-27'}))
+        self.assertEqual(self.hub.store.cached(requested), result)
+        self.assertEqual(list(self.hub.store.db.execute('SELECT * FROM insights').fetchone()), original)
+        self.assertEqual(self.calls, [])
+
+    async def test_legacy_related_clamp_is_readable_without_rewriting_cache(self):
+        query = {**QUERY, 'kind': 'related', 'requested_end_date': '2025-01-09'}
+        result = {'metadata': {**query, 'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()},
+                  'data': {'content_related': [], 'search_related': []}}
+        self.hub.store.save_insight(query, result)
+        original = list(self.hub.store.db.execute('SELECT * FROM insights').fetchone())
+        for end in ('2025-01-07', '2025-01-09'):
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': '酵素', 'kind': 'related', 'start_date': QUERY['start_date'], 'end_date': end}, headers=self.bearer)
+            data = await response.json()
+            self.assertEqual(data['status'], 'available')
+            self.assertEqual(data['result']['metadata']['end_date'], '2025-01-07')
+        actual = {k: v for k, v in query.items() if k != 'requested_end_date'}
+        self.assertEqual(self.hub.store.cached(actual), result)
+        self.assertIsNone(self.hub.store.cached({**actual, 'end_date': '2025-01-09'}))
+        self.hub.store.save_insight(query, {**result, 'no_data': True,
+            'metadata': {**result['metadata'], 'fetched_at': (dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=1)).isoformat()}})
+        self.assertEqual(self.hub.store.latest_real_insight(actual), result)
+        self.assertEqual(list(self.hub.store.db.execute('SELECT * FROM insights ORDER BY fetched LIMIT 1').fetchone()), original)
+        self.assertEqual(self.calls, [])
+
+    async def test_related_uses_stored_trend_limit_and_exact_history(self):
+        from unittest.mock import patch
+        query = {**QUERY, 'start_date': '2026-09-28', 'end_date': '2026-10-27'}
+        with patch.object(self.hub.store, 'latest_available_date', return_value='2026-10-27'):
+            history = await (await self.client.get('/api/v1/history', headers=self.bearer)).json()
+            self.assertEqual(history['related_latest_available_date'], '2026-10-25')
+            for kind in ('related', 'audience', None):
+                body = {**query, **({'kind': kind} if kind else {})}
+                response = await self.client.post('/api/v1/'+('insights/queries' if kind else 'queries'),
+                    json=body, headers={**self.bearer, 'Idempotency-Key': 'dates-'+str(kind)})
+                self.assertEqual(response.status, 202)
+                actual = (await response.json())['job']['query']
+                self.assertEqual(actual['start_date'], query['start_date'])
+                self.assertEqual(actual['end_date'], '2026-10-25' if kind == 'related' else '2026-10-27')
+                if kind == 'related':
+                    result = {'data': {'content_related': [], 'search_related': []},
+                              'metadata': {**actual, 'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()}}
+                    self.hub.store.save_insight(actual, result)
+                    response = await self.client.get('/api/v1/insights', params={
+                        'keyword': '酵素', 'kind': kind, 'start_date': actual['start_date'], 'end_date': actual['end_date']}, headers=self.bearer)
+                    self.assertEqual((await response.json())['status'], 'available')
+            for end in ('2026-10-24', '2026-10-25'):
+                response = await self.client.post('/api/v1/insights/queries',
+                    json={**query, 'kind': 'related', 'end_date': end},
+                    headers={**self.bearer, 'Idempotency-Key': 'early-'+end})
+                self.assertEqual((await response.json())['job']['query']['end_date'], end)
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': '酵素', 'kind': 'related', 'start_date': query['start_date'], 'end_date': query['end_date']}, headers=self.bearer)
+            self.assertEqual((await response.json())['query']['end_date'], '2026-10-27')
+        self.assertEqual(self.calls, [])
+
     async def test_all_saved_ranges_and_attempt_metadata_are_read_only(self):
         q = {**QUERY, 'kind': 'audience'}
         def saved(query, stamp, empty=False):

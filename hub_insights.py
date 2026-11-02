@@ -15,7 +15,7 @@ def related_end_lag_days():
         return 3
 
 
-def validate_insight(body, *, historical=False):
+def validate_insight(body, *, historical=False, latest_related_date=None):
     if type(body) is not dict:
         raise HubError('invalid_query', '请求须为 JSON 对象。')
     body = dict(body)
@@ -24,9 +24,15 @@ def validate_insight(body, *, historical=False):
         raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
     requested_end = body.pop('requested_end_date', None)
     query = validate_query(body, historical=historical)
-    if kind == 'related':
+    if kind == 'related' and not historical:
         end = dt.date.fromisoformat(query['end_date'])
         start = dt.date.fromisoformat(query['start_date'])
+        if latest_related_date is not None:
+            limit = dt.date.fromisoformat(latest_related_date)
+            if start > limit:
+                raise HubError('invalid_dates', f'关联词可用截止日为 {limit}，开始日须不晚于该日。')
+            end = min(end, limit)
+            query['end_date'] = end.isoformat()
         try:
             max_end = dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())
         except OverflowError:
