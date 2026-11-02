@@ -60,3 +60,5 @@ systemctl --user stop dyc-sms-login.service
 ## 本轮离线结果
 
 2026-11-02：Python 3.12.16 完整 dyc 套件 194 项全部通过，0 跳过，151.816 秒；包含免口令手机页面、刷新恢复、可配置口令期限、无 TTY 启动以及遇验证停止。服务器 wheel 全部 SHA-256 校验通过、离线安装与 pip check 通过，solver 4 项通过。真实短信与评论验证未执行。
+
+指定 `codex exec review --base origin/server-snapshot-2026-10-30 -c model_reasoning_effort="high"` 已完成一轮：无 P0/P1；按用户范围保留两个 P2：旧 CLI 扫码 login 未显式持久化 session-only Cookie；短信登录在截止前刚成功时，截止后的状态请求可能将成功改为过期。后者影响截止附近的成功提示/退出码，真实操作如遇到应记录为未确认。评审内 80 项测试通过，完整浏览器测试受评审沙箱 Xvfb 限制，主环境完整 194 项通过。
