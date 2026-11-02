@@ -33,7 +33,8 @@
     $('details').textContent = terminal.has(data.state) ? '' : `${data.phone || ''} 剩余 ${data.expires_in} 秒`;
     if (data.state === 'code_sent') $('details').textContent += `；发码冷却 ${data.resend_in} 秒`;
     if (data.failure) $('details').textContent = `失败步骤：${data.failure.step || '会话'}；原因：${data.failure.reason}；操作：${data.failure.operation || '未记录'}`;
-    if (data.send_result && ['code_sent', 'failed'].includes(data.state)) {
+    if (data.send_result && (data.state === 'code_sent' ||
+        (data.state === 'failed' && data.send_result.outcome !== 'accepted'))) {
       $('status').textContent = data.send_result.description;
       $('details').textContent += `；HTTP ${data.send_result.http_status ?? '未捕获'}；业务码 ${data.send_result.business_code ?? '未捕获'}`;
     }

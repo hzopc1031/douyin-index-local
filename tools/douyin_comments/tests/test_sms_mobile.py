@@ -7,6 +7,7 @@ import unittest
 from urllib.parse import urlsplit
 from unittest.mock import AsyncMock
 
+from dyc.errors import Stop
 from dyc.sms_browser import SmsBrowser
 from dyc.sms_state import LoginSession, SmsQuota
 from dyc.sms_web import HEADERS, WebApp
@@ -101,6 +102,31 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.locator('#retry').click()
                 await page.locator('#sms').wait_for(state='visible')
                 self.assertEqual(len(browsers),4)
+                app.session.send_result = dict(outcome='accepted', http_status=200,
+                    business_code='0', description='平台已接受发码请求')
+                app.session.state = 'code_sent'
+                await page.clock.fast_forward(2600)
+                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('平台已接受')")
+                browsers[-1].observe.side_effect = Stop(4, 'code_invalid')
+                browsers[-1].diagnose.return_value = {'reason': 'code_invalid'}
+                await page.clock.fast_forward(2600)
+                await page.locator('#retry').wait_for(state='visible')
+                self.assertIn('登录已停止', await page.locator('#status').inner_text())
+                self.assertNotIn('平台已接受', await page.locator('#status').inner_text())
+                self.assertIn('code_invalid', await page.locator('#details').inner_text())
+                self.assertTrue(await page.locator('#sms').is_hidden())
+                self.assertFalse(app.done.is_set())
+                for outcome, description in (('unconfirmed', '未确认是否已发送'),
+                        ('business_failed', '平台拒绝发码'), ('rate_limited', '平台限制发码频率'),
+                        ('verification_required', '平台要求安全验证')):
+                    app.session.send_result = dict(outcome=outcome, http_status=None,
+                        business_code=None, description=description)
+                    await page.reload()
+                    await page.locator('#retry').wait_for(state='visible')
+                    self.assertEqual(await page.locator('#status').inner_text(), description)
+                    self.assertNotIn('发码冷却', await page.locator('#details').inner_text())
+                    self.assertTrue(await page.locator('#sms').is_hidden())
+                    self.assertEqual(len(browsers), 4)
                 for browser in browsers: browser.send.assert_not_awaited()
             finally:
                 release.set()

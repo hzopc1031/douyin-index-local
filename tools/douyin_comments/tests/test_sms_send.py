@@ -16,6 +16,9 @@ from tests.test_sms_state import Clock, DummyBrowser, PHONE, CODE
 
 CASES = (
     (200, {'message': 'success', 'data': {'error_code': 0}}, 'accepted'),
+    (200, {'message': 'success', 'data': {'error_code': 0, 'description': '验证码发送成功'}}, 'accepted'),
+    (200, {'message': 'success', 'data': {'error_code': 0, 'description': 'Verification code sent'}}, 'accepted'),
+    (200, {'message': 'success', 'data': {'error_code': 0, 'description': 'Security verification required'}}, 'verification_required'),
     (200, {'message': 'error', 'data': {'error_code': 1001, 'description': 'invalid phone'}}, 'business_failed'),
     (429, None, 'rate_limited'),
     (200, {'data': {'error_code': 1105, 'description': '请完成安全验证'}}, 'verification_required'),

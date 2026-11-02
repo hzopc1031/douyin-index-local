@@ -95,15 +95,18 @@ def sms_result(status, body):
             for key in ('message', 'description', 'error_msg', 'msg'):
                 if type(obj.get(key)) is str:
                     message += ' ' + obj[key][:500].lower()
-        # shortcut: only explicit zero codes or passport message=success are accepted;
-        # add other response shapes only after independent official-response validation.
+        # shortcut: accept explicit zero/success only; extend shapes after official validation.
         success = (codes and all(code == '0' for code in codes)) or (not codes and body.get('message') == 'success')
-        if any(word in message for word in ('captcha', 'verify', 'verification', '验证', '校验')):
+        if any(word in message for word in ('captcha', 'verification required', 'verify required', 'need verify',
+                                          'security verification', 'complete verification',
+                                          '安全验证', '完成验证', '需要验证', '验证后', '校验失败', '校验未通过')):
             outcome, description = 'verification_required', '平台要求安全验证，已停止'
         elif any(word in message for word in ('frequent', 'too many', '频繁', '频率', '限流', '限频')):
             outcome, description = 'rate_limited', '平台限制发码频率，已停止'
         elif any(word in message for word in ('risk', '风控', '风险')):
             outcome, description = 'access_denied', '平台风险校验未通过，已停止'
+        elif any(word in message for word in ('invalid phone', 'invalid mobile', '手机号格式', '手机号码错误')):
+            outcome, description = 'business_failed', '平台拒绝手机号格式或号段（号码已脱敏）'
         elif success and body.get('message') != 'error':
             outcome, description = 'accepted', '平台已接受发码请求，请查看短信'
         elif codes or body.get('message') == 'error':
