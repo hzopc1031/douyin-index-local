@@ -95,7 +95,7 @@ def run(output=None):
                     page.screenshot(path=str(output/'hub-audience-uncollected.png'))
 
                 # Complete server history must retain not-yet-created tasks from this session.
-                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['酵素'],start_date:'2026-10-25',end_date:'2026-10-31'},'synthetic-pending');renderReportProgress();loadInsights()")
+                page.evaluate("async range => {reportBatch=makeReportBatch({platform:'douyin',keywords:['酵素'],...range},'synthetic-pending');renderReportProgress();await loadInsights()}", dict(start_date=START, end_date=END))
                 assert '待提交' in page.locator('#audienceData').inner_text()
                 assert '继续提交未确认任务' in page.locator('#audienceData').inner_text()
                 assert not page.locator('#collectAudience').count()
@@ -179,7 +179,7 @@ def run(output=None):
                 assert page.locator('[data-audience-range]').count() == 1
                 assert '无法确认是否曾失败或跳过' in page.locator('#audienceData').inner_text()
                 fixture['jobs'][0].update(status='no_data', error=dict(code='skipped_trend_no_data'))
-                page.evaluate("$('#insightStart').value='2026-10-25';$('#insightEnd').value='2026-10-31';refresh()")
+                page.evaluate("async range => {$('#insightStart').value=range.start_date;$('#insightEnd').value=range.end_date;await refresh()}", dict(start_date=START, end_date=END))
                 assert page.locator('#audienceData h3').inner_text() == '趋势无数据已跳过'
                 page.locator('[data-platform=baidu]').click()
                 assert page.locator('#audienceRanges').inner_text() == ''
