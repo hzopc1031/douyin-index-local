@@ -275,12 +275,18 @@ class Store:
             ?='related' AND json_extract(result,'$.metadata.kind')='related'
             AND json_extract(result,'$.metadata.platform')=?
             AND json_extract(result,'$.metadata.keywords')=?
-            AND json_extract(result,'$.metadata.start_date')=?
-            AND (json_extract(result,'$.metadata.end_date')=? OR
-                 (? AND json_extract(result,'$.metadata.requested_end_date')=?)))
+            AND ((json_extract(result,'$.metadata.start_date')=?
+                  AND json_extract(result,'$.metadata.end_date')=?) OR
+                 (? AND json_extract(result,'$.metadata.requested_end_date')=?
+                  AND (json_extract(result,'$.metadata.start_date')=? OR
+                       (? > json_extract(result,'$.metadata.end_date') AND
+                        julianday(json_extract(result,'$.metadata.start_date'))
+                        + julianday(json_extract(result,'$.metadata.requested_end_date'))
+                        - julianday(json_extract(result,'$.metadata.end_date'))=julianday(?))))))
             ORDER BY json_extract(result,'$.metadata.end_date')=? DESC, fetched DESC''',
             (query_hash(query), query['kind'], query['platform'], encode(query['keywords']),
-             query['start_date'], query['end_date'], max_age is None, query['end_date'], query['end_date']))
+             query['start_date'], query['end_date'], max_age is None, query['end_date'],
+             query['start_date'], query['start_date'], query['start_date'], query['end_date']))
         for row in rows:
             if max_age is not None and time.time()-row['fetched'] > max_age:
                 continue

@@ -6,7 +6,7 @@ const calls=[];let reading=false;
 const ctx=vm.createContext({$,URLSearchParams,esc:String,chosenPlatform:'douyin',readingInfo:()=>reading,
  sessionStorage:{getItem(){return null}},rangeError(){return ''},
  api:async path=>{if(path.startsWith('insights/ranges?'))return {ranges:[]};calls.push(new URLSearchParams(path.split('?')[1]));return {status:'not_collected'}},
- moduleState(){return '未采集'},insightMessage(kind,target,message){$(target).textContent=message}});
+  moduleEntry(){return null},moduleState(){return '未采集'},insightMessage(kind,target,message){$(target).textContent=message}});
 vm.runInContext('let tipSequence=0;'+html.slice(html.indexOf('function infoTip('),html.indexOf('function openInfo(')),ctx);
 vm.runInContext("let relatedLatestDate='2026-10-25';"+
  html.slice(html.indexOf('const insightTitles='),html.indexOf('let insightRevision=')),ctx);
@@ -67,5 +67,9 @@ vm.runInContext("let insightRevision=1;function insightContext(){return 'fixture
  await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);
  assert.equal($('#relatedData').innerHTML,before);
  assert.equal($('#relatedData').textContent,'');
+ reading=false;ctx.moduleEntry=()=>({body:{start_date:'2026-09-28',end_date:'2026-10-23'}});
+ ctx.api=async path=>path.startsWith('insights/ranges?')?{ranges:[]}:{status:'not_collected'};
+ await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);
+ assert($('#relatedData').innerHTML.includes('关联词查询使用 2026-09-28 至 2026-10-23'));
  console.log('related dates: submission, unchanged trend/audience, earlier input, empty interval, labels and exact/fallback reads passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

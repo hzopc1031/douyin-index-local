@@ -487,7 +487,7 @@ async function loadInsight(kind,target,revision,context){
   if(d.status!=='available'){
    if(kind==='audience')renderAudienceEmpty(d,history);
    else{
-    const used=d.result?.metadata||dates;
+    const entry=moduleEntry(kind),used=d.result?.metadata||entry?.lastJob?.query||entry?.body||dates;
     const detail=(d.status==='no_data'?'平台未返回本日期段的关联词，不代表指数为零。 ':'')+'关联词查询使用 '+used.start_date+' 至 '+used.end_date+'。';
     const message=infoTip(d.status==='no_data'?'无数据':moduleState(kind),detail);
     $(target).innerHTML=message;$('#relatedSummary').innerHTML=infoTip(d.status==='no_data'?'无数据':moduleState(kind),detail);
@@ -539,9 +539,13 @@ async function refreshReportBatch(){
  if(!reportBatch)return;
  await Promise.all(reportBatch.entries.filter(e=>e.jobId).map(async entry=>{try{const {job}=await api('jobs/'+entry.jobId);entry.lastJob=job;entry.status=job.status;entry.cache_hit=job.cache_hit;entry.error=job.error?(job.error.message+(job.error.http_status?' HTTP '+job.error.http_status:'')+(job.error.business_code!=null?' 业务码 '+job.error.business_code:'')):null}catch(e){entry.error='状态读取失败：'+e.message}}));saveBatch();renderReportProgress();
 }
+function moduleEntry(kind){
+ const word=$('#keywordSelect').value,start=$('#insightStart').value,end=$('#insightEnd').value;
+ return reportBatch?.entries.find(e=>e.body.platform===chosenPlatform&&e.body.kind===kind&&e.body.keywords[0]===word&&
+  ((e.body.start_date===start&&e.body.end_date===end)||(reportBatch.query.start_date===start&&reportBatch.query.end_date===end)));
+}
 function moduleState(kind){
- const word=$('#keywordSelect').value,{start_date:start,end_date:end}=insightDates(kind,$('#insightStart').value,$('#insightEnd').value);
- const entry=reportBatch?.entries.find(e=>e.body.kind===kind&&e.body.keywords[0]===word&&e.body.start_date===start&&e.body.end_date===end);
+ const entry=moduleEntry(kind);
  if(!entry)return '未采集 · 请通过「新建完整查询」开始采集。';
  return entry.error?entry.error:entry.jobId?'当前模块：'+statusName(entry.status)+'。结果返回后自动更新。':'当前模块待提交，请展开下方任务进度继续提交未确认任务。';
 }

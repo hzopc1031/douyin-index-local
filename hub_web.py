@@ -543,14 +543,21 @@ def mount(app, hub):
         p = require(request, 'query')
         from hub_insights import validate_insight
         body = await read_json(request)
+        submitted = None
         if request.path.endswith('/insights/queries'):
-            existing = s.db.execute('SELECT query FROM jobs WHERE owner=? AND idem=?',
+            submitted = validate_insight(body, historical=True)
+            if 'requested_end_date' in body:
+                submitted['requested_end_date'] = body['requested_end_date']
+            existing = s.db.execute('SELECT query,request_source FROM jobs WHERE owner=? AND idem=?',
                                    (p['id'], request.headers.get('Idempotency-Key'))).fetchone()
-            previous = json.loads(existing['query']) if existing else None
-            limit = previous['end_date'] if previous and previous.get('kind') == 'related' else related_latest_date(s)
-            query = validate_insight(body, latest_related_date=limit)
-            if previous and query == {k: v for k, v in previous.items() if k != 'requested_end_date'}:
-                query = previous
+            original = (json.loads(existing['request_source'] or '{}').get('submitted_query')
+                        if existing else None)
+            if original is not None:
+                if submitted != original:
+                    raise HubError('idempotency_conflict', '该幂等键已用于其他查询。', 409)
+                query = json.loads(existing['query'])
+            else:
+                query = validate_insight(body, latest_related_date=related_latest_date(s))
         else:
             query = validate_query(body)
         # Transport peer only: do not trust caller-supplied X-Forwarded-For.
@@ -558,6 +565,9 @@ def mount(app, hub):
         source = {'kind': 'admin' if p.get('admin') else 'api_key',
                   'peer_ip': request.remote, 'user_agent': user_agent,
                   'recorded_at': time.time()}
+        if submitted is not None:
+            # Preserve replay identity without adding request dates to cache/worker keys.
+            source['submitted_query'] = submitted
         if not p.get('admin'):
             key = s.db.execute('SELECT name,prefix FROM keys WHERE id=?', (p['id'],)).fetchone()
             source.update({'key_name': key['name'], 'key_prefix': key['prefix']})
