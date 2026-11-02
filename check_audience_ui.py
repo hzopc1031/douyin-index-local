@@ -125,6 +125,7 @@ def run(output=None):
                         page.locator('#audienceData .info-button').click()
                         assert '不代表各分组数值为零' in page.locator('#audienceData').inner_text()
                         page.keyboard.press('Escape')
+                        page.locator('#resultPanel-audience h2').click()
                 # Failed reads are not failed collections, and old figures must disappear.
                 fixture.update(status='available', attempts=[])
                 page.evaluate('loadInsights()')
@@ -187,6 +188,7 @@ def run(output=None):
                 page.locator('#audienceRanges .info-button').click()
                 assert '可能遗漏更早' in page.locator('#audienceRanges').inner_text()
                 page.keyboard.press('Escape')
+                page.locator('#resultPanel-audience h2').click()
                 assert page.locator('[data-audience-range]').count() == 1
                 assert '无法确认是否曾失败或跳过' in page.locator('#audienceData').inner_text()
                 fixture['jobs'][0].update(status='no_data', error=dict(code='skipped_trend_no_data'))

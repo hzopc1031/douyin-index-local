@@ -38,9 +38,9 @@ def run(output=None):
                 context = browser.new_context(viewport=dict(width=width,height=height), has_touch=width==430, is_mobile=width==430, locale='zh-CN', timezone_id='Asia/Shanghai', service_workers='block')
                 page = context.new_page()
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
-                errors, unexpected, writes, status_reads = [], [], [], []
+                errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'login': 'cookie_present', 'paused': None}
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None}
 
                 def route(request_route):
                     request = request_route.request
@@ -68,8 +68,8 @@ def run(output=None):
                     elif path == 'keys': data = dict(keys=[])
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
-                        data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['missing_latest'] and i==6 else 12000+i*900,
-                                    composite_index=30000+i*1200) for i in range(7)])
+                        data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,
+                                    composite_index=None if fixture['all_missing'] else 30000+i*1200) for i in range(7)])
                     elif path == 'insights':
                         kind = query['kind'][0]
                         data = dict(status=fixture[kind],result=dict(metadata=META,data=dict(search_related=RELATED,content_related=RELATED[10:]) if kind=='related' else dict(dimensions=AUDIENCE)))
@@ -77,6 +77,7 @@ def run(output=None):
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
                         request_route.abort()
+                    elif path == fixture.get('hold'): held.append((request_route, data))
                     else: request_route.fulfill(content_type='application/json',body=json.dumps(data))
 
                 context.route('**/*', route)
@@ -112,6 +113,11 @@ def run(output=None):
                     assert not popup.is_visible()
                     tip.click()
                 assert popup.is_visible()
+                if width == 430:
+                    tip.tap()
+                    assert not popup.is_visible()
+                    assert tip.get_attribute('aria-expanded') == 'false'
+                    tip.tap()
                 assert tip.get_attribute('aria-expanded') == 'true'
                 assert '关联分不是概率' in popup.inner_text()
                 bounds = popup.bounding_box()
@@ -141,6 +147,25 @@ def run(output=None):
                 page.clock.fast_forward(15000)
                 page.wait_for_function('!refreshing')
                 assert len(status_reads) > before_reads
+                # A response already in flight must not remove the open/focused explanation.
+                for endpoint, target in [('status', '#browserBadge'), ('series', '#trendSummary'), ('insights', '#relatedSummary')]:
+                    fixture['hold'] = endpoint
+                    page.evaluate('void refresh()')
+                    page.wait_for_timeout(80)
+                    assert held, endpoint
+                    active_tip = page.locator(target + ' .info-button')
+                    active_tip.focus()
+                    page.keyboard.press('Enter')
+                    active_popup = page.locator('#' + active_tip.get_attribute('aria-controls'))
+                    for pending, data in held:
+                        pending.fulfill(content_type='application/json', body=json.dumps(data))
+                    held.clear()
+                    fixture['hold'] = None
+                    page.wait_for_function('!refreshing')
+                    assert active_popup.is_visible(), endpoint
+                    assert active_tip.evaluate('(n) => n === document.activeElement'), endpoint
+                    page.keyboard.press('Escape')
+                    heading.click()
                 page.get_by_role('tab', name='关联需求', exact=True).click()
                 assert page.locator('#relatedData .rank-row').count() == 10
                 assert page.locator('#relatedData tbody tr:visible').count() == 0
@@ -168,6 +193,14 @@ def run(output=None):
                 page.keyboard.press('Home')
                 assert page.get_by_role('tab', name='概要', exact=True).get_attribute('aria-selected')=='true'
                 page.locator('#openQuery').click()
+                query_tip = page.locator('#queryForm .info-button')
+                query_tip.focus()
+                page.keyboard.press('Enter')
+                assert query_tip.get_attribute('aria-expanded') == 'true'
+                page.keyboard.press('Escape')
+                assert page.locator('#queryDialog').is_visible()
+                assert query_tip.get_attribute('aria-expanded') == 'false'
+                assert not writes
                 page.locator('#queryWords').fill('杭州')
                 page.locator('#queryRange>summary').click()
                 page.locator('[data-range=query][data-period="30d"]').click()
@@ -232,6 +265,13 @@ def run(output=None):
                 fixture['missing_latest']=True
                 page.evaluate('loadSeries()')
                 assert '—' in page.locator('#trendSummary').inner_text()
+                fixture['all_missing']=True
+                page.evaluate('loadSeries()')
+                assert '无数据' in page.locator('#trendSummary').inner_text()
+                assert '已存' not in page.locator('#trendSummary').inner_text()
+                assert '—' in page.locator('#trendSummary').inner_text()
+                fixture['all_missing']=False
+                page.evaluate('loadSeries()')
                 fixture['related']='no_data'
                 page.evaluate('loadInsights()')
                 assert ''.join(page.locator('#relatedSummary').inner_text().split()) == '无数据ⓘ'

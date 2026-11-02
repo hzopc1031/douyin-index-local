@@ -44,7 +44,7 @@ const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=
 let tipSequence=0;
 function infoTip(status,detail){
  const id='info-tip-'+(++tipSequence);
- return '<span class="tip-line"><span>'+esc(status)+'</span><button type="button" class="info-button" aria-label="'+esc(status)+'：查看说明" aria-expanded="false" aria-describedby="'+id+'" aria-controls="'+id+'">ⓘ</button><span class="info-popover" id="'+id+'" popover="auto" role="note">'+esc(detail)+'</span></span>';
+ return '<span class="tip-line"><span>'+esc(status)+'</span><button type="button" class="info-button" aria-label="'+esc(status)+'：查看说明" aria-expanded="false" aria-describedby="'+id+'" aria-controls="'+id+'" popovertarget="'+id+'">ⓘ</button><span class="info-popover" id="'+id+'" popover="auto" role="note">'+esc(detail)+'</span></span>';
 }
 function openInfo(button){
  const popup=document.getElementById(button.getAttribute('aria-controls'));
@@ -67,11 +67,12 @@ document.addEventListener('pointerout',e=>{
  if(popup?.matches(':popover-open')&&!popup.dataset.pinned&&!line.contains(e.relatedTarget))popup.hidePopover();
 });
 document.addEventListener('click',e=>{
- const button=e.target.closest('.info-button');if(!button)return;
+ const button=e.target.closest('.info-button');if(!button)return;e.preventDefault();
  const popup=document.getElementById(button.getAttribute('aria-controls'));
  if(popup.matches(':popover-open')&&popup.dataset.pinned)popup.hidePopover();
  else{openInfo(button);popup.dataset.pinned='true'}
 });
+function readingInfo(){return Boolean(document.querySelector('.info-popover:popover-open,.info-button:focus'))}
 function closeInfo(){document.querySelectorAll('.info-popover:popover-open').forEach(p=>p.hidePopover())}
 window.addEventListener('resize',closeInfo);
 document.addEventListener('scroll',e=>{if(!e.target.closest?.('.info-popover'))closeInfo()},true);
@@ -189,8 +190,8 @@ function renderJobs(){
  if(jobs.length){const j=jobs[0];$('#latestJob').textContent='最近任务：'+statusName(j.status)+(j.cache_hit?' · 缓存命中':'')+(j.error?' · '+j.error.message:'')}
 }
 function drawChart(data){
- const latest=data.points.at(-1);
- $('#trendSummary').innerHTML=latest?'<div class="summary-number">'+numberLabel(latest.value)+'<small>搜索指数</small></div><p class="summary-caption">'+esc(latest.date)+' · 综合指数 '+numberLabel(latest.composite_index)+'</p><p class="summary-note">'+infoTip('已存 '+data.points.length+' 个日期','缺失为 —；搜索指数不是搜索次数。综合指数尚未独立逐日人工核对。')+'</p>':'<p>该范围暂无已保存的趋势数据。</p>';
+ const latest=data.points.at(-1),hasValues=data.points.some(p=>p.value!=null||p.composite_index!=null);
+ $('#trendSummary').innerHTML=latest?'<div class="summary-number">'+numberLabel(latest.value)+'<small>搜索指数</small></div><p class="summary-caption">'+esc(latest.date)+' · 综合指数 '+numberLabel(latest.composite_index)+'</p><p class="summary-note">'+infoTip(hasValues?data.points.length+' 个日期':'无数据','缺失为 —；搜索指数不是搜索次数。综合指数尚未独立逐日人工核对。')+'</p>':'<p>'+infoTip('无数据','该范围暂无已保存的趋势数据，缺失不代表零。')+'</p>';
  const points=data.points,W=960,H=300,L=70,R=22,T=25,B=45;
  const indexed=$('#chartMode').value==='indexed';
  const defs=[{key:'value',name:'搜索指数',color:'#287965',on:$('#showSearch').checked},{key:'composite_index',name:'综合指数',color:'#b67b35',on:$('#showComposite').checked}];
@@ -214,7 +215,7 @@ function drawChart(data){
  surface.onpointermove=e=>{const b=surface.getBoundingClientRect(),px=(e.clientX-b.left)*W/b.width;show(Math.max(0,Math.min(points.length-1,Math.round((px-L)/(W-L-R)*(points.length-1)))))};
  surface.onpointerleave=()=>{tip.hidden=true;cursor.setAttribute('visibility','hidden')};surface.onfocus=()=>show(active);surface.onblur=surface.onpointerleave;surface.onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();show(Math.max(0,Math.min(points.length-1,active+(e.key==='ArrowRight'?1:-1))))}};
 }
-async function loadSeries(){if(rangeError('insight')){$('#chart').textContent=rangeError('insight');$('#trendSummary').textContent=rangeError('insight');return}const platform=platforms.find(p=>p.id===chosenPlatform);if(platform&&!platform.available){$('#chart').innerHTML='<div class="empty">'+esc(platform.name)+' 尚未接入，暂不展示数据。<br>'+esc(platform.description)+'</div>';$('#trendSummary').textContent='该平台尚未接入';$('#metricLabel').textContent='待接入';$('#chartRange').textContent='—';$('#chartMeta').textContent='';$('#exportLink').style.display='none';return}const keyword=$('#keywordSelect').value;if(!keyword){$('#trendSummary').textContent='暂无趋势数据，完成首次查询后即可查看。';$('#chart').innerHTML='<div class="empty">暂无趋势数据。完成首次查询后即可查看。</div>';return}const data=await api('series?'+new URLSearchParams({platform:'douyin',keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})}));drawChart(data)}
+async function loadSeries(){if(rangeError('insight')){$('#chart').textContent=rangeError('insight');$('#trendSummary').textContent=rangeError('insight');return}const platform=platforms.find(p=>p.id===chosenPlatform);if(platform&&!platform.available){$('#chart').innerHTML='<div class="empty">'+esc(platform.name)+' 尚未接入，暂不展示数据。<br>'+esc(platform.description)+'</div>';$('#trendSummary').textContent='该平台尚未接入';$('#metricLabel').textContent='待接入';$('#chartRange').textContent='—';$('#chartMeta').textContent='';$('#exportLink').style.display='none';return}const keyword=$('#keywordSelect').value;if(!keyword){$('#trendSummary').textContent='暂无趋势数据，完成首次查询后即可查看。';$('#chart').innerHTML='<div class="empty">暂无趋势数据。完成首次查询后即可查看。</div>';return}const data=await api('series?'+new URLSearchParams({platform:'douyin',keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})}));if(!readingInfo())drawChart(data)}
 $('#keywordSelect').onchange=()=>Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message));
 for(const id of ['#showSearch','#showComposite','#chartMode'])$(id).onchange=()=>loadSeries().catch(e=>toast(e.message));
 let qrTimer=null,qrLoading=false,qrEnabled=false,qrInitialized=false;
@@ -349,7 +350,7 @@ $('#smsImage').onpointerup=e=>{
 $('#smsImage').onpointercancel=resetSmsGesture;$('#smsImage').onlostpointercapture=()=>{if(smsGesture)resetSmsGesture()};
 // End SMS login.
 
-async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h,j]=await Promise.all([loadHubStatus(),api('history'),api('jobs')]);datasets=h.datasets;jobs=j.jobs;qrEnabled=state.login_mode==='qr';$('#qrLoginCard').hidden=!qrEnabled;$('#desktopLoginMode').hidden=state.login_mode!=='desktop';setSmsMode(state.login_mode);if(qrEnabled&&!qrInitialized){qrInitialized=true;loadQr()}if(!qrEnabled){qrInitialized=false;clearTimeout(qrTimer);qrTimer=null;}$('#statPlatforms').textContent=platforms.filter(p=>p.available).length;$('#statKeywords').textContent=state.counts.keywords;$('#statPoints').textContent=state.counts.points;$('#statAttempts').textContent=state.daily_online_attempts+' / '+state.limits.online_attempts_per_day+(state.cooldown_remaining_seconds>0?' · 冷却剩余 '+state.cooldown_remaining_seconds+' 秒':'');
+async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h,j]=await Promise.all([loadHubStatus(),api('history'),api('jobs')]);if(readingInfo())return;datasets=h.datasets;jobs=j.jobs;qrEnabled=state.login_mode==='qr';$('#qrLoginCard').hidden=!qrEnabled;$('#desktopLoginMode').hidden=state.login_mode!=='desktop';setSmsMode(state.login_mode);if(qrEnabled&&!qrInitialized){qrInitialized=true;loadQr()}if(!qrEnabled){qrInitialized=false;clearTimeout(qrTimer);qrTimer=null;}$('#statPlatforms').textContent=platforms.filter(p=>p.available).length;$('#statKeywords').textContent=state.counts.keywords;$('#statPoints').textContent=state.counts.points;$('#statAttempts').textContent=state.daily_online_attempts+' / '+state.limits.online_attempts_per_day+(state.cooldown_remaining_seconds>0?' · 冷却剩余 '+state.cooldown_remaining_seconds+' 秒':'');
  const paused=state.paused,ready=state.browser==='browser_ready',last=state.last_result;
  const names={login_in_progress:'登录进行中',manual_resume_required:'登录已结束，等待手动恢复',bridge_timeout:'浏览器桥接连续超时',authentication_required:'需要重新登录',verification_required:'需要人工验证',rate_limited:'抖音限频',access_denied:'抖音拒绝访问',browser_unavailable:'浏览器连接不可用',request_failed:'最近取数失败'};
  const label=browserLoginLabel(state)+(paused?' · 采集仍暂停':'');
@@ -359,7 +360,7 @@ async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h
  detail.innerHTML=infoTip(last?(last.ok?'最近采集成功':'最近采集失败 · '+(names[last.code]||'请查看采集任务')):'尚无采集验证','状态检查：'+new Date().toLocaleTimeString('zh-CN')+'（页面打开时每 15 秒更新） · '+(last?'最近在线取数：'+fmt(last.at)+'，'+(last.ok?'成功':names[last.code]||'失败'):'尚无在线取数验证记录')+'。页面预检不会请求抖音指数，不能提前判断服务端限频。');
  document.title=(paused||!ready?'⚠ '+label+' | ':'')+'指数工作台';
 
- initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}finally{refreshing=false}}
+ initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';if(!readingInfo()){$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}}finally{refreshing=false}}
 $('#refreshButton').onclick=refresh;
 $('#globalRefresh').onclick=async()=>{const b=$('#globalRefresh');b.disabled=true;b.textContent='刷新中…';try{platforms=(await api('platforms')).platforms;drawPlatforms();await refresh();if(!document.querySelector('[data-section=api]').hidden)await loadKeys()}catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='刷新'}};
 $('#resumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{}});toast('已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};
@@ -470,11 +471,11 @@ async function loadInsight(kind,target,revision,context){
  if(rangeError('insight')){insightMessage(kind,target,rangeError('insight'));return}
  try{
   const [d,history]=await Promise.all([api('insights?'+new URLSearchParams({keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
-  if(revision!==insightRevision||context!==insightContext())return;
+  if(revision!==insightRevision||context!==insightContext()||readingInfo())return;
   if(kind==='audience')renderAudienceRanges(history,d);
   if(d.status!=='available'){if(kind==='audience')renderAudienceEmpty(d,history);else if(d.status==='no_data'){const detail='平台未返回本日期段的关联词，不代表指数为零。';$(target).innerHTML=infoTip('无数据',detail);$('#relatedSummary').innerHTML=infoTip('无数据',detail)}else insightMessage(kind,target,moduleState(kind));return}
   renderInsight(kind,target,d.result);
- }catch(e){if(revision===insightRevision&&context===insightContext())insightMessage(kind,target,'本模块读取失败：'+e.message)}
+ }catch(e){if(revision===insightRevision&&context===insightContext()&&!readingInfo())insightMessage(kind,target,'本模块读取失败：'+e.message)}
 }
 async function loadInsights(){
  const revision=++insightRevision,context=insightContext();
@@ -492,6 +493,7 @@ function makeReportBatch(query,id){
  return {id,query,entries:entries.map((entry,i)=>({...entry,idem:id+'-'+i,jobId:null,status:'not_submitted',error:null}))};
 }
 function renderReportProgress(){
+ if(readingInfo())return;
  const box=$('#reportProgress');if(!reportBatch){box.hidden=true;return}box.hidden=false;
  const q=reportBatch.query,done=reportBatch.entries.filter(e=>['succeeded','partial','failed','no_data'].includes(e.status)).length;
  $('#reportProgressTitle').textContent='本次完整查询 · '+done+' / '+reportBatch.entries.length+' 项已结束';
@@ -538,5 +540,5 @@ $('#queryForm').onsubmit=async e=>{
 
 (async()=>{try{platforms=(await api('platforms')).platforms;drawPlatforms();await refresh();await loadKeys()}catch(e){toast(e.message)}})();
 // Keep explanations and keyboard focus stable while the user reads them.
-setInterval(()=>{if(!document.hidden&&!document.querySelector('.info-popover:popover-open,.info-button:focus'))refresh()},15000);
+setInterval(()=>{if(!document.hidden&&!readingInfo())refresh()},15000);
 </script></body></html>
