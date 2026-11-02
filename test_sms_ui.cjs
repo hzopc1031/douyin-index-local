@@ -43,7 +43,7 @@ test('restored browser login hides idle SMS form without sending anything',async
   await f.render({state:'idle'});assert(f.$('#smsPhoneForm').hidden);
   assert.equal(f.calls.length,0);
  }
- assert(html.includes('setSmsLoginStatus(state,loginRevision);setSmsMode(state.login_mode)'));
+ assert(html.includes('Promise.all([loadHubStatus(),'));
 });
 test('status arriving before SMS snapshot still hides stale code and verification UI',async()=>{
  for(const state of ['idle','code_sent','verify_login']){
@@ -93,7 +93,7 @@ test('connection loss and logout restore form; only masked phone is displayed',a
  for(const phone of ['13800138000','<img src=x onerror=alert(1)>','138****8000 extra']){
   await f.render({phone});assert.equal(f.$('#smsNumber').textContent,'账号信息：当前会话未提供脱敏手机号');
  }
- assert(html.includes('catch(e){setSmsLoginStatus(null,loginRevision);toast(e.message)'));
+ assert(source.includes('catch(e){setSmsLoginStatus(null,revision);throw e}'));
 });
 test('status response or failure started before SMS success cannot override it',async()=>{
  for(const response of ["{browser:'login_required',login_state:'no_session_cookie'}",'null']){
@@ -107,7 +107,7 @@ test('status response or failure started before SMS success cannot override it',
   f.run("setSmsLoginStatus({browser:'login_required',login_state:'expired'})");
   assert(!f.$('#smsPhoneForm').hidden);
  }
- assert(html.includes('const loginRevision=smsLoginRevision;try{const [state,h,j]=await'));
+ assert(source.includes('const revision=smsLoginRevision;'));
 });
 test('repeated terminal action is fresh confirmation after a status failure',async()=>{
  const f=fixture();f.run('smsEnabled=true');await f.render({state:'opening'});
@@ -116,6 +116,40 @@ test('repeated terminal action is fresh confirmation after a status failure',asy
  await f.run("smsAction('start',{phone:'13800138000'})");
  assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsState').textContent.startsWith('已登录'));
  assert.equal(f.calls.filter(c=>c.body).length,1);
+});
+test('status renders login before SMS snapshot and survives a failed SMS read',async()=>{
+ const f=fixture();f.respond=async path=>{if(path==='status')return {browser:'browser_ready',login_state:'cookie_present'};throw Error('synthetic SMS read failure')};
+ await f.run('loadHubStatus()');assert(f.$('#smsPhoneForm').hidden);
+ f.run('smsEnabled=true');await f.run('loadSms()');
+ assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+});
+test('status request failure clears login, but an older pending failure does not',async()=>{
+ const f=fixture();f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present'})");
+ f.respond=async()=>{throw Error('synthetic status failure')};
+ await assert.rejects(f.run('loadHubStatus()'));assert(!f.$('#smsPhoneForm').hidden);
+ const pending=deferred();f.respond=()=>pending.promise;
+ await f.render({state:'submitting'});const request=f.run('loadHubStatus()');
+ await f.render({state:'succeeded'});pending.reject(Error('older status failure'));
+ await assert.rejects(request);assert(f.$('#smsPhoneForm').hidden);
+});
+test('actual dashboard refresh preserves confirmed login when history, jobs or charts fail',async()=>{
+ for(const failure of ['history','jobs','series']){
+  const f=fixture();await f.render({state:'idle'});
+  for(const id of ['#notice','#browserBadge'])f.$(id).classList={remove(){},toggle(){}};
+  f.$('#sessionDetail').textContent='';
+  f.respond=async path=>{
+   if(path===failure)throw Error('synthetic '+failure+' failure');
+   if(path==='status')return {browser:'browser_ready',login_state:'cookie_present',login_mode:'sms',counts:{keywords:0,points:0},daily_online_attempts:0,limits:{online_attempts_per_day:50}};
+   return path==='history'?{datasets:[]}:path==='jobs'?{jobs:[]}:f.state;
+  };
+  f.run(`let refreshing=false,datasets=[],jobs=[],platforms=[],qrEnabled=false,qrInitialized=false,qrTimer=null,reportBatch=null;
+   const document={title:''};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};
+   async function refreshReportBatch(){};async function loadInsights(){};async function loadSeries(){${failure==='series'?"throw Error('synthetic series failure')":''}}`);
+  f.run(html.slice(html.indexOf('async function refresh(){'),html.indexOf("$('#refreshButton').onclick")));
+  await f.run('refresh()');assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert(f.$('#smsState').textContent.startsWith('已登录'));assert(f.notices.length);
+  assert(!f.calls.some(c=>c.body));
+ }
 });
 test('auto/manual/remote-desktop display and countdown',async()=>{
  const f=fixture();await f.manual();assert(!f.$('#smsRefresh').hidden);
