@@ -1,0 +1,219 @@
+"""Offline Playwright UI checks/screenshots. Every URL is fulfilled locally.
+
+Run: .venv/bin/python check_hub_ui.py --screenshots /path/to/output
+No gateway, account, browser profile or live platform endpoint is used.
+"""
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from playwright.sync_api import sync_playwright
+
+ROOT = Path(__file__).resolve().parent
+START, END = '2026-10-25', '2026-10-31'
+WORDS = ['杭州旅游', '西湖', '杭州美食', '灵隐寺', '杭州周末', '西溪湿地', '杭州住宿']
+RELATED = [dict(keyword=WORDS[i] if i < len(WORDS) else f'杭州主题 {i+1}',
+                relation_score=950-i*17, search_index=9000-i*101,
+                composite_index=None if i == 49 else 13000-i*135) for i in range(50)]
+DIMENSIONS = [('gender', ['女性', '男性']), ('age', ['24—30 岁', '31—40 岁', '18—23 岁', '41—50 岁', '50 岁以上']),
+              ('province', ['浙江', '江苏', '上海', '广东', '北京']), ('city', ['杭州', '上海', '宁波', '南京']),
+              ('yuntu_city_level', ['新一线', '一线', '二线']), ('interest', ['旅行', '美食', '摄影', '生活']),
+              ('interest_category', ['城市生活', '本地游']), ('interest_category_v2', ['探店', '攻略'])]
+AUDIENCE = [dict(dimension=key, name=key, labels=[dict(name=name, value=620-i*67, tgi=None if i==0 else 110+i)
+           for i, name in enumerate(names + ([f'其他分组 {j}' for j in range(20)] if key in ('province','city','interest') else []))]) for key,names in DIMENSIONS]
+META = dict(start_date=START, end_date=END, source='离线合成样例', fetched_at='2026-11-01T10:00:00+08:00',
+            keywords=['杭州'], complete=True, verification='pending')
+PLATFORMS = [dict(id=key, name=name, available=key=='douyin', metric_name='搜索指数', description='离线合成数据')
+             for key,name in [('douyin','抖音'),('baidu','百度指数'),('google_trends','Google Trends')]]
+
+
+def run(output=None):
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            for width,height in [(430,932),(1280,900)]:
+                context = browser.new_context(viewport=dict(width=width,height=height), locale='zh-CN', timezone_id='Asia/Shanghai', service_workers='block')
+                page = context.new_page()
+                page.clock.set_fixed_time(datetime(2026, 11, 2, tzinfo=timezone.utc))
+                errors, unexpected, writes = [], [], []
+                page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False}
+
+                def route(request_route):
+                    request = request_route.request
+                    url = urlparse(request.url)
+                    if url.netloc != 'hub-ui.invalid':
+                        unexpected.append(request.url)
+                        request_route.abort()
+                        return
+                    if url.path == '/':
+                        request_route.fulfill(content_type='text/html', body=(ROOT/'hub.html').read_text())
+                        return
+                    path, query = url.path.removeprefix('/api/v1/'), parse_qs(url.query)
+                    data = None
+                    if request.method != 'GET':
+                        writes.append((path, request.post_data_json))
+                        if path in ('queries','insights/queries'):
+                            data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                    elif path == 'platforms': data = dict(platforms=PLATFORMS)
+                    elif path == 'status':
+                        data = dict(browser='browser_ready',login_state='cookie_present',login_mode='desktop',counts=dict(keywords=1,points=7),
+                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=None,last_result=None)
+                    elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [])
+                    elif path == 'jobs': data = dict(jobs=[])
+                    elif path == 'keys': data = dict(keys=[])
+                    elif path == 'series':
+                        data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['missing_latest'] and i==6 else 12000+i*900,
+                                    composite_index=30000+i*1200) for i in range(7)])
+                    elif path == 'insights':
+                        kind = query['kind'][0]
+                        data = dict(status=fixture[kind],result=dict(metadata=META,data=dict(search_related=RELATED,content_related=RELATED[10:]) if kind=='related' else dict(dimensions=AUDIENCE)))
+                    elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
+                    if data is None:
+                        unexpected.append(request.method+' '+request.url)
+                        request_route.abort()
+                    else: request_route.fulfill(content_type='application/json',body=json.dumps(data))
+
+                context.route('**/*', route)
+                page.goto('http://hub-ui.invalid/')
+                page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
+                assert page.locator('#queryStart').input_value() == START
+                assert page.locator('#queryEnd').input_value() == END
+                assert page.locator('#insightRangeLabel').inner_text().endswith('7 天')
+                assert page.locator('#resultPanel-summary').is_visible()
+                assert page.locator('#relatedSummary .rank-row').count() == 3
+                assert page.locator('#audienceSummary .audience-leader').count() == 3
+                assert page.locator('#audienceSummary').bounding_box()['y'] + page.locator('#audienceSummary').bounding_box()['height'] < height
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                if output:
+                    page.evaluate("""() => {const n=document.createElement('div');n.textContent='离线合成样例 · 未调用真实查询';n.style='float:right;font-size:9px;font-weight:400;letter-spacing:0;color:#b2c8bc;padding-top:5px';document.querySelector('.brand').append(n)}""")
+                    page.screenshot(path=str(output/f'hub-ui2-result-{"mobile" if width==430 else "desktop"}.png'))
+                page.get_by_role('tab', name='关联需求', exact=True).click()
+                assert page.locator('#relatedData .rank-row').count() == 10
+                assert page.locator('#relatedData tbody tr:visible').count() == 0
+                page.locator('#relatedData summary').first.click()
+                assert page.locator('#relatedData tbody tr:visible').count() == 50
+                assert '—' in page.locator('#relatedData tbody tr').nth(49).inner_text()
+                page.evaluate('refresh()')
+                assert page.locator('#relatedData details').first.get_attribute('open') is not None
+                page.locator('#relatedSort').select_option('search_index')
+                page.wait_for_function("document.querySelector('#relatedData p.tiny').textContent.includes('搜索指数')")
+                assert page.locator('#relatedData details').first.get_attribute('open') is not None
+                page.get_by_role('tab', name='人群特征', exact=True).click()
+                assert page.locator('#audienceData .insight-block').count() == 8
+                assert page.locator('#audienceData details').count() == 8
+                assert page.locator('#audienceData tbody tr:visible').count() == 0
+                page.locator('#audienceData summary').nth(2).click()
+                assert page.locator('#audienceData tbody tr:visible').count() == 25
+                page.get_by_role('tab', name='趋势', exact=True).click()
+                page.locator('#chart svg').focus()
+                page.keyboard.press('ArrowRight')
+                assert page.locator('#chartTooltip').is_visible()
+                page.get_by_role('tab', name='趋势', exact=True).focus()
+                page.keyboard.press('End')
+                assert page.get_by_role('tab', name='历史', exact=True).get_attribute('aria-selected')=='true'
+                page.keyboard.press('Home')
+                assert page.get_by_role('tab', name='概要', exact=True).get_attribute('aria-selected')=='true'
+                page.locator('#openQuery').click()
+                page.locator('#queryWords').fill('杭州')
+                page.locator('#queryRange>summary').click()
+                page.locator('[data-range=query][data-period="30d"]').click()
+                assert page.locator('#queryStart').input_value() == '2026-10-02'
+                if output and width==430:
+                    page.screenshot(path=str(output/'hub-ui2-range-mobile.png'))
+                expected = {'7d':'2026-10-25','3m':'2026-08-01','6m':'2026-05-01','12m':'2025-11-01'}
+                for period,start in expected.items():
+                    page.locator(f'[data-range=query][data-period="{period}"]').click()
+                    assert page.locator('#queryStart').input_value()==start
+                assert page.evaluate("presetStart('2024-02-29','12m')") == '2023-03-01'
+                assert page.evaluate("presetStart('2025-05-31','3m')") == '2025-03-01'
+                assert page.evaluate("rangeDays('2024-01-01','2025-12-31')") == 731
+                # Test explicit 731 cap independently from the two-calendar-year bounds.
+                page.evaluate("$('#queryStart').min='2024-01-01';$('#queryEnd').max='2026-12-31';$('#queryStart').value='2024-01-01';$('#queryEnd').value='2025-12-31'")
+                assert page.evaluate("rangeError('query')") == ''
+                page.locator('#queryEnd').fill('2026-01-01')
+                assert '731' in page.evaluate("rangeError('query')")
+                # Direct submit-event dispatch also exercises the JS guard, even bypassing native validity.
+                page.locator('#queryForm').dispatch_event('submit')
+                assert '731' in page.locator('#queryRangeError').inner_text()
+                assert len(writes)==0
+                page.locator('#queryStart').fill('2026-10-31')
+                page.locator('#queryEnd').fill('2026-10-25')
+                page.locator('#queryForm').dispatch_event('submit')
+                assert '晚于' in page.locator('#queryRangeError').inner_text()
+                assert len(writes)==0
+                page.locator('#queryStart').fill('2026-10-25')
+                page.locator('#queryEnd').fill(END)
+                page.locator('#queryEnd').dispatch_event('change')
+                assert page.locator('#queryRangeError').inner_text()==''
+                page.locator('#queryEnd').fill('')
+                page.locator('[data-range=query][data-period="7d"]').click()
+                assert '结束日期' in page.locator('#queryRangeError').inner_text()
+                assert page.locator('#queryEnd').input_value()==''
+                page.locator('#queryEnd').fill(END)
+                page.locator('#queryEnd').dispatch_event('change')
+                # Modal errors must be visible in the top layer even on a short phone viewport.
+                page.set_viewport_size(dict(width=width,height=700))
+                for words in ['杭州\n杭州','一\n二\n三\n四\n五\n六']:
+                    page.locator('#queryWords').fill(words)
+                    page.locator('#submitButton').click()
+                    assert page.locator('#queryError').is_visible()
+                    error_box=page.locator('#queryError').bounding_box()
+                    assert 0 <= error_box['y'] and error_box['y']+error_box['height'] <= 700
+                    assert '不同的关键词' in page.locator('#queryError').inner_text()
+                    assert len(writes)==0
+                page.locator('#queryWords').fill('杭州')
+                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed')")
+                page.locator('#submitButton').click()
+                assert '上一批' in page.locator('#queryError').inner_text()
+                assert len(writes)==0
+                page.evaluate('reportBatch=null;saveBatch()')
+                page.set_viewport_size(dict(width=width,height=height))
+                page.keyboard.press('Escape')
+                assert not page.locator('#queryDialog').is_visible()
+                assert page.locator('#openQuery').evaluate('e=>e===document.activeElement')
+                page.evaluate("$('#insightStart').value='2024-01-01';$('#insightEnd').value='2024-01-07'")
+                assert page.evaluate("rangeError('insight')") == ''
+                page.evaluate("$('#insightStart').value='2026-10-25';$('#insightEnd').value='2026-10-31'")
+                # Missing and unavailable states never become zero or stale successful summaries.
+                fixture['missing_latest']=True
+                page.evaluate('loadSeries()')
+                assert '—' in page.locator('#trendSummary').inner_text()
+                fixture['audience']='missing'
+                page.evaluate('loadInsights()')
+                assert '尚无' in page.locator('#audienceSummary').inner_text()
+                page.locator('[data-platform=baidu]').click()
+                page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
+                assert '尚未接入' in page.locator('#trendSummary').inner_text()
+                page.locator('[data-platform=douyin]').click()
+                # A real click submits only the mocked routes and preserves existing request shape.
+                page.locator('#openQuery').click()
+                page.locator('#submitButton').click()
+                page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
+                assert len(writes)==3
+                assert [path for path,_ in writes]==['queries','insights/queries','insights/queries']
+                assert writes[0][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
+                assert not page.locator('#queryDialog').is_visible()
+                fixture['history']=False
+                page.evaluate('sessionStorage.clear()')
+                page.reload()
+                page.wait_for_function("document.querySelector('#historyRows').textContent.includes('暂无结果')")
+                assert page.locator('#queryStart').input_value()==''
+                assert page.locator('#queryEnd').input_value()==''
+                assert len(writes)==3
+                assert not unexpected, unexpected
+                assert not errors, errors
+                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard, full data, missing values, offline submit')
+                context.close()
+        finally:
+            browser.close()
+
+
+if __name__ == '__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--screenshots',type=Path)
+    args=parser.parse_args()
+    if args.screenshots: args.screenshots.mkdir(parents=True,exist_ok=True)
+    run(args.screenshots)
