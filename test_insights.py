@@ -181,6 +181,37 @@ class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.hub.store.update_job(queued['id'], 'failed')
 
 class InsightApiTests(_ApiTests):
+    async def test_related_uses_stored_trend_limit_and_exact_history(self):
+        from unittest.mock import patch
+        query = {**QUERY, 'start_date': '2026-09-28', 'end_date': '2026-10-27'}
+        with patch.object(self.hub.store, 'latest_available_date', return_value='2026-10-27'):
+            history = await (await self.client.get('/api/v1/history', headers=self.bearer)).json()
+            self.assertEqual(history['related_latest_available_date'], '2026-10-25')
+            for kind in ('related', 'audience', None):
+                body = {**query, **({'kind': kind} if kind else {})}
+                response = await self.client.post('/api/v1/'+('insights/queries' if kind else 'queries'),
+                    json=body, headers={**self.bearer, 'Idempotency-Key': 'dates-'+str(kind)})
+                self.assertEqual(response.status, 202)
+                actual = (await response.json())['job']['query']
+                self.assertEqual(actual['start_date'], query['start_date'])
+                self.assertEqual(actual['end_date'], '2026-10-25' if kind == 'related' else '2026-10-27')
+                if kind == 'related':
+                    result = {'data': {'content_related': [], 'search_related': []},
+                              'metadata': {**actual, 'fetched_at': dt.datetime.now(dt.timezone.utc).isoformat()}}
+                    self.hub.store.save_insight(actual, result)
+                    response = await self.client.get('/api/v1/insights', params={
+                        'keyword': '酵素', 'kind': kind, 'start_date': actual['start_date'], 'end_date': actual['end_date']}, headers=self.bearer)
+                    self.assertEqual((await response.json())['status'], 'available')
+            for end in ('2026-10-24', '2026-10-25'):
+                response = await self.client.post('/api/v1/insights/queries',
+                    json={**query, 'kind': 'related', 'end_date': end},
+                    headers={**self.bearer, 'Idempotency-Key': 'early-'+end})
+                self.assertEqual((await response.json())['job']['query']['end_date'], end)
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': '酵素', 'kind': 'related', 'start_date': query['start_date'], 'end_date': query['end_date']}, headers=self.bearer)
+            self.assertEqual((await response.json())['query']['end_date'], '2026-10-27')
+        self.assertEqual(self.calls, [])
+
     async def test_all_saved_ranges_and_attempt_metadata_are_read_only(self):
         q = {**QUERY, 'kind': 'audience'}
         def saved(query, stamp, empty=False):

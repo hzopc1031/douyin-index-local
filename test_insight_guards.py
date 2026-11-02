@@ -49,6 +49,21 @@ class ClampTests(unittest.TestCase):
             self.assertEqual(result['end_date'], q['end_date'])
             self.assertNotIn('requested_end_date', result)
 
+    def test_trend_based_limit_preserves_earlier_ranges_and_collector_dates(self):
+        q = validate_insight(self.query, latest_related_date='2026-10-25')
+        self.assertEqual((q['start_date'], q['end_date']), ('2026-10-21', '2026-10-25'))
+        self.assertNotIn('requested_end_date', q)
+        self.assertEqual(validate_insight(q), q)
+        for end in ('2026-10-24', '2026-10-25'):
+            early = {**self.query, 'end_date': end}
+            self.assertEqual(validate_insight(early, latest_related_date='2026-10-25')['end_date'], end)
+        audience = validate_insight({**self.query, 'kind': 'audience'}, latest_related_date='2026-10-25')
+        self.assertEqual(audience['end_date'], '2026-10-27')
+        with self.assertRaises(HubError):
+            validate_insight({**self.query, 'start_date': '2026-10-26'}, latest_related_date='2026-10-25')
+        historical = validate_insight(self.query, historical=True, latest_related_date='2026-10-25')
+        self.assertEqual(historical['end_date'], '2026-10-27')
+
     def test_environment_and_two_year_boundary(self):
         for value, end in [('0', '2026-10-27'), ('1', '2026-10-27'),
                            ('5', '2026-10-23'), ('-1', '2026-10-25'),

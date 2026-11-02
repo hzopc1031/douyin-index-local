@@ -4,6 +4,7 @@ const html=fs.readFileSync('hub.html','utf8');
 const code=html.slice(html.indexOf('let reportBatch=null'),html.indexOf("$('#retryBundle').onclick"));
 const nodes={};const $=id=>nodes[id]??={value:'',hidden:false,textContent:'',innerHTML:'',disabled:false};
 let calls=[],fail=true;const ctx=vm.createContext({$,sessionStorage:{getItem(){return null},setItem(){}},esc:s=>String(s),statusName:s=>s,toast(){},api:async(path,options)=>{calls.push({path,key:options?.headers?.['Idempotency-Key'],body:options?.body});if(path==='insights/queries'&&fail){fail=false;throw Error('simulated disconnect')}return {job:{id:'job-'+calls.length,status:'queued',cache_hit:false}}}});
+vm.runInContext('let relatedLatestDate=null;'+html.slice(html.indexOf('function insightDates('),html.indexOf('function renderInsight(')),ctx);
 vm.runInContext(code,ctx);
 const query={platform:'douyin',keywords:['酵素','消化酶'],start_date:'2026-10-21',end_date:'2026-10-27'};
 ctx.query=query;

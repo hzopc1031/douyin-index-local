@@ -26,6 +26,21 @@ logger = logging.getLogger('index_hub')
 
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
+# shortcut: related 暂无可靠最新日来源，确认官方来源后替换趋势减两天的回退。
+RELATED_TREND_LAG_DAYS = 2
+
+
+def related_latest_date(store):
+    from hub_insights import related_end_lag_days
+    latest = store.latest_available_date()
+    if latest is None:
+        return None
+    try:
+        return min(dt.date.fromisoformat(latest) - dt.timedelta(days=RELATED_TREND_LAG_DAYS),
+                   dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())).isoformat()
+    except OverflowError:
+        return None
+
 SAFE_ERRORS = {
     'authentication_required': '登录已失效，请通过远程桌面扫码后手动恢复采集。',
     'verification_required': '平台要求人工验证，请通过远程桌面处理后手动恢复。',
@@ -527,7 +542,9 @@ def mount(app, hub):
     async def submit(request):
         p = require(request, 'query')
         from hub_insights import validate_insight
-        query = (validate_insight if request.path.endswith('/insights/queries') else validate_query)(await read_json(request))
+        body = await read_json(request)
+        query = (validate_insight(body, latest_related_date=related_latest_date(s))
+                 if request.path.endswith('/insights/queries') else validate_query(body))
         # Transport peer only: do not trust caller-supplied X-Forwarded-For.
         user_agent = ''.join(c for c in request.headers.get('User-Agent', '') if ord(c) >= 32 and ord(c) != 127)[:512]
         source = {'kind': 'admin' if p.get('admin') else 'api_key',
@@ -611,6 +628,7 @@ def mount(app, hub):
         require(request)
         return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()],
                       'latest_available_date': s.latest_available_date(),
+                      'related_latest_available_date': related_latest_date(s),
                       'latest_available_date_source': 'stored_search_index'})
 
     async def keys(request):
