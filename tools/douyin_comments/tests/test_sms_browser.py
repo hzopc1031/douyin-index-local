@@ -304,7 +304,7 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                 <script>document.querySelector('#login-panel-new').remove();
                 document.querySelector('#header').remove();challenge();</script>''')
             elif url == 'https://frame.invalid/post':
-                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/receiver'})
+                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/aweme/v1/web/comment/list/'})
             else:
                 await original_backend(route)
         self.backend = frames
@@ -351,7 +351,7 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
             if path == '/worker.js':
                 await route.fulfill(content_type='application/javascript', body="fetch('/worker-post', {method:'POST',body:'synthetic'}).catch(()=>{})")
             elif path == '/worker-post':
-                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/receiver'})
+                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/aweme/v1/web/comment/list/'})
             else:
                 await original(route)
         self.backend = workers
@@ -377,6 +377,42 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(.02)
                 self.assertEqual(browser.fatal_reason, 'redirect_denied_xhr')
                 self.assertEqual(escaped, [])
+            finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_worker_post_redirect_to_login_dependency_is_allowed(self):
+        original = self.backend
+        async def workers(route):
+            path = route.request.url.removeprefix(site.FAKE_ORIGIN.rstrip('/'))
+            if path == '/worker.js':
+                await route.fulfill(content_type='application/javascript', body="fetch('/worker-post', {method:'POST',body:'synthetic'}).catch(()=>{})")
+            elif path == '/worker-post':
+                await route.fulfill(status=307, headers={'Location': 'https://sdk.amemv.com/device/register'})
+            else:
+                await original(route)
+        self.backend = workers
+        async with self.browser() as browser:
+            sink = await browser.context.new_cdp_session(browser.page)
+            escaped, tasks = [], set()
+            async def paused(event):
+                rid = event['requestId']
+                allowed = [site.FAKE_ORIGIN.rstrip('/') + path for path in ('/worker.js', '/worker-post')]
+                if event['request']['url'] not in allowed:
+                    escaped.append('unexpected_request')
+                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
+                else:
+                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
+            def launch(event):
+                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
+            sink.on('Fetch.requestPaused', launch)
+            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
+            try:
+                await browser.page.evaluate("() => {window.worker = new Worker('/worker.js')}")
+                async with asyncio.timeout(5):
+                    while not escaped:
+                        await asyncio.sleep(.02)
+                self.assertFalse(browser.fatal)
+                self.assertEqual(escaped, ['unexpected_request'])
             finally:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -447,17 +483,17 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
         for status in (401, 403, 429):
             browser = SmsBrowser('/unused', backend=AsyncMock())
             browser.response(SimpleNamespace(status=status, request=SimpleNamespace(resource_type='xhr')))
-            route = SimpleNamespace(request=object(), abort=AsyncMock(), continue_=AsyncMock())
+            route = SimpleNamespace(request=SimpleNamespace(url='https://www.douyin.com/retry', method='POST'), abort=AsyncMock(), continue_=AsyncMock())
             await browser.route(route)
             route.abort.assert_awaited_once()
             route.continue_.assert_not_awaited()
             browser.backend.assert_not_awaited()
 
-    async def test_credential_redirect_and_foreign_get_stopped_before_follow(self):
+    async def test_private_and_comment_redirects_stopped_before_follow(self):
         browser = SmsBrowser('/unused')
         browser.response_session = type('CDP', (), {'send': AsyncMock()})()
         browser.private_values = [PHONE, CODE]
-        for method, target in (('POST', '/same-host'), ('GET', 'https://evil.invalid/'),
+        for method, target in (('POST', '/aweme/v1/web/comment/list/'), ('GET', '/aweme/v1/web/comment/list/reply/'),
                                ('GET', '/path?phone=' + PHONE)):
             await browser.check_response(dict(requestId='synthetic', responseStatusCode=307,
                 request=dict(method=method, url='https://www.douyin.com/passport/'),

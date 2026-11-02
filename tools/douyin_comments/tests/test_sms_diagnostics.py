@@ -37,32 +37,35 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.stage_timeout, 60)
         browser.page.goto.assert_awaited_once()
 
-    async def test_new_cdn_permissions_are_static_only(self):
-        cases = [
-            ('lf-static.applogcdn.com', '/sdk.js', 'script', 'GET', True),
-            ('lf3-short.ibytedapm.com', '/sdk.js', 'script', 'GET', True),
-            ('lf3-static.bytednsdoc.com', '/sdk.json', 'fetch', 'GET', True),
-            ('lf3-config.bytetcc.com', '/common_config', 'xhr', 'GET', False),
-            ('lf6-effectcdn-tos.byteeffecttos.com', '/model.wasm', 'fetch', 'GET', True),
-            ('lf3.effectcdn.com', '/style.css', 'stylesheet', 'GET', True),
-            ('lf-static.applogcdn.com', '/sdk.js', 'script', 'POST', False),
-            ('lf3-short.ibytedapm.com', '/report', 'fetch', 'POST', False),
-            ('lf3-short.ibytedapm.com', '/report', 'fetch', 'GET', False),
-            ('lf3-short.ibytedapm.com', '/login', 'document', 'GET', False),
-            ('lf-static.applogcdn.com.evil.invalid', '/sdk.js', 'script', 'GET', False),
-            ('invalid', '/sdk.js', 'script', 'GET', False),
-        ]
-        for host, path, resource, method, allowed in cases:
-            with self.subTest(host=host, resource=resource, method=method):
-                browser = SmsBrowser('/unused')
-                browser.page = Mock()
-                request = Mock(url='https://' + host + path, method=method, resource_type=resource)
-                request.frame.page = browser.page
-                request.is_navigation_request.return_value = resource == 'document'
+    async def test_login_requests_only_block_comments_and_private_urls(self):
+        domains = ('douyin.com', 'snssdk.com', 'zijieapi.com', 'bytedance.com',
+                   'byteimg.com', 'bytednsdoc.com', 'ibytedtos.com', 'pstatp.com',
+                   'amemv.com', 'toutiao.com', 'ixigua.com', 'zjcdn.com',
+                   'douyinpic.com', 'douyinstatic.com', 'other.invalid')
+        browser = SmsBrowser('/unused')
+        browser.private_values = ['13900000000', '975318']
+        logs = io.StringIO()
+        with redirect_stderr(logs):
+            for domain in domains:
+                for method in ('GET', 'HEAD', 'POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'):
+                    request = Mock(url='https://sdk.' + domain + '/register?cookie=synthetic-secret', method=method)
+                    route = Mock(request=request, abort=AsyncMock(), continue_=AsyncMock())
+                    await browser.route(route)
+                    route.continue_.assert_awaited_once()
+                    route.abort.assert_not_awaited()
+            for path in ('/aweme/v1/web/comment/list/', '/aweme/v1/web/comment/list/reply/',
+                         '/%61weme/v1/web/comment/list/', '/sms?phone=13900000000',
+                         '/sms?code=975318', '/975318/send', '/%39%37%35%33%31%38/send'):
+                request = Mock(url='https://sso.douyin.com' + path, method='POST')
                 route = Mock(request=request, abort=AsyncMock(), continue_=AsyncMock())
-                await browser._route(route)
-                self.assertEqual(route.continue_.await_count, int(allowed))
-                self.assertEqual(route.abort.await_count, int(not allowed))
+                await browser.route(route)
+                route.abort.assert_awaited_once()
+                route.continue_.assert_not_awaited()
+        events = [json.loads(line) for line in logs.getvalue().splitlines()]
+        self.assertTrue(all(set(('method', 'domain', 'path')) <= event.keys() for event in events))
+        self.assertTrue(any(e['allowed'] and e['method'] == 'PUT' for e in events))
+        for secret in ('13900000000', '975318', '%39', '?', 'synthetic-secret'):
+            self.assertNotIn(secret, logs.getvalue())
 
     async def test_timeout_redacts_url_title_exception_and_writes_private_evidence(self):
         with tempfile.TemporaryDirectory() as root:
@@ -104,30 +107,54 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session.public()['failure']['reason'], 'verification_required')
             self.assertEqual(session.state, 'failed')
 
-    async def test_only_allowlisted_static_redirects_can_cross_hosts(self):
-        cases = [
-            ('Script', 'GET', 'https://lf3.byteimg.com/app.js', False),
-            ('Script', 'GET', 'https://lf-static.applogcdn.com/sdk.js', False),
-            ('Script', 'POST', 'https://lf-static.applogcdn.com/sdk.js', True),
-            ('XHR', 'GET', 'https://lf-static.applogcdn.com/report', True),
-            ('Stylesheet', 'GET', 'https://lf3.byteimg.com/app.css', False),
-            ('Script', 'GET', 'https://evil.invalid/app.js', True),
-            ('Script', 'POST', 'https://lf3.byteimg.com/app.js', True),
-            ('XHR', 'GET', 'https://lf3.byteimg.com/api', True),
-            ('Document', 'GET', 'https://lf3.byteimg.com/login', True),
-            ('Script', 'GET', 'http://lf3.byteimg.com/app.js', True),
-            ('Script', 'GET', 'https://lf3.byteimg.com:444/app.js', True),
-            ('Script', 'GET', 'https://user@lf3.byteimg.com/app.js', True),
-            ('Script', 'GET', 'https://lf3.byteimg.com/app.js?code=975318', True),
-        ]
-        for resource, method, target, denied in cases:
-            with self.subTest(resource=resource, method=method, target=target):
-                browser = SmsBrowser('/unused')
-                browser.private_values = ['975318']
-                browser.response_session = Mock(send=AsyncMock())
-                await browser.check_response(dict(requestId='synthetic', responseStatusCode=302,
-                    resourceType=resource, request=dict(method=method, url='https://www.douyin.com/app.js'),
-                    responseHeaders=[dict(name='Location', value=target)]))
-                expected = 'Fetch.failRequest' if denied else 'Fetch.continueRequest'
-                self.assertEqual(browser.response_session.send.call_args.args[0], expected)
-                self.assertEqual(browser.fatal, denied)
+    async def test_login_redirects_only_block_comments_and_private_urls(self):
+        for method in ('GET', 'POST', 'PUT', 'OPTIONS'):
+            for target, denied in (
+                ('https://lf3.byteimg.com/register', False),
+                ('https://sso.amemv.com/passport/sms', False),
+                ('https://other.invalid/auth', False), ('/same-host', False),
+                ('https://www.douyin.com/aweme/v1/web/comment/list/', True),
+                ('https://sso.douyin.com/sms?code=975318', True),
+            ):
+                with self.subTest(method=method, target=target):
+                    browser = SmsBrowser('/unused')
+                    browser.private_values = ['975318']
+                    browser.response_session = Mock(send=AsyncMock())
+                    await browser.check_response(dict(requestId='synthetic', responseStatusCode=307,
+                        resourceType='XHR', request=dict(method=method, url='https://www.douyin.com/passport/'),
+                        responseHeaders=[dict(name='Location', value=target)]))
+                    expected = 'Fetch.failRequest' if denied else 'Fetch.continueRequest'
+                    self.assertEqual(browser.response_session.send.call_args.args[0], expected)
+                    self.assertEqual(browser.fatal, denied)
+
+    async def test_websocket_keeps_the_same_two_exclusions(self):
+        browser = SmsBrowser('/unused')
+        browser.private_values = ['975318']
+        for url, blocked in (('wss://sdk.bytedance.com/register', False),
+                             ('wss://sdk.bytedance.com/?code=975318', True),
+                             ('wss://www.douyin.com/aweme/v1/web/comment/list/', True)):
+            socket = Mock(url=url, close=AsyncMock(), connect_to_server=Mock())
+            await browser.websocket(socket)
+            self.assertEqual(socket.close.await_count, int(blocked))
+            self.assertEqual(socket.connect_to_server.call_count, int(not blocked))
+
+    async def test_all_post_response_statuses_are_logged_only_during_window(self):
+        browser = SmsBrowser('/unused')
+        browser.private_values = ['13900000000', '975318']
+        browser.response_session = Mock(send=AsyncMock())
+        logs = io.StringIO()
+        with redirect_stderr(logs), patch('dyc.sms_browser.time.monotonic', return_value=10):
+            browser.sms_deadline = 25
+            for path, status in (('/device/register', 200), ('/send_activation', 307), ('/report', 0)):
+                await browser.check_response(dict(requestId='synthetic', responseStatusCode=status,
+                    request=dict(method='POST', url='https://sdk.amemv.com' + path + '?phone=13900000000'),
+                    responseHeaders=[dict(name='Location', value='/next')]))
+            browser.sms_deadline = 0
+            await browser.check_response(dict(requestId='synthetic', responseStatusCode=200,
+                request=dict(method='POST', url='https://sdk.amemv.com/outside')))
+        events = [json.loads(line) for line in logs.getvalue().splitlines()]
+        posts = [e for e in events if e['event'] == 'send_post_response']
+        self.assertEqual([e['http_status'] for e in posts], [200, 307, None])
+        self.assertEqual([e['path'] for e in posts], ['/device/register', '/send_activation', '/report'])
+        self.assertNotIn('13900000000', logs.getvalue())
+        self.assertNotIn('?', logs.getvalue())

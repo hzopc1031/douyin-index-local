@@ -6,9 +6,8 @@ import json
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from playwright.async_api import TimeoutError as PlaywrightTimeout
 from dyc.sms_browser import SmsBrowser, sms_result
 from dyc.sms_state import LoginSession, SmsQuota
 from tests.test_sms_state import Clock, DummyBrowser, PHONE, CODE
@@ -42,55 +41,62 @@ class ResultTests(unittest.TestCase):
             self.assertNotIn(PHONE, json.dumps(result))
             self.assertNotIn(CODE, json.dumps(result))
 
-    def test_response_matcher_auth_post_only(self):
+    def test_response_matcher_accepts_broad_post_paths(self):
         browser = SmsBrowser('/unused')
-        url = 'https://sso.douyin.com/passport/web/send_code/'
-        self.assertTrue(browser.sms_request(url + '?private=ignored', 'POST'))
-        for wrong, method in ((url, 'GET'), (url.replace('sso.douyin.com', 'evil.invalid'), 'POST'),
-                              (url.replace('https:', 'http:'), 'POST'),
-                              (url.replace('send_code', 'login'), 'POST'),
-                              (url.replace('douyin.com', 'douyin.com.evil.invalid'), 'POST')):
-            self.assertFalse(browser.sms_request(wrong, method))
+        for path in ('/passport/web/send_code/', '/sms/send', '/passport/login', '/send_activation', '/send_sms_code'):
+            self.assertTrue(browser.sms_request('https://sso.amemv.com' + path + '?ignored=1', 'POST'))
+            self.assertFalse(browser.sms_request('https://sso.amemv.com' + path, 'GET'))
+        self.assertFalse(browser.sms_request('https://sso.douyin.com/report?path=sms', 'POST'))
 
 
 class SendTests(unittest.IsolatedAsyncioTestCase):
+    async def run_send(self, responses):
+        browser = SmsBrowser('/unused')
+        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        listeners = {}
+        browser.context = Mock()
+        browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
+        browser.context.remove_listener.side_effect = lambda event, callback: listeners.pop(event)
+        async def clicked():
+            self.assertEqual(set(listeners), {'request', 'response'})
+            for path, status, body in responses:
+                request = Mock(url='https://sso.amemv.com' + path + '?cookie=synthetic-secret', method='POST')
+                response = SimpleNamespace(url=request.url, request=request, status=status,
+                                           json=AsyncMock(return_value=body))
+                listeners['request'](request)
+                if status is not None:
+                    listeners['response'](response)
+                await asyncio.sleep(0)
+        click = AsyncMock(side_effect=clicked)
+        browser.page = Mock(url=browser.url)
+        browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = click
+        logs = io.StringIO()
+        with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
+            result = await browser.send(PHONE)
+        click.assert_awaited_once()
+        self.assertEqual(listeners, {})
+        self.assertEqual(browser.sms_deadline, 0)
+        for event in ('send_click_start', 'send_click_complete', 'send_response'):
+            self.assertIn(event, logs.getvalue())
+        for secret in (PHONE, CODE, 'synthetic-secret', '?'):
+            self.assertNotIn(secret, logs.getvalue())
+        return result
+
     async def test_wait_before_single_click_results_and_safe_audit(self):
         for status, body, expected in CASES:
             with self.subTest(expected=expected, status=status):
-                browser = SmsBrowser('/unused')
-                browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
-                click = AsyncMock()
-                response = SimpleNamespace(status=status, json=AsyncMock(return_value=body))
-                waiting = False
-                class Pending:
-                    async def __aenter__(self):
-                        nonlocal waiting
-                        waiting = True
-                        self.value = asyncio.get_running_loop().create_future()
-                        self.value.set_result(response)
-                        return self
-                    async def __aexit__(self, *args):
-                        if status is None:
-                            raise PlaywrightTimeout('synthetic-private ' + PHONE)
-                def expect(predicate, timeout):
-                    self.assertEqual(timeout, 15000)
-                    self.assertTrue(predicate(SimpleNamespace(url='https://sso.douyin.com/passport/web/send_code/',
-                                                              request=SimpleNamespace(method='POST'))))
-                    return Pending()
-                async def clicked():
-                    self.assertTrue(waiting)
-                click.side_effect = clicked
-                browser.page = Mock(url=browser.url, expect_response=expect)
-                browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = click
-                logs = io.StringIO()
-                with redirect_stderr(logs):
-                    result = await browser.send(PHONE)
+                result = await self.run_send([('/passport/web/send_code/', status, body)])
                 self.assertEqual(result['outcome'], expected)
-                click.assert_awaited_once()
-                for event in ('send_click_start', 'send_click_complete', 'send_response'):
-                    self.assertIn(event, logs.getvalue())
-                for secret in (PHONE, CODE, 'synthetic-private', 'passport', '?'):
-                    self.assertNotIn(secret, logs.getvalue())
+
+    async def test_all_candidates_observed_and_any_success_wins(self):
+        failed = ('/passport/precheck', 200, {'code': 1001})
+        success = ('/send_activation', 200, {'code': 0})
+        for responses in ((failed, success), (success, failed),
+                          (('/report', 200, {'code': 0}), failed, success)):
+            result = await self.run_send(responses)
+            self.assertEqual(result['outcome'], 'accepted')
+        result = await self.run_send([('/report', 200, {'code': 0}), failed, ('/sms', 200, {})])
+        self.assertEqual(result['outcome'], 'business_failed')
 
     async def test_session_acceptance_failure_and_quota_survive_restart(self):
         for status, body, expected in CASES:

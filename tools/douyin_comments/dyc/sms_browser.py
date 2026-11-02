@@ -43,29 +43,9 @@ COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
                 'sid_guard', 'sid_ucp_v1', 'ssid_ucp_v1', 'passport_csrf_token',
                 'passport_csrf_token_default', 'ttwid'}
 SESSION_COOKIE_SECONDS = 86400
-ASSET_DOMAINS = ('douyin.com', 'douyinpic.com', 'douyinvod.com', 'byteimg.com',
-                 'bytedance.com', 'bytegecko.com', 'zijieapi.com', 'snssdk.com',
-                 'pstatp.com', 'bytedance.net', 'ibytedtos.com', 'douyinstatic.com',
-                 'bytegoofy.com', 'bytetos.com', 'bytescm.com', 'yhgfb-cn-static.com')
-AUTH_DOMAINS = ('douyin.com', 'zijieapi.com', 'snssdk.com')
 LOGIN_PANEL_SECONDS = 60
-# SDK scripts and static data observed on the official login landing page.
-# These hosts do NOT inherit the general API/POST permission above.
-LOGIN_STATIC_DOMAINS = ('applogcdn.com', 'ibytedapm.com', 'bytednsdoc.com',
-                        'bytetcc.com', 'effectcdn.com', 'byteeffecttos.com')
+SMS_RESPONSE_SECONDS = 15
 
-
-def login_static(url, method, resource):
-    parsed = urlsplit(url)
-    if (method not in ('GET', 'HEAD') or
-            not in_domains(parsed.hostname or '', LOGIN_STATIC_DOMAINS)):
-        return False
-    if resource.lower() in ('script', 'stylesheet', 'image', 'font', 'media'):
-        return True
-    # fetch/XHR is also used to load SDK bundles/data. An arbitrary config or
-    # reporting endpoint is not a static asset just because it uses GET.
-    return resource.lower() in ('xhr', 'fetch') and parsed.path.lower().endswith(
-        ('.js', '.css', '.wasm', '.json', '.bin', '.zip'))
 
 # All DOM text (including reflected codes), form fields and editable content
 # are hidden BEFORE rasterization, in every frame. The trusted phone UI gives
@@ -187,8 +167,7 @@ class SmsBrowser:
         self.private_values = []
         self.fatal = False
         self.audit_id = ''
-        self.awaiting_sms = False
-        self.sms_http_status = None
+        self.sms_deadline = 0
         self.auto_attempts = 0
         self.auto_seen = set()
         self.auto_disabled = False
@@ -328,13 +307,42 @@ class SmsBrowser:
         return any(v in decoded or quote(v, safe='') in value or
                    base64.b64encode(v.encode()).decode() in value for v in self.private_values)
 
+    def request_metadata(self, url, method):
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return dict(method='OTHER', domain='[unavailable]', path='[unavailable]')
+        def clean(value):
+            if self.contains_private(value):
+                return '[redacted]'
+            return re.sub(r'[0-9]{6,}', '[redacted]', unquote(value))[:512]
+        return dict(method=method if re.fullmatch(r'[A-Z]{1,20}', method or '') else 'OTHER',
+                    domain=clean(parsed.hostname or ''), path=clean(parsed.path))
+
+    def blocked_url(self, url):
+        if self.contains_private(url):
+            return 'private_value_in_url'
+        if site.request_kind(unquote(url)):
+            return 'comments_forbidden'
+        return ''
+
+    async def websocket(self, socket):
+        reason = self.blocked_url(socket.url)
+        if reason:
+            audit('request_guard', session=self.audit_id, allowed=False, reason=reason,
+                  **self.request_metadata(socket.url, 'GET'))
+            await socket.close()
+        else:
+            socket.connect_to_server()
+
     async def route(self, route):
         try:
             await self._route(route)
         except Exception:
             # Never let Playwright log an unhandled route exception containing
             # a URL or input. Missing guard coverage fails closed.
-            audit('request_guard_rejected', session=self.audit_id, reason='request_guard_failed')
+            audit('request_guard_rejected', session=self.audit_id, reason='request_guard_failed',
+                  **self.request_metadata(route.request.url, route.request.method))
             self.fatal_reason = self.fatal_reason or 'request_guard_failed'
             self.fatal = True
             try:
@@ -344,49 +352,17 @@ class SmsBrowser:
 
     async def _route(self, route):
         request = route.request
-        if self.fatal or self.cancel.is_set():
-            audit('request_guard_rejected', session=self.audit_id, reason='stopped')
+        reason = 'stopped' if self.fatal or self.cancel.is_set() else self.blocked_url(request.url)
+        allowed = not reason
+        if not allowed or request.method != 'GET':
+            audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason or 'allowed_login',
+                  **self.request_metadata(request.url, request.method))
+        if not allowed:
             await route.abort()
-            return
-        if request.frame.page != self.page:
-            audit('request_guard_rejected', session=self.audit_id, reason='foreign_page')
-            await route.abort()  # auth is confined to the owned page, never popups
-            return
-        if self.backend:
+        elif self.backend:
             await self.backend(route)
-            return
-        parsed = urlsplit(request.url)
-        host = parsed.hostname or ''
-        allowed = (parsed.scheme == 'https' and parsed.port in (None, 443) and
-                   not parsed.username and not parsed.password and
-                   (in_domains(host, ASSET_DOMAINS) or
-                    login_static(request.url, request.method, request.resource_type)) and
-                   not self.contains_private(request.url) and
-                   request.method in ('GET', 'HEAD', 'POST', 'OPTIONS'))
-        if request.method == 'POST':
-            allowed = allowed and in_domains(host, AUTH_DOMAINS)
-        if request.is_navigation_request() and request.frame == self.page.main_frame:
-            allowed = allowed and parsed.netloc == urlsplit(self.url).netloc
-        # Login must not collect comments as a side effect.
-        if site.request_kind(request.url):
-            allowed = False
-        if request.method == 'POST' or not allowed:
-            reason = 'allowed_auth_post'
-            if not allowed:
-                reason = 'host_scheme_method_policy'
-                if self.contains_private(request.url):
-                    reason = 'private_value_in_url'
-                elif site.request_kind(request.url):
-                    reason = 'comments_forbidden'
-                elif request.method == 'POST' and not in_domains(host, AUTH_DOMAINS):
-                    reason = 'post_domain_denied'
-                elif request.is_navigation_request() and request.frame == self.page.main_frame:
-                    reason = 'navigation_origin_denied'
-            audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason)
-        if allowed:
-            await route.continue_()
         else:
-            await route.abort()
+            await route.continue_()
 
     async def start(self):
         if self.startup_limits:
@@ -417,7 +393,7 @@ class SmsBrowser:
                 viewport=dict(width=1000, height=800), device_scale_factor=1,
                 service_workers='block', accept_downloads=False)
             await self.context.route('**/*', self.route)
-            await self.context.route_web_socket('**/*', lambda socket: socket.close())
+            await self.context.route_web_socket('**/*', self.websocket)
             await self.context.add_cookies(await self.persistent.cookies(self.url))
             self.context.on('response', self.response)
             self.page = await self.context.new_page()
@@ -449,8 +425,9 @@ class SmsBrowser:
         try:
             status = event.get('responseStatusCode', 0)
             request = event.get('request', {})
-            if self.awaiting_sms and self.sms_request(request.get('url', ''), request.get('method')):
-                self.sms_http_status = status
+            if time.monotonic() < self.sms_deadline and request.get('method') == 'POST':
+                audit('send_post_response', session=self.audit_id, http_status=status or None,
+                      **self.request_metadata(request.get('url', ''), request.get('method')))
             if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
                 self.fatal_reason = 'http_' + str(status)
                 self.fatal = True
@@ -461,30 +438,20 @@ class SmsBrowser:
                                  if h['name'].lower() == 'location'), '')
                 from urllib.parse import urljoin
                 target = urlsplit(urljoin(request['url'], location))
-                # Static CDN GETs may move between approved asset hosts. Auth,
-                # documents and API redirects keep the stricter same-host rule;
-                # POST and credential-bearing redirects are always rejected.
-                source = urlsplit(request['url'])
-                asset = event.get('resourceType') in ('Script', 'Stylesheet', 'Image', 'Font', 'Media')
-                resource = event.get('resourceType', '')
-                approved_asset = (
-                    (asset and in_domains(source.hostname or '', ASSET_DOMAINS) or
-                     login_static(source.geturl(), request['method'], resource)) and
-                    (asset and in_domains(target.hostname or '', ASSET_DOMAINS) or
-                     login_static(target.geturl(), request['method'], resource)))
-                denied = denied or (request['method'] not in ('GET', 'HEAD') or
-                          target.scheme != 'https' or target.port not in (None, 443) or
-                          target.username is not None or target.password is not None or
-                          (target.netloc != source.netloc and not approved_asset) or
-                          self.contains_private(target.geturl()) or bool(site.request_kind(target.geturl())))
+                # H6: login dependencies may redirect any method; retain the two URL exclusions.
+                denied = denied or bool(self.blocked_url(target.geturl()))
                 if denied:
+                    audit('request_guard', session=self.audit_id, allowed=False,
+                          reason=self.blocked_url(target.geturl()) or self.fatal_reason or 'response_transport_error',
+                          **self.request_metadata(target.geturl(), request.get('method')))
                     kind = event.get('resourceType', '')
                     kind = kind.lower() if kind in ('Document', 'XHR', 'Fetch', 'Script', 'Image', 'Other') else 'resource'
                     self.fatal_reason = self.fatal_reason or 'redirect_denied_' + kind
                     self.fatal = True
             if denied:
                 audit('response_guard_rejected', session=self.audit_id, http_status=status,
-                      reason=self.fatal_reason or 'response_transport_error')
+                      reason=self.fatal_reason or 'response_transport_error',
+                      **self.request_metadata(request.get('url', ''), request.get('method')))
                 await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
             else:
                 await session.send('Fetch.continueRequest', dict(requestId=request_id))
@@ -562,53 +529,74 @@ class SmsBrowser:
         return 'pending'
 
     def sms_request(self, url, method):
-        parsed = urlsplit(url)
-        host_allowed = in_domains(parsed.hostname or '', AUTH_DOMAINS)
-        if self.backend:
-            host_allowed = parsed.netloc == urlsplit(self.url).netloc
-        return (method == 'POST' and parsed.scheme == 'https' and host_allowed
-                and parsed.port in (None, 443) and not parsed.username and not parsed.password
-                and re.fullmatch(r'/passport/(?:[a-zA-Z0-9_-]+/)*(?:send_code|send_sms_code)/?', parsed.path) is not None)
+        path = urlsplit(url).path.lower()
+        return method == 'POST' and any(marker in path for marker in
+                                       ('send_code', 'sms', 'passport', 'send_activation'))
 
     async def send(self, phone):
-        from playwright.async_api import TimeoutError as PlaywrightTimeout
-        self.step('send_sms', 'official send-code response after one click', 15)
+        self.step('send_sms', 'official send-code response after one click', SMS_RESPONSE_SECONDS)
         self.require_origin()
         self.private_values.append(phone)
         await self.visible(PHONE).fill(phone)
         self.require_origin()
-        self.awaiting_sms = True
-        self.sms_http_status = None
-        result = sms_result(None, None)
+        requests, tasks, results = set(), set(), []
+
+        def requested(request):
+            if time.monotonic() < self.sms_deadline and request.method == 'POST':
+                requests.add(request)
+                audit('send_post_start', session=self.audit_id, http_status=None,
+                      **self.request_metadata(request.url, request.method))
+
+        async def read_response(response):
+            result = sms_result(response.status, None)
+            results.append(result)
+            if response.status == 200:
+                try:
+                    async with asyncio.timeout(2):
+                        body = await response.json()
+                    result.update(sms_result(response.status, body))
+                except Exception:
+                    pass
+
+        def responded(response):
+            if (time.monotonic() < self.sms_deadline and response.request in requests
+                    and self.sms_request(response.url, response.request.method)
+                    and not 300 <= response.status < 400):
+                task = asyncio.create_task(read_response(response))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+
+        self.context.on('request', requested)
+        self.context.on('response', responded)
+        self.sms_deadline = time.monotonic() + SMS_RESPONSE_SECONDS
         try:
+            audit('send_click_start', session=self.audit_id)
             try:
-                async with self.page.expect_response(
-                        lambda r: self.sms_request(r.url, r.request.method), timeout=15000) as pending:
-                    audit('send_click_start', session=self.audit_id)
-                    try:
-                        await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
-                    except Exception:
-                        audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
-                        raise
-                    audit('send_click_complete', session=self.audit_id)
-                response = await pending.value
-                self.sms_http_status = response.status
-                body = None
-                if response.status == 200:
-                    try:
-                        async with asyncio.timeout(2):
-                            body = await response.json()
-                    except Exception:
-                        pass
-                result = sms_result(response.status, body)
-                body = None
-            except PlaywrightTimeout:
-                result = sms_result(self.sms_http_status, None)
-            audit('send_response', session=self.audit_id, http_status=result['http_status'],
-                  business_code=result['business_code'], outcome=result['outcome'])
-            return result
+                await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
+            except Exception:
+                audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
+                raise
+            audit('send_click_complete', session=self.audit_id)
+            await asyncio.sleep(max(0, self.sms_deadline - time.monotonic()))
+            self.sms_deadline = 0
+            # Responses received before the deadline may still be reading their body.
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            self.awaiting_sms = False
+            self.sms_deadline = 0
+            self.context.remove_listener('request', requested)
+            self.context.remove_listener('response', responded)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        result = next((r for r in results if r['outcome'] == 'accepted'), None)
+        if result is None:
+            result = next((r for r in results if r['outcome'] != 'unconfirmed'),
+                          results[-1] if results else sms_result(None, None))
+        if self.fatal_reason in ('http_401', 'http_403', 'http_429'):
+            result = sms_result(int(self.fatal_reason[5:]), None)
+        audit('send_response', session=self.audit_id, http_status=result['http_status'],
+              business_code=result['business_code'], outcome=result['outcome'])
+        return result
 
     async def submit(self, code):
         self.step('submit_code', CODE + ' editable; ' + SUBMIT + ' clickable', 3)
