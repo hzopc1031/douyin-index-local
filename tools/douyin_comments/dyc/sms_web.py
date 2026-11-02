@@ -122,9 +122,9 @@ class WebApp:
                         self.csrf = secrets.token_urlsafe(32)
                         data = dict(self.session.public(), csrf=self.csrf)
                         return 200, {'Set-Cookie': f'__Host-dyc_login={cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600'}, data
-                    except BaseException:
+                    except BaseException as error:
                         if self.session:
-                            await self.session.finish('failed')
+                            await self.session.fail(error)
                         self.done.set()
                         raise
                     finally:
@@ -158,8 +158,8 @@ class WebApp:
             try:
                 async with asyncio.timeout(max(.001, min(15, session.deadline-self.clock()))):
                     await session.poll()
-            except Exception:
-                await session.finish('expired' if self.clock() >= session.deadline else 'failed')
+            except Exception as error:
+                await session.fail(error, state='expired' if self.clock() >= session.deadline else 'failed')
         if session.state in TERMINAL:
             if self.terminal_at is None:
                 self.terminal_at = self.clock()
@@ -256,7 +256,7 @@ async def serve(args):
     token = '' if no_token else secrets.token_urlsafe(32)
     quota = SmsQuota(args.state_dir)
     app = WebApp(origin, token, lambda: LoginSession(
-        SmsBrowser(args.profile_dir, startup_limits=limits), quota, stop_on_verification=True),
+        SmsBrowser(args.profile_dir, startup_limits=limits, state_dir=args.state_dir), quota, stop_on_verification=True),
         no_token=no_token, token_ttl=token_ttl, port=args.port)
     tasks = set()
     def accepted(reader, writer):

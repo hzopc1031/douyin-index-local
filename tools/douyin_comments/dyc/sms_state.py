@@ -117,12 +117,18 @@ class LoginSession:
         self.closed = False
         self.gate = asyncio.Lock()
         self.next_send = 0
+        self.failure = None
 
     def public(self):
         return dict(state=self.state, mode=self.mode, phone=self.masked_phone,
                     nonce=self.nonce, expires_in=max(0, math.ceil(self.deadline-self.clock())),
                     resend_in=max(0, math.ceil(self.next_send-self.clock())),
-                    auto_attempts=self.browser.auto_attempts)
+                    auto_attempts=self.browser.auto_attempts, failure=self.failure)
+
+    async def fail(self, error=None, reason='login_failed', state='failed'):
+        if hasattr(self.browser, 'diagnose'):
+            self.failure = await self.browser.diagnose(error, reason)
+        await self.finish(state)
 
     async def finish(self, state):
         self.state = state
@@ -139,7 +145,7 @@ class LoginSession:
         if self.state in TERMINAL:
             return
         if self.clock() >= self.deadline:
-            await self.finish("expired")
+            await self.fail(reason="login_expired", state="expired")
             return
         status = await self.browser.observe()
         if status == "succeeded":
@@ -147,7 +153,7 @@ class LoginSession:
             await self.finish("succeeded")
         elif status == "verification":
             if self.stop_on_verification:
-                await self.finish("failed")
+                await self.fail(reason="verification_required")
                 return
             if self.state != "verification":
                 self.before_verification = self.state
@@ -161,7 +167,7 @@ class LoginSession:
             reject("busy")
         async with self.gate:
             if self.clock() >= self.deadline:
-                await self.finish("expired")
+                await self.fail(reason="login_expired", state="expired")
             if self.state in TERMINAL:
                 return self.public()
             action = obj.get("action")
@@ -244,8 +250,8 @@ class LoginSession:
             except asyncio.CancelledError:
                 await self.finish("cancelled")
                 raise
-            except Exception:
-                await self.finish("failed")
+            except Exception as error:
+                await self.fail(error)
                 reject("login_failed")
             finally:
                 obj.clear()

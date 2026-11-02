@@ -2,7 +2,8 @@
 
 The persistent dyc profile stays at about:blank. Only allowlisted login cookies
 are copied back after a positive dyc login signal. No traces, HARs, downloads,
-page storage, screenshots or credential-bearing browser errors are written.
+page storage or credential-bearing browser errors are written. Failure screenshots
+are redacted before rasterization and stored only in the private state directory.
 """
 import asyncio
 import base64
@@ -13,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import unicodedata
@@ -22,7 +24,7 @@ from . import site
 from .browser import _kill_owned, _processes
 from .errors import Stop
 from .login_ui import ready_qr
-from .runtime import Display, Profile, browser_defaults, check_memory
+from .runtime import Display, Profile, browser_defaults, check_memory, private_dir, private_open, atomic_text
 from .sms_state import reject
 from .sms_cdp import TargetGuard
 
@@ -101,7 +103,11 @@ class Challenge:
 
 
 class SmsBrowser:
-    def __init__(self, profile, *, backend=None, solver=None, startup_limits=False):
+    def __init__(self, profile, *, backend=None, solver=None, startup_limits=False, state_dir=None):
+        self.state_dir = private_dir(state_dir) if state_dir is not None else None
+        self.diagnostic = None
+        self.fatal_reason = ''
+        self.step('initializing', 'browser startup', 35)
         self.startup_limits = startup_limits
         self.profile = Profile(profile)
         self.display = Display()  # always owned; never use :107 or inherited DISPLAY
@@ -122,6 +128,76 @@ class SmsBrowser:
         self.last_frame = None
         self.frame_token = ''
 
+    def step(self, name, condition, timeout):
+        self.stage = name
+        self.condition = condition
+        self.stage_timeout = timeout
+        self.stage_started = time.monotonic()
+
+    async def diagnose(self, error=None, reason='login_failed'):
+        """Never serialize exception messages, input, URL parameters or DOM text."""
+        if self.diagnostic is not None:
+            return self.diagnostic
+        if isinstance(error, Stop):
+            reason = error.reason
+        elif isinstance(error, (TimeoutError, asyncio.CancelledError)):
+            reason = 'login_step_timeout'
+        elif error is not None:
+            reason = 'browser_operation_failed'
+        reason = self.fatal_reason or reason
+        data = dict(reason=reason, step=self.stage, condition=self.condition,
+                    timeout_seconds=self.stage_timeout,
+                    elapsed_seconds=round(time.monotonic()-self.stage_started, 3),
+                    url='unavailable', title='unavailable', screenshot='',
+                    screenshot_status='page_unavailable')
+        self.diagnostic = data
+        if self.page is not None:
+            # Only known public landing paths survive; no query/hash/userinfo.
+            parsed = urlsplit(self.page.url)
+            if parsed.scheme == 'https' and parsed.netloc == urlsplit(self.url).netloc:
+                path = parsed.path if parsed.path in ('', '/', '/jingxuan') else '/[redacted]'
+                data['url'] = 'https://' + parsed.netloc + path
+            elif self.page.url == 'about:blank':
+                data['url'] = 'about:blank'
+            else:
+                data['url'] = '[redacted]'
+            try:
+                async with asyncio.timeout(2):
+                    title = await self.page.title()
+                    data['title'] = title if title in ('', '抖音', '抖音-记录美好生活',
+                        '抖音 - 记录美好生活', '抖音 - 记录美好生活 - 抖音') else '[redacted nonstandard title]'
+            except Exception:
+                pass
+            if self.state_dir is not None:
+                try:
+                    png = await self.diagnostic_snapshot()
+                    path = self.state_dir / ('login-failure-' + secrets.token_hex(8) + '.png')
+                    with os.fdopen(private_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
+                        stream.write(png)
+                    data['screenshot'] = str(path)
+                    data['screenshot_status'] = 'saved_redacted'
+                except Exception:
+                    data['screenshot_status'] = 'capture_failed'
+        line = json.dumps(data, ensure_ascii=False)
+        if self.state_dir is not None:
+            try:
+                atomic_text(self.state_dir / 'login-status.json', line + '\n')
+            except Exception:
+                data['state_write_failed'] = True
+        print(json.dumps(dict(event='login_failure', **data), ensure_ascii=False), file=sys.stderr, flush=True)
+        return data
+
+    async def diagnostic_snapshot(self):
+        # Keep empty field borders visible, but hide all text, input values,
+        # QR codes and media; no screenshot can contain a login credential.
+        style = REDACT_STYLE + """
+          input, textarea { visibility: visible !important; color: transparent !important;
+            -webkit-text-fill-color: transparent !important; }
+          img, canvas, video, svg, iframe { visibility: hidden !important; }
+          * { background-image: none !important; }
+        """
+        return await self.page.screenshot(type='png', style=style, animations='disabled', timeout=3000)
+
     def __repr__(self):
         return '<SmsBrowser>'
 
@@ -129,7 +205,7 @@ class SmsBrowser:
         parsed = urlsplit(self.page.url)
         if (parsed.scheme != 'https' or parsed.netloc != urlsplit(self.url).netloc
                 or parsed.username or parsed.password or self.fatal):
-            raise Stop(4, 'login_origin_or_access')
+            raise Stop(4, self.fatal_reason or 'login_origin_or_access')
 
     def contains_private(self, value):
         decoded = unquote(value)
@@ -181,13 +257,17 @@ class SmsBrowser:
     async def start(self):
         if self.startup_limits:
             check_memory()
-        self.profile.__enter__()
         try:
+            self.step('profile_lock', 'exclusive dyc profile lock', 0)
+            self.profile.__enter__()
+            self.step('display_start', 'owned Xvfb ready', 10)
             await self.display.start()
             browser_defaults()
             from playwright.async_api import async_playwright
+            self.step('playwright_start', 'Playwright driver ready', 35)
             self.playwright = await async_playwright().start()
             self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
+            self.step('browser_launch', 'persistent Chromium about:blank', 35)
             self.persistent = await self.playwright.chromium.launch_persistent_context(
                 str(self.profile.path), headless=False,
                 env={**os.environ, **self.display.environment()},
@@ -198,6 +278,7 @@ class SmsBrowser:
                       '--disable-breakpad', '--disable-extensions'])
             await self.persistent.route('**/*', lambda route: route.abort())
             await self.persistent.route_web_socket('**/*', lambda socket: socket.close())
+            self.step('isolated_context', 'isolated login page and network guards', 35)
             self.context = await self.persistent.browser.new_context(
                 viewport=dict(width=1000, height=800), device_scale_factor=1,
                 service_workers='block', accept_downloads=False)
@@ -209,14 +290,17 @@ class SmsBrowser:
             self.page.set_default_timeout(3000)
             self.response_session = await self.context.new_cdp_session(self.page)
             self.target_guard = TargetGuard(self)
+            self.step('redirect_guard', 'CDP Fetch/Target interception ready', 5)
             await self.target_guard.start(self.response_session)
             await self.reset()
-        except BaseException:
+        except BaseException as error:
+            await self.diagnose(error)
             await self.close()
             raise
 
     def response(self, response):
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
+            self.fatal_reason = 'http_' + str(response.status)
             self.fatal = True
 
     def guard_response(self, event, session=None):
@@ -231,6 +315,7 @@ class SmsBrowser:
         try:
             status = event.get('responseStatusCode', 0)
             if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
+                self.fatal_reason = 'http_' + str(status)
                 self.fatal = True
             denied = self.fatal or bool(event.get('responseErrorReason'))
             if 300 <= status < 400:
@@ -261,8 +346,10 @@ class SmsBrowser:
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
+        self.step('navigate', 'DOMContentLoaded on fixed login URL', 15)
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
+        self.step('login_entry', 'visible ' + site.LOGIN_PANEL + ' or header button 登录 or account signal', 8)
         for _ in range(40):
             self.require_origin()
             if await self.page.locator(site.LOGIN_PANEL).filter(visible=True).count():
@@ -271,6 +358,7 @@ class SmsBrowser:
                 return
             login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True)
             if await login.count() == 1:
+                self.step('open_login_panel', site.LOGIN_PANEL + ' visible after header 登录 click', 10)
                 await login.click()
                 await self.page.locator(site.LOGIN_PANEL).first.wait_for(state='visible', timeout=10000)
                 return
@@ -287,6 +375,7 @@ class SmsBrowser:
         return bool(await self.page.locator(', '.join(selectors)).filter(visible=True).count())
 
     async def observe(self):
+        self.step('observe_login', 'no challenge/access denial; confirmed account signal', 15)
         self.require_origin()
         if await self.challenge():
             return 'verification'
@@ -297,6 +386,7 @@ class SmsBrowser:
         return 'pending'
 
     async def send(self, phone):
+        self.step('send_sms', PHONE + ' editable; ' + SEND + ' clickable', 3)
         self.require_origin()
         self.private_values.append(phone)
         await self.page.locator(PHONE).fill(phone)
@@ -304,6 +394,7 @@ class SmsBrowser:
         await self.page.locator(SEND).filter(has_text='获取验证码').click()
 
     async def submit(self, code):
+        self.step('submit_code', CODE + ' editable; ' + SUBMIT + ' clickable', 3)
         self.require_origin()
         self.private_values.append(code)
         try:
@@ -488,6 +579,7 @@ class SmsBrowser:
         await self.replay(points, capture.metadata)
 
     async def persist(self):
+        self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)
         self.require_origin()
         if not await self.inside():
             raise Stop(4, 'login_unconfirmed')
