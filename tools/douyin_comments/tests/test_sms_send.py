@@ -60,7 +60,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         async def clicked():
             self.assertEqual(set(listeners), {'request', 'response'})
             for path, status, body in responses:
-                request = Mock(url='https://sso.amemv.com' + path + '?cookie=synthetic-secret', method='POST')
+                request = Mock(url='https://sso.amemv.com' + path + '?cookie=synthetic-secret', method='POST', redirected_from=None)
                 response = SimpleNamespace(url=request.url, request=request, status=status,
                                            json=AsyncMock(return_value=body))
                 listeners['request'](request)
@@ -97,6 +97,34 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result['outcome'], 'accepted')
         result = await self.run_send([('/report', 200, {'code': 0}), failed, ('/sms', 200, {})])
         self.assertEqual(result['outcome'], 'business_failed')
+
+    async def test_redirected_get_late_body_and_old_response(self):
+        browser = SmsBrowser('/unused')
+        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        listeners = {}
+        browser.context = Mock()
+        browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
+        browser.context.remove_listener.side_effect = lambda event, callback: listeners.pop(event)
+        body_read = asyncio.Event()
+        async def body():
+            await asyncio.sleep(.04)
+            body_read.set()
+            return {'code': 0}
+        async def clicked():
+            old = Mock(url='https://sso.amemv.com/passport/old', method='POST', redirected_from=None)
+            listeners['response'](SimpleNamespace(request=old, status=200,
+                                                   json=AsyncMock(return_value={'code': 9})))
+            first = Mock(url='https://sso.amemv.com/sms/send', method='POST', redirected_from=None)
+            listeners['request'](first)
+            redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
+            listeners['response'](SimpleNamespace(request=redirected, status=200, json=body))
+        browser.page = Mock(url=browser.url)
+        browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = AsyncMock(side_effect=clicked)
+        with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
+            result = await browser.send(PHONE)
+        self.assertTrue(body_read.is_set())
+        self.assertEqual(result['outcome'], 'accepted')
+        self.assertEqual(listeners, {})
 
     async def test_session_acceptance_failure_and_quota_survive_restart(self):
         for status, body, expected in CASES:

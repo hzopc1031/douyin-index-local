@@ -1,6 +1,8 @@
 """Synthetic failure evidence; no network, real credentials or profiles."""
 from contextlib import redirect_stderr
 import io
+import base64
+from urllib.parse import quote
 import json
 from pathlib import Path
 import tempfile
@@ -55,7 +57,8 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                     route.abort.assert_not_awaited()
             for path in ('/aweme/v1/web/comment/list/', '/aweme/v1/web/comment/list/reply/',
                          '/%61weme/v1/web/comment/list/', '/sms?phone=13900000000',
-                         '/sms?code=975318', '/975318/send', '/%39%37%35%33%31%38/send'):
+                         '/sms?code=975318', '/975318/send', '/%39%37%35%33%31%38/send',
+                         '/' + quote(base64.b64encode(b'13900000000').decode(), safe='')):
                 request = Mock(url='https://sso.douyin.com' + path, method='POST')
                 route = Mock(request=request, abort=AsyncMock(), continue_=AsyncMock())
                 await browser.route(route)

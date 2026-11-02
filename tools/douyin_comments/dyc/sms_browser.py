@@ -305,7 +305,7 @@ class SmsBrowser:
     def contains_private(self, value):
         decoded = unquote(value)
         return any(v in decoded or quote(v, safe='') in value or
-                   base64.b64encode(v.encode()).decode() in value for v in self.private_values)
+                   base64.b64encode(v.encode()).decode() in decoded for v in self.private_values)
 
     def request_metadata(self, url, method):
         try:
@@ -559,12 +559,16 @@ class SmsBrowser:
                     pass
 
         def responded(response):
-            if (time.monotonic() < self.sms_deadline and response.request in requests
-                    and self.sms_request(response.url, response.request.method)
-                    and not 300 <= response.status < 400):
-                task = asyncio.create_task(read_response(response))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
+            if time.monotonic() >= self.sms_deadline or 300 <= response.status < 400:
+                return
+            request = response.request
+            while request is not None:
+                if request in requests and self.sms_request(request.url, request.method):
+                    task = asyncio.create_task(read_response(response))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    break
+                request = request.redirected_from
 
         self.context.on('request', requested)
         self.context.on('response', responded)
