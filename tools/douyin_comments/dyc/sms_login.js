@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   let csrf = '', nonce = '', state = null, busy = false, gesture = null, frameId = '';
   const terminal = new Set(['succeeded', 'failed', 'expired', 'cancelled']);
-  const messages = {ready: '已就绪。可发短信或切换扫码。', code_sent: '已请求发码，请查看短信并输入验证码。',
+  const messages = {ready: '已就绪。可发短信或切换扫码。', code_sent: '平台已接受发码请求，请查看短信并输入验证码。',
     submitting: '已提交，正在等待官方登录确认。', verification: '请完成下方安全验证。',
     succeeded: '登录成功，dyc 登录态已保存。', failed: '登录已停止，可能遇到验证或访问限制。请联系管理员查看状态。',
     expired: '会话已到期并释放。', cancelled: '会话已结束并释放。'};
@@ -18,7 +18,6 @@
     for (const id of ['unlock', 'send', 'submit', 'smsMode', 'qrMode', 'refresh', 'cancel'])
       $(id).disabled = busy || Boolean(gesture) || terminal.has(state?.state);
     $('retry').disabled = busy || !state?.retryable;
-    if (state?.preparation_failed) $('cancel').disabled = busy;
     if (state) {
       $('send').disabled ||= state.resend_in > 0 || !['ready', 'code_sent'].includes(state.state);
       $('submit').disabled ||= state.state !== 'code_sent';
@@ -26,19 +25,22 @@
   }
   function render(data) {
     state = data; nonce = data.nonce;
-    $('status').textContent = data.preparation_failed
-      ? (data.retryable ? '手机登录准备失败。可点击重试。' : '登录已停止，遇到验证或访问限制时不能重试。')
-      : messages[data.state] || '正在准备。';
+    $('status').textContent = data.preparation_failed ? '手机登录准备失败。可手动重新开始。' : messages[data.state] || '正在准备。';
     $('retry').hidden = !data.retryable;
-    $('modes').hidden = Boolean(data.preparation_failed);
+    $('modes').hidden = terminal.has(data.state);
     $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
     $('picture').hidden = !(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state);
-    $('details').textContent = `${data.phone || ''} 剩余 ${data.expires_in} 秒；发码冷却 ${data.resend_in} 秒`;
-    if (data.failure) $('details').textContent = `失败步骤：${data.failure.step}；原因：${data.failure.reason}；操作：${data.failure.operation || '未记录'}`;
+    $('details').textContent = terminal.has(data.state) ? '' : `${data.phone || ''} 剩余 ${data.expires_in} 秒`;
+    if (data.state === 'code_sent') $('details').textContent += `；发码冷却 ${data.resend_in} 秒`;
+    if (data.failure) $('details').textContent = `失败步骤：${data.failure.step || '会话'}；原因：${data.failure.reason}；操作：${data.failure.operation || '未记录'}`;
+    if (data.send_result && ['code_sent', 'failed'].includes(data.state)) {
+      $('status').textContent = data.send_result.description;
+      $('details').textContent += `；HTTP ${data.send_result.http_status ?? '未捕获'}；业务码 ${data.send_result.business_code ?? '未捕获'}`;
+    }
     controls();
     if (terminal.has(data.state)) {
       clearInputs(); $('frame').removeAttribute('src'); frameId = '';
-      if (!data.preparation_failed) { csrf = ''; nonce = ''; }
+      if (data.state === 'succeeded') { csrf = ''; nonce = ''; }
     }
   }
   async function post(path, data) {

@@ -32,7 +32,7 @@ body {margin:0} #captcha_container {width:320px;height:220px;background:#abcdef;
 <div id="douyin_login_comp_btn_id" onclick="submit()">登录</div></div></article>
 <script>
 window.sends=0; window.submissions=0;
-async function send() { await fetch('/sms', {method:'POST',body:document.querySelector('#normal-input').value}); window.sends++; }
+async function send() { await fetch('/passport/web/send_code/', {method:'POST',body:document.querySelector('#normal-input').value}); window.sends++; }
 async function submit() { await fetch('/submit', {method:'POST',body:document.querySelector('#button-input').value}); window.submissions++; }
 function success() { document.querySelector('#login-panel-new').remove(); document.querySelector('#header').remove();
 document.body.insertAdjacentHTML('beforeend','<div data-e2e="user-avatar">Synthetic account</div>');
@@ -56,14 +56,14 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
 
     async def backend(self, route):
         request = route.request
-        if request.url == site.FAKE_ORIGIN + '/sms' and request.method == 'POST':
+        if request.url == site.FAKE_ORIGIN + '/passport/web/send_code/' and request.method == 'POST':
             self.correct_phone = request.post_data == PHONE
             self.sends += 1
-            await route.fulfill(status=200, body='{}')
+            await route.fulfill(status=200, body='{"message":"success","data":{"error_code":0}}')
         elif request.url == site.FAKE_ORIGIN + '/submit' and request.method == 'POST':
             self.correct_code = request.post_data == CODE
             self.submits += 1
-            await route.fulfill(status=200, body='{}')
+            await route.fulfill(status=200, body='{"message":"success","data":{"error_code":0}}')
         elif request.url in (site.FAKE_ORIGIN, site.FAKE_ORIGIN + '/'):
             await route.fulfill(content_type='text/html; charset=utf-8', body=HTML)
         else:

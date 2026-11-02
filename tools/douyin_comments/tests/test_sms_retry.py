@@ -123,7 +123,7 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
         status, _, result = await self.request('/api', dict(action='retry', nonce=failed['nonce']))
         self.assertEqual((status, result['state']), (200, 'ready'))
         self.assertEqual(len(self.browsers), 2)
-        self.assertEqual(self.app.session.deadline, deadline)
+        self.assertEqual(self.app.session.deadline, deadline + 30)
         self.assertNotEqual(result['nonce'], failed['nonce'])
         self.assertFalse(self.app.preparation_failed)
         for b in self.browsers:
@@ -164,34 +164,56 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             self.assertEqual((await pending)[0], 200)
 
-    async def test_blocked_preparation_never_retries_but_can_cancel(self):
-        for reason in ('verification_required','http_401','http_403','http_429','response_guard_failed'):
-            with self.subTest(reason=reason):
+    async def test_expiry_cancel_and_failure_stay_resident_and_restart(self):
+        for ending in ('expired', 'cancelled', 'failed'):
+            with self.subTest(ending=ending):
                 await self.asyncSetUp()
-                factory=self.app.factory
-                def blocked():
-                    session=factory()
-                    session.browser.diagnose.return_value={'reason':reason}
-                    return session
-                self.app.factory=blocked
-                status, headers, data = await self.request('/auth', {})
-                self.assertEqual(status, 503)
-                self.assertFalse(data['retryable'])
-                self.headers['cookie']=headers['Set-Cookie'].split(';')[0]
-                self.headers['x-dyc-csrf']=data['csrf']
-                self.assertEqual((await self.request('/api',dict(action='retry',nonce=data['nonce'])))[0],409)
-                self.assertEqual((await self.request('/api',dict(action='cancel',nonce=data['nonce'])))[2]['state'],'cancelled')
+                data = await self.failed()
+                if ending != 'failed':
+                    await self.request('/api', dict(action='retry', nonce=data['nonce']))
+                    if ending == 'expired':
+                        self.clock.value += 601
+                    else:
+                        await self.request('/api', dict(action='cancel', nonce=self.app.session.nonce))
                 await self.app.tick()
                 self.clock.value += 11
                 await self.app.tick()
-                self.assertTrue(self.app.done.is_set())
+                self.assertFalse(self.app.done.is_set())
+                data = (await self.request('/api', dict(action='status')))[2]
+                self.assertEqual(data['state'], ending)
+                self.assertTrue(data['retryable'])
+                count = len(self.browsers)
+                result = await self.request('/api', dict(action='retry', nonce=data['nonce']))
+                self.assertEqual((result[0], result[2]['state']), (200, 'ready'))
+                self.assertEqual(len(self.browsers), count + 1)
+                self.assertEqual(self.app.session.deadline, self.clock() + 600)
+                for browser in self.browsers:
+                    browser.send.assert_not_awaited()
 
-    async def test_retry_cannot_extend_original_session_expiry(self):
-        data=await self.failed()
+    async def test_access_failure_stops_until_explicit_restart(self):
+        data = await self.failed()
+        self.app.session.failure = {'reason': 'http_429'}
         self.clock.value += 601
-        status, _, result=await self.request('/api',dict(action='retry',nonce=data['nonce']))
-        self.assertEqual((status,result['state']),(200,'expired'))
-        self.assertEqual(len(self.browsers),1)
+        for _ in range(3):
+            await self.app.tick()
+        self.assertFalse(self.app.done.is_set())
+        self.assertEqual(len(self.browsers), 1)
+        result = await self.request('/api', dict(action='retry', nonce=data['nonce']))
+        self.assertEqual((result[0], result[2]['state']), (200, 'ready'))
+
+    async def test_factory_failure_can_restart_without_exit(self):
+        factory = self.app.factory
+        self.app.factory = Mock(side_effect=RuntimeError('synthetic-private'))
+        status, headers, data = await self.request('/auth', {})
+        self.assertEqual(status, 503)
+        self.headers['cookie'] = headers['Set-Cookie'].split(';')[0]
+        self.headers['x-dyc-csrf'] = data['csrf']
+        await self.app.tick()
+        self.assertFalse(self.app.done.is_set())
+        self.app.factory = factory
+        self.browsers.append(DummyBrowser())
+        result = await self.request('/api', dict(action='retry', nonce=data['nonce']))
+        self.assertEqual((result[0], result[2]['state']), (200, 'ready'))
 
     async def test_success_still_exits_after_grace(self):
         data=await self.failed()

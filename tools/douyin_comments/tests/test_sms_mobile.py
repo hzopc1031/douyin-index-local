@@ -66,7 +66,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.goto(ORIGIN)
                 await page.locator('#retry').wait_for(state='visible')
                 self.assertIn('challenge_candidates_count', await page.locator('#details').inner_text())
-                self.assertTrue(await page.locator('#cancel').is_enabled())
+                self.assertTrue(await page.locator('#cancel').is_disabled())
                 await page.clock.fast_forward(30_000)
                 await app.tick()
                 self.assertEqual(len(browsers),1)
@@ -89,6 +89,18 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.locator('#cancel').click()
                 await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已结束')")
                 self.assertEqual(len(browsers),2)
+                await page.locator('#retry').click()
+                await page.locator('#sms').wait_for(state='visible')
+                self.assertEqual(len(browsers),3)
+                app.session.deadline = 0
+                await app.tick()
+                await page.clock.fast_forward(2600)
+                await page.locator('#retry').wait_for(state='visible')
+                self.assertIn('到期', await page.locator('#status').inner_text())
+                self.assertFalse(app.done.is_set())
+                await page.locator('#retry').click()
+                await page.locator('#sms').wait_for(state='visible')
+                self.assertEqual(len(browsers),4)
                 for browser in browsers: browser.send.assert_not_awaited()
             finally:
                 release.set()
@@ -102,9 +114,9 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 request = route.request
                 if request.url == 'https://dyc.invalid/':
                     await route.fulfill(content_type='text/html; charset=utf-8', body=HTML)
-                elif request.url in ('https://dyc.invalid/sms', 'https://dyc.invalid/submit') and request.method == 'POST':
-                    sent.append((urlsplit(request.url).path, request.post_data == (PHONE if request.url.endswith('/sms') else CODE)))
-                    await route.fulfill(body='{}')
+                elif request.url in ('https://dyc.invalid/passport/web/send_code/', 'https://dyc.invalid/submit') and request.method == 'POST':
+                    sent.append((urlsplit(request.url).path, request.post_data == (PHONE if request.url.endswith('/passport/web/send_code/') else CODE)))
+                    await route.fulfill(body='{"message":"success","data":{"error_code":0}}')
                 else:
                     foreign.append('blocked')
                     await route.abort()
@@ -177,13 +189,13 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.locator('#sms').wait_for(state='visible')
                 await page.locator('#phone').fill(PHONE)
                 await page.locator('#send').click()
-                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已请求发码')")
+                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('平台已接受发码')")
                 self.assertEqual(await page.locator('#phone').input_value(), '')
                 await page.locator('#code').fill(CODE)
                 await page.locator('#submit').click()
                 await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已提交')")
                 self.assertEqual(await page.locator('#code').input_value(), '')
-                self.assertEqual(sent, [('/sms', True), ('/submit', True)])
+                self.assertEqual(sent, [('/passport/web/send_code/', True), ('/submit', True)])
                 self.assertEqual(await page.evaluate('[localStorage.length, sessionStorage.length]'), [0, 0])
                 self.assertEqual(await page.evaluate('document.cookie'), 'other_tool=synthetic-theme')  # auth remains HttpOnly
                 self.assertNotIn(PHONE, ''.join(console))

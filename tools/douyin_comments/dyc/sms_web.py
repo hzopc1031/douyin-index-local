@@ -1,4 +1,4 @@
-"""Short-lived loopback HTTP entry point. No access/request/exception logging."""
+"""Resident loopback login entry point; only safe audit fields are logged."""
 import asyncio
 import hashlib
 import hmac
@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from .errors import Stop
 from .sms_browser import SmsBrowser
-from .sms_state import LoginError, LoginSession, SmsQuota, TERMINAL, fields, payload, reject
+from .sms_state import LoginError, LoginSession, SmsQuota, TERMINAL, audit, fields, payload, reject
 
 ERRORS = {'invalid_request', 'unauthorized', 'csrf', 'busy', 'replayed_action',
           'replayed_code', 'wrong_state', 'send_interval', 'send_hour_limit',
@@ -58,23 +58,21 @@ class WebApp:
         self.terminal_at = None
         self.preparation_failed = False
         self.retry_nonce = ''
-        self.retryable = False
 
     def public(self):
-        data = self.session.public()
-        if self.preparation_failed:
-            data.update(preparation_failed=True, retryable=self.retryable,
-                        nonce=self.retry_nonce)
+        data = self.session.public() if self.session else dict(
+            state='failed', failure={'reason': 'preparation_failed'}, nonce=self.retry_nonce)
+        data.update(preparation_failed=self.preparation_failed,
+                    retryable=data['state'] in TERMINAL - {'succeeded'})
         return dict(data, csrf=self.csrf)
 
-    async def prepare(self, deadline=None):
+    async def prepare(self):
         self.starting = True
-        self.preparation_failed = self.retryable = False
+        self.preparation_failed = False
         self.retry_nonce = ''
+        self.terminal_at = None
         try:
             self.session = self.factory()
-            if deadline is not None:
-                self.session.deadline = deadline
             async with asyncio.timeout(max(.001, min(90, self.session.deadline-self.clock()))):
                 await self.session.browser.start()
             return 200, self.public()
@@ -83,19 +81,10 @@ class WebApp:
                 await self.session.finish('cancelled')
             raise
         except Exception as error:
-            if not self.session:
-                self.done.set()
-                raise
-            await self.session.fail(error)
+            if self.session:
+                await self.session.fail(error)
             self.preparation_failed = True
             self.retry_nonce = secrets.token_urlsafe(24)
-            failure = self.session.failure or {}
-            # Only preparation failures without an access/verification stop
-            # may be retried. Each retry needs an authenticated explicit POST.
-            self.retryable = (failure.get('reason') in (
-                'browser_operation_failed', 'login_step_timeout',
-                'phone_input_missing', 'login_panel_missing') and
-                not getattr(self.session.browser, 'fatal', False))
             return 503, dict(self.public(), error='login_failed')
         finally:
             self.starting = False
@@ -116,6 +105,7 @@ class WebApp:
 
     async def dispatch(self, method, target, headers, body):
         """Also used by offline tests; only static codes cross this boundary."""
+        action = 'unknown'
         try:
             static = method == 'GET' and target in ('/', '/app.js', '/app.css') and not body
             if headers.get('host') != self.host and not (
@@ -136,14 +126,18 @@ class WebApp:
                 headers.get('sec-fetch-site', 'same-origin') != 'same-origin' or
                 headers.get('content-type') != 'application/json'):
                 reject('csrf')
+            audit('request_received', endpoint='auth' if target == '/auth' else 'api')
             obj = payload(body)
+            candidate = obj.get('action')
+            action = candidate if isinstance(candidate, str) and candidate in (
+                'status', 'frame', 'send', 'code', 'mode', 'pointer', 'cancel', 'retry') else 'unknown'
             body = b''
             try:
                 if target == '/auth':
                     fields(obj, set() if self.no_token else {'token'})
                     if self.starting:
                         reject('busy')
-                    if self.no_token and self.session and self.authenticated(headers):
+                    if self.authenticated(headers):
                         return 200, {}, self.public()
                     if self.session or self.done.is_set() or not self.token_hash or self.clock() >= self.auth_deadline:
                         reject('unauthorized')
@@ -153,7 +147,6 @@ class WebApp:
                         not hmac.compare_digest(hashlib.sha256(token.encode()).digest(), self.token_hash)):
                         if self.auth_attempts >= 8:
                             self.token_hash = b''
-                            self.done.set()
                         reject('unauthorized')
                     token = None
                     self.token_hash = b''  # still one redemption; retry uses cookie + CSRF + nonce
@@ -161,41 +154,43 @@ class WebApp:
                     self.cookie_hash = hashlib.sha256(cookie.encode()).digest()
                     self.csrf = secrets.token_urlsafe(32)
                     status, data = await self.prepare()
-                    return status, {'Set-Cookie': f'__Host-dyc_login={cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600'}, data
+                    return status, {'Set-Cookie': f'__Host-dyc_login={cookie}; Path=/; Secure; HttpOnly; SameSite=Strict'}, data
                 if not self.authenticated(headers):
                     reject('unauthorized')
                 if not self.csrf or not hmac.compare_digest(headers.get('x-dyc-csrf', ''), self.csrf):
                     reject('csrf')
                 if self.starting:
                     reject('busy')
-                if self.preparation_failed:
-                    action = obj.get('action')
-                    fields(obj, {'action'} if action == 'status' else {'action', 'nonce'})
-                    if self.clock() >= self.session.deadline:
-                        self.preparation_failed = self.retryable = False
-                        self.retry_nonce = ''
-                        await self.session.finish('expired')
-                        return 200, {}, self.session.public()
-                    if action == 'status':
-                        return 200, {}, self.public()
-                    nonce = obj.get('nonce')
-                    if not isinstance(nonce, str) or not hmac.compare_digest(nonce, self.retry_nonce):
-                        reject('replayed_action')
-                    if action == 'cancel':
-                        self.preparation_failed = self.retryable = False
-                        self.retry_nonce = ''
-                        await self.session.finish('cancelled')
-                        return 200, {}, self.session.public()
-                    if action != 'retry' or not self.retryable:
+                if obj.get('action') == 'retry':
+                    fields(obj, {'action', 'nonce'})
+                    data = self.public()
+                    if self.session and self.session.gate.locked():
+                        reject('busy')
+                    if not data['retryable']:
                         reject('wrong_state')
-                    status, data = await self.prepare(self.session.deadline)
+                    if not isinstance(obj['nonce'], str) or not hmac.compare_digest(obj['nonce'], data['nonce']):
+                        reject('replayed_action')
+                    audit('session_restart', reason='manual')
+                    self.session = None
+                    status, data = await self.prepare()
                     return status, {}, data
-                return 200, {}, await self.session.act(obj)
+                if not self.session:
+                    fields(obj, {'action'})
+                    if obj['action'] != 'status':
+                        reject('wrong_state')
+                    return 200, {}, self.public()
+                if action != 'status':
+                    audit('action_admitted', action=action, reason='authenticated')
+                result = await self.session.act(obj)
+                return 200, {}, result | self.public()
             finally:
                 obj.clear()
         except LoginError as error:
             code = str(error)
             code = code if code in ERRORS else 'login_failed'
+            audit('request_rejected', action=action, reason=code)
+            if code == 'login_failed' and self.session and self.session.state in TERMINAL:
+                return 200, {}, self.public()
             return (403 if code in ('csrf', 'unauthorized') else 409), {}, {'error': code}
         except asyncio.CancelledError:
             raise
@@ -209,24 +204,17 @@ class WebApp:
         if not self.session:
             if self.clock() >= self.auth_deadline:
                 self.token_hash = b''
-                self.done.set()
             return
         session = self.session
         if session.gate.locked() or self.starting:
             return
-        if self.preparation_failed:
-            if self.clock() < session.deadline:
-                return  # retain failure for manual retry; never restart from tick
-            self.preparation_failed = self.retryable = False
-            self.retry_nonce = ''
-            await session.finish('expired')
         async with session.gate:
             try:
                 async with asyncio.timeout(max(.001, min(15, session.deadline-self.clock()))):
                     await session.poll()
             except Exception as error:
                 await session.fail(error, state='expired' if self.clock() >= session.deadline else 'failed')
-        if session.state in TERMINAL:
+        if session.state == 'succeeded':
             if self.terminal_at is None:
                 self.terminal_at = self.clock()
             elif self.clock()-self.terminal_at >= 10:

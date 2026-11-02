@@ -35,7 +35,7 @@ class DummyBrowser:
         self.start = AsyncMock()
         self.close = AsyncMock()
         self.observe = AsyncMock(return_value='pending')
-        self.send = AsyncMock()
+        self.send = AsyncMock(return_value=dict(outcome="accepted", http_status=200, business_code="0", description="平台已接受发码请求"))
         self.submit = AsyncMock()
         self.reset = AsyncMock()
         self.auto_step = AsyncMock()
@@ -139,6 +139,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         async def send(_):
             entered.set()
             await release.wait()
+            return dict(outcome="accepted")
         self.browser.send.side_effect = send
         pending = asyncio.create_task(self.action('send', phone=PHONE))
         await entered.wait()
@@ -155,7 +156,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.clock.value += 601
         result = await self.session.act(dict(action='status'))
         self.assertEqual(result['state'], 'expired')
-        self.assertFalse(self.session.key or self.session.nonce or self.session.used_codes)
+        self.assertFalse(self.session.key or self.session.used_codes)
         self.browser.close.assert_awaited_once()
 
     async def test_cancel_pending_operation_closes_browser(self):
@@ -280,7 +281,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_auth_expiry_and_guess_budget(self):
         for _ in range(8):
             self.assertEqual((await self.request('/auth', {'token': 'wrong'}))[0], 403)
-        self.assertTrue(self.app.done.is_set())
+        self.assertFalse(self.app.done.is_set())
         self.assertEqual((await self.request('/auth', {'token': 'synthetic-owner-token'}))[0], 403)
         self.clock.value += 181
         await self.app.tick()
@@ -293,7 +294,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.clock.value += 45
         self.assertEqual((await self.request('/auth', {'token': 'synthetic-owner-token'}))[0], 403)
         await self.app.tick()
-        self.assertTrue(self.app.done.is_set())
+        self.assertFalse(self.app.done.is_set())
         self.browser.start.assert_not_awaited()
 
     async def test_no_token_waits_then_opens_and_resumes_one_session(self):
@@ -348,7 +349,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         serialized = json.dumps(result) + logs.getvalue()
         self.assertNotIn(PHONE, serialized)
         self.assertNotIn(CODE, serialized)
-        self.assertEqual(result[2], {'error': 'login_failed'})
+        self.assertEqual((result[0], result[2]['state'], result[2]['retryable']), (200, 'failed', True))
         self.assertEqual(self.session.state, 'failed')
         self.browser.close.assert_awaited_once()
 
@@ -371,8 +372,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.browser.close.assert_awaited_once()
         self.clock.value += 11
         await self.app.tick()
-        self.assertTrue(self.app.done.is_set())
-        self.assertFalse(self.app.cookie_hash or self.app.csrf)
+        self.assertFalse(self.app.done.is_set())
+        self.assertTrue(self.app.cookie_hash and self.app.csrf)
 
     async def test_http_framing_and_redacted_errors_without_listener(self):
         class Writer:

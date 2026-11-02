@@ -25,7 +25,7 @@ from .browser import _kill_owned, _processes
 from .errors import Stop
 from .login_ui import ready_qr
 from .runtime import Display, Profile, browser_defaults, check_memory, private_dir, private_open, atomic_text
-from .sms_state import reject
+from .sms_state import audit, reject
 from .sms_cdp import TargetGuard
 
 # Fixed copy/adaptation of the 2026-10-31 login-B selectors; see SMS_LOGIN.md.
@@ -78,6 +78,46 @@ REDACT_STYLE = '''* { color: transparent !important; -webkit-text-fill-color: tr
 
 def in_domains(host, domains):
     return any(host == item or host.endswith('.' + item) for item in domains)
+
+
+def sms_result(status, body):
+    """Extract bounded codes and fixed descriptions; never return platform prose."""
+    outcome, description, codes = 'unconfirmed', '未确认是否已发送', []
+    message = ''
+    if type(body) is dict:
+        data = body.get('data')
+        for obj in (body, data if type(data) is dict else {}):
+            for key in ('error_code', 'status_code', 'code'):
+                if key in obj:
+                    value = obj[key]
+                    code = str(value) if type(value) in (str, int) else ''
+                    codes.append(code if re.fullmatch(r'-?[0-9]{1,5}', code) else 'redacted')
+            for key in ('message', 'description', 'error_msg', 'msg'):
+                if type(obj.get(key)) is str:
+                    message += ' ' + obj[key][:500].lower()
+        # shortcut: only explicit zero codes or passport message=success are accepted;
+        # add other response shapes only after independent official-response validation.
+        success = (codes and all(code == '0' for code in codes)) or (not codes and body.get('message') == 'success')
+        if any(word in message for word in ('captcha', 'verify', 'verification', '验证', '校验')):
+            outcome, description = 'verification_required', '平台要求安全验证，已停止'
+        elif any(word in message for word in ('frequent', 'too many', '频繁', '频率', '限流', '限频')):
+            outcome, description = 'rate_limited', '平台限制发码频率，已停止'
+        elif any(word in message for word in ('risk', '风控', '风险')):
+            outcome, description = 'access_denied', '平台风险校验未通过，已停止'
+        elif success and body.get('message') != 'error':
+            outcome, description = 'accepted', '平台已接受发码请求，请查看短信'
+        elif codes or body.get('message') == 'error':
+            outcome, description = 'business_failed', '平台拒绝发码（其它描述已脱敏）'
+    if status == 429:
+        outcome, description = 'rate_limited', '平台限制发码频率，已停止'
+    elif status in (401, 403):
+        outcome, description = 'access_denied', '平台拒绝访问，已停止'
+    elif status is not None and status != 200:
+        outcome, description = 'http_failed', '平台发码 HTTP 请求失败'
+    elif status is None:
+        outcome, description = 'unconfirmed', '未确认是否已发送'
+    return dict(outcome=outcome, http_status=status, business_code=','.join(codes) or None,
+                description=description)
 
 
 def points_checked(points):
@@ -143,6 +183,9 @@ class SmsBrowser:
         self.target_guard = None
         self.private_values = []
         self.fatal = False
+        self.audit_id = ''
+        self.awaiting_sms = False
+        self.sms_http_status = None
         self.auto_attempts = 0
         self.auto_seen = set()
         self.auto_disabled = False
@@ -288,6 +331,7 @@ class SmsBrowser:
         except Exception:
             # Never let Playwright log an unhandled route exception containing
             # a URL or input. Missing guard coverage fails closed.
+            audit('request_guard_rejected', session=self.audit_id, reason='request_guard_failed')
             self.fatal_reason = self.fatal_reason or 'request_guard_failed'
             self.fatal = True
             try:
@@ -298,9 +342,11 @@ class SmsBrowser:
     async def _route(self, route):
         request = route.request
         if self.fatal or self.cancel.is_set():
+            audit('request_guard_rejected', session=self.audit_id, reason='stopped')
             await route.abort()
             return
         if request.frame.page != self.page:
+            audit('request_guard_rejected', session=self.audit_id, reason='foreign_page')
             await route.abort()  # auth is confined to the owned page, never popups
             return
         if self.backend:
@@ -321,6 +367,19 @@ class SmsBrowser:
         # Login must not collect comments as a side effect.
         if site.request_kind(request.url):
             allowed = False
+        if request.method == 'POST' or not allowed:
+            reason = 'allowed_auth_post'
+            if not allowed:
+                reason = 'host_scheme_method_policy'
+                if self.contains_private(request.url):
+                    reason = 'private_value_in_url'
+                elif site.request_kind(request.url):
+                    reason = 'comments_forbidden'
+                elif request.method == 'POST' and not in_domains(host, AUTH_DOMAINS):
+                    reason = 'post_domain_denied'
+                elif request.is_navigation_request() and request.frame == self.page.main_frame:
+                    reason = 'navigation_origin_denied'
+            audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason)
         if allowed:
             await route.continue_()
         else:
@@ -386,6 +445,9 @@ class SmsBrowser:
         request_id = event['requestId']
         try:
             status = event.get('responseStatusCode', 0)
+            request = event.get('request', {})
+            if self.awaiting_sms and self.sms_request(request.get('url', ''), request.get('method')):
+                self.sms_http_status = status
             if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
                 self.fatal_reason = 'http_' + str(status)
                 self.fatal = True
@@ -418,6 +480,8 @@ class SmsBrowser:
                     self.fatal_reason = self.fatal_reason or 'redirect_denied_' + kind
                     self.fatal = True
             if denied:
+                audit('response_guard_rejected', session=self.audit_id, http_status=status,
+                      reason=self.fatal_reason or 'response_transport_error')
                 await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
             else:
                 await session.send('Fetch.continueRequest', dict(requestId=request_id))
@@ -494,13 +558,54 @@ class SmsBrowser:
             raise Stop(4, 'code_invalid')
         return 'pending'
 
+    def sms_request(self, url, method):
+        parsed = urlsplit(url)
+        host_allowed = in_domains(parsed.hostname or '', AUTH_DOMAINS)
+        if self.backend:
+            host_allowed = parsed.netloc == urlsplit(self.url).netloc
+        return (method == 'POST' and parsed.scheme == 'https' and host_allowed
+                and parsed.port in (None, 443) and not parsed.username and not parsed.password
+                and re.fullmatch(r'/passport/(?:[a-zA-Z0-9_-]+/)*(?:send_code|send_sms_code)/?', parsed.path) is not None)
+
     async def send(self, phone):
-        self.step('send_sms', PHONE + ' editable; ' + SEND + ' clickable', 3)
+        from playwright.async_api import TimeoutError as PlaywrightTimeout
+        self.step('send_sms', 'official send-code response after one click', 15)
         self.require_origin()
         self.private_values.append(phone)
         await self.visible(PHONE).fill(phone)
         self.require_origin()
-        await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
+        self.awaiting_sms = True
+        self.sms_http_status = None
+        result = sms_result(None, None)
+        try:
+            try:
+                async with self.page.expect_response(
+                        lambda r: self.sms_request(r.url, r.request.method), timeout=15000) as pending:
+                    audit('send_click_start', session=self.audit_id)
+                    try:
+                        await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
+                    except Exception:
+                        audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
+                        raise
+                    audit('send_click_complete', session=self.audit_id)
+                response = await pending.value
+                self.sms_http_status = response.status
+                body = None
+                if response.status == 200:
+                    try:
+                        async with asyncio.timeout(2):
+                            body = await response.json()
+                    except Exception:
+                        pass
+                result = sms_result(response.status, body)
+                body = None
+            except PlaywrightTimeout:
+                result = sms_result(self.sms_http_status, None)
+            audit('send_response', session=self.audit_id, http_status=result['http_status'],
+                  business_code=result['business_code'], outcome=result['outcome'])
+            return result
+        finally:
+            self.awaiting_sms = False
 
     async def submit(self, code):
         self.step('submit_code', CODE + ' editable; ' + SUBMIT + ' clickable', 3)

@@ -12,10 +12,16 @@ import math
 import os
 import re
 import secrets
+import sys
 import time
 
 from .models import SHANGHAI
 from .runtime import DailyCounter, atomic_text, private_open
+
+
+def audit(event, **fields):
+    # Callers supply only fixed labels, random operation IDs and sanitized codes.
+    print(json.dumps(dict(event=event, **fields)), file=sys.stderr, flush=True)
 
 
 class LoginError(Exception):
@@ -118,22 +124,30 @@ class LoginSession:
         self.gate = asyncio.Lock()
         self.next_send = 0
         self.failure = None
+        self.send_result = None
+        self.audit_id = secrets.token_hex(6)
+        self.browser.audit_id = self.audit_id
 
     def public(self):
         return dict(state=self.state, mode=self.mode, phone=self.masked_phone,
                     nonce=self.nonce, expires_in=max(0, math.ceil(self.deadline-self.clock())),
                     resend_in=max(0, math.ceil(self.next_send-self.clock())),
-                    auto_attempts=self.browser.auto_attempts, failure=self.failure)
+                    auto_attempts=self.browser.auto_attempts, failure=self.failure,
+                    send_result=self.send_result)
 
     async def fail(self, error=None, reason='login_failed', state='failed'):
+        self.failure = {'reason': reason}
         if hasattr(self.browser, 'diagnose'):
             self.failure = await self.browser.diagnose(error, reason)
+        audit('session_failure', session=self.audit_id, reason=self.failure.get('reason', reason))
         await self.finish(state)
 
     async def finish(self, state):
+        if self.state != state:
+            audit('session_end', session=self.audit_id, state=state)
         self.state = state
         self.code_allowed = False
-        self.nonce = ""
+        self.nonce = secrets.token_urlsafe(24)
         self.used_codes.clear()
         self.key = b""
         self.masked_phone = ""
@@ -166,7 +180,7 @@ class LoginSession:
         if self.gate.locked():
             reject("busy")
         async with self.gate:
-            if self.clock() >= self.deadline:
+            if self.state not in TERMINAL and self.clock() >= self.deadline:
                 await self.fail(reason="login_expired", state="expired")
             if self.state in TERMINAL:
                 return self.public()
@@ -206,6 +220,7 @@ class LoginSession:
                         self.mode, self.state = obj["mode"], "ready"
                         self.code_allowed = False
                         self.masked_phone = ""
+                        self.send_result = None
                         await self.poll()
                         return self.public()
                     await self.poll()
@@ -218,9 +233,14 @@ class LoginSession:
                         try:
                             self.quota.reserve()
                             self.next_send = self.clock() + 60
-                            self.code_allowed = True
+                            self.code_allowed = False
                             self.masked_phone = phone[:3] + "****" + phone[-4:]
-                            await self.browser.send(phone)
+                            audit('send_admitted', session=self.audit_id, reason='quota_reserved')
+                            self.send_result = await self.browser.send(phone)
+                            if self.send_result['outcome'] != 'accepted':
+                                await self.fail(reason='sms_' + self.send_result['outcome'])
+                                return self.public()
+                            self.code_allowed = True
                             self.state = "code_sent"
                         finally:
                             phone = None
