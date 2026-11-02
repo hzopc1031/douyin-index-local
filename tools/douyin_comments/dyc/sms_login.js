@@ -42,7 +42,13 @@
       raw = '';
       const response = await pending;
       const result = await response.json();
-      if (!response.ok) throw new Error(errors[result.error] || '操作未完成，请联系管理员查看状态。');
+      if (!response.ok) {
+        if (result.error === 'login_failed') {
+          $('status').textContent = '手机登录准备失败，已停止。请联系管理员查看状态。';
+          if (result.failure) $('details').textContent = `失败步骤：${result.failure.step}；原因：${result.failure.reason}`;
+        }
+        throw new Error(errors[result.error] || '操作未完成，请联系管理员查看状态。');
+      }
       return result;
     } finally { raw = ''; }
   }

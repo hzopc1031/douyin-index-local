@@ -52,3 +52,28 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events, ['diagnose', 'close'])
             self.assertEqual(session.public()['failure']['reason'], 'verification_required')
             self.assertEqual(session.state, 'failed')
+
+    async def test_only_allowlisted_static_redirects_can_cross_hosts(self):
+        cases = [
+            ('Script', 'GET', 'https://lf3.byteimg.com/app.js', False),
+            ('Stylesheet', 'GET', 'https://lf3.byteimg.com/app.css', False),
+            ('Script', 'GET', 'https://evil.invalid/app.js', True),
+            ('Script', 'POST', 'https://lf3.byteimg.com/app.js', True),
+            ('XHR', 'GET', 'https://lf3.byteimg.com/api', True),
+            ('Document', 'GET', 'https://lf3.byteimg.com/login', True),
+            ('Script', 'GET', 'http://lf3.byteimg.com/app.js', True),
+            ('Script', 'GET', 'https://lf3.byteimg.com:444/app.js', True),
+            ('Script', 'GET', 'https://user@lf3.byteimg.com/app.js', True),
+            ('Script', 'GET', 'https://lf3.byteimg.com/app.js?code=975318', True),
+        ]
+        for resource, method, target, denied in cases:
+            with self.subTest(resource=resource, method=method, target=target):
+                browser = SmsBrowser('/unused')
+                browser.private_values = ['975318']
+                browser.response_session = Mock(send=AsyncMock())
+                await browser.check_response(dict(requestId='synthetic', responseStatusCode=302,
+                    resourceType=resource, request=dict(method=method, url='https://www.douyin.com/app.js'),
+                    responseHeaders=[dict(name='Location', value=target)]))
+                expected = 'Fetch.failRequest' if denied else 'Fetch.continueRequest'
+                self.assertEqual(browser.response_session.send.call_args.args[0], expected)
+                self.assertEqual(browser.fatal, denied)

@@ -45,7 +45,8 @@ COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
 SESSION_COOKIE_SECONDS = 86400
 ASSET_DOMAINS = ('douyin.com', 'douyinpic.com', 'douyinvod.com', 'byteimg.com',
                  'bytedance.com', 'bytegecko.com', 'zijieapi.com', 'snssdk.com',
-                 'pstatp.com', 'bytedance.net', 'ibytedtos.com')
+                 'pstatp.com', 'bytedance.net', 'ibytedtos.com', 'douyinstatic.com',
+                 'bytegoofy.com', 'bytetos.com', 'bytescm.com', 'yhgfb-cn-static.com')
 AUTH_DOMAINS = ('douyin.com', 'zijieapi.com', 'snssdk.com')
 
 # All DOM text (including reflected codes), form fields and editable content
@@ -145,7 +146,8 @@ class SmsBrowser:
         elif error is not None:
             reason = 'browser_operation_failed'
         reason = self.fatal_reason or reason
-        data = dict(reason=reason, step=self.stage, condition=self.condition,
+        data = dict(reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required') else 'FAILED',
+                    step=self.stage, condition=self.condition,
                     timeout_seconds=self.stage_timeout,
                     elapsed_seconds=round(time.monotonic()-self.stage_started, 3),
                     url='unavailable', title='unavailable', screenshot='',
@@ -218,6 +220,7 @@ class SmsBrowser:
         except Exception:
             # Never let Playwright log an unhandled route exception containing
             # a URL or input. Missing guard coverage fails closed.
+            self.fatal_reason = self.fatal_reason or 'request_guard_failed'
             self.fatal = True
             try:
                 await route.abort()
@@ -324,18 +327,29 @@ class SmsBrowser:
                                  if h['name'].lower() == 'location'), '')
                 from urllib.parse import urljoin
                 target = urlsplit(urljoin(request['url'], location))
-                # Never replay a credential POST through a redirect. GET
-                # redirects stay on the same approved host and carry no input.
+                # Static CDN GETs may move between approved asset hosts. Auth,
+                # documents and API redirects keep the stricter same-host rule;
+                # POST and credential-bearing redirects are always rejected.
+                source = urlsplit(request['url'])
+                asset = event.get('resourceType') in ('Script', 'Stylesheet', 'Image', 'Font', 'Media')
+                approved_asset = (asset and in_domains(source.hostname or '', ASSET_DOMAINS)
+                                  and in_domains(target.hostname or '', ASSET_DOMAINS))
                 denied = denied or (request['method'] not in ('GET', 'HEAD') or
-                          target.scheme != 'https' or target.netloc != urlsplit(request['url']).netloc or
-                          self.contains_private(target.geturl()))
+                          target.scheme != 'https' or target.port not in (None, 443) or
+                          target.username is not None or target.password is not None or
+                          (target.netloc != source.netloc and not approved_asset) or
+                          self.contains_private(target.geturl()) or bool(site.request_kind(target.geturl())))
                 if denied:
+                    kind = event.get('resourceType', '')
+                    kind = kind.lower() if kind in ('Document', 'XHR', 'Fetch', 'Script', 'Image', 'Other') else 'resource'
+                    self.fatal_reason = self.fatal_reason or 'redirect_denied_' + kind
                     self.fatal = True
             if denied:
                 await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
             else:
                 await session.send('Fetch.continueRequest', dict(requestId=request_id))
         except Exception:
+            self.fatal_reason = self.fatal_reason or 'response_guard_failed'
             self.fatal = True
             try:
                 await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
@@ -349,21 +363,30 @@ class SmsBrowser:
         self.step('navigate', 'DOMContentLoaded on fixed login URL', 15)
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
-        self.step('login_entry', 'visible ' + site.LOGIN_PANEL + ' or header button 登录 or account signal', 8)
-        for _ in range(40):
+        self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', 20)
+        deadline = time.monotonic() + 20
+        clicked = False
+        while time.monotonic() < deadline:
             self.require_origin()
-            if await self.page.locator(site.LOGIN_PANEL).filter(visible=True).count():
-                return
+            if await self.challenge():
+                raise Stop(3, 'verification_required')
             if await self.inside():
                 return
-            login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True)
-            if await login.count() == 1:
-                self.step('open_login_panel', site.LOGIN_PANEL + ' visible after header 登录 click', 10)
-                await login.click()
-                await self.page.locator(site.LOGIN_PANEL).first.wait_for(state='visible', timeout=10000)
+            phone = self.page.locator(PHONE)
+            if await phone.is_visible() and await phone.is_editable():
+                self.require_origin()
                 return
+            panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True)
+            if not clicked and not await panel.count():
+                login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True)
+                if await login.count() == 1:
+                    self.step('phone_input_ready', PHONE + ' visible and editable after header 登录 click',
+                              round(max(0, deadline-time.monotonic()), 3))
+                    self.require_origin()
+                    await login.click()
+                    clicked = True
             await asyncio.sleep(.2)
-        raise Stop(5, 'login_panel_missing')
+        raise Stop(5, 'phone_input_missing' if clicked else 'login_panel_missing')
 
     async def inside(self):
         # Require absence of the login panel AND the existing dyc account signal.

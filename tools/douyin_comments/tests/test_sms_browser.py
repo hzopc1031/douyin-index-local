@@ -79,6 +79,35 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await browser.close()
 
+    async def test_start_waits_for_delayed_editable_phone_not_just_panel(self):
+        original = self.backend
+        async def delayed(route):
+            if route.request.url.rstrip('/') == site.FAKE_ORIGIN.rstrip('/'):
+                await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + """
+                <script>
+                document.querySelector('#login-panel-new').hidden=false;
+                document.querySelector('#normal-input').disabled=true;
+                setTimeout(()=>document.querySelector('#normal-input').disabled=false, 500);
+                </script>""")
+            else:
+                await original(route)
+        self.backend = delayed
+        async with self.browser() as browser:
+            self.assertTrue(await browser.page.locator('#normal-input').is_editable())
+            self.assertEqual(self.sends, 0)
+            self.assertEqual(self.submits, 0)
+
+    async def test_start_stops_on_challenge_before_opening_login(self):
+        async def blocked(route):
+            await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + '<script>challenge()</script>')
+        browser = SmsBrowser(self.profile, backend=blocked, state_dir=Path(self.tmp.name) / 'state')
+        with self.assertRaisesRegex(Stop, 'verification_required'):
+            await browser.start()
+        self.assertEqual(browser.diagnostic['reason'], 'verification_required')
+        self.assertTrue(Path(browser.diagnostic['screenshot']).exists())
+        self.assertIsNone(browser.page)
+        self.assertEqual(self.sends, 0)
+
     async def test_calibrated_phone_code_flow_persists_only_login_cookies(self):
         async with self.browser() as browser:
             self.assertEqual(await browser.observe(), 'pending')
@@ -265,6 +294,42 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                 await frame.evaluate("() => fetch('/post', {method:'POST',body:'synthetic-credentials'}).catch(()=>{})")
                 self.assertEqual(hops, [])
                 self.assertTrue(browser.fatal)
+            finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_worker_first_post_redirect_is_guarded_by_owner_page(self):
+        original = self.backend
+        async def workers(route):
+            path = route.request.url.removeprefix(site.FAKE_ORIGIN.rstrip('/'))
+            if path == '/worker.js':
+                await route.fulfill(content_type='application/javascript', body="fetch('/worker-post', {method:'POST',body:'synthetic'}).catch(()=>{})")
+            elif path == '/worker-post':
+                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/receiver'})
+            else:
+                await original(route)
+        self.backend = workers
+        async with self.browser() as browser:
+            sink = await browser.context.new_cdp_session(browser.page)
+            escaped, tasks = [], set()
+            async def paused(event):
+                rid = event['requestId']
+                allowed = [site.FAKE_ORIGIN.rstrip('/') + path for path in ('/worker.js', '/worker-post')]
+                if event['request']['url'] not in allowed:
+                    escaped.append('unexpected_request')
+                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
+                else:
+                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
+            def launch(event):
+                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
+            sink.on('Fetch.requestPaused', launch)
+            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
+            try:
+                await browser.page.evaluate("() => {window.worker = new Worker('/worker.js')}")
+                async with asyncio.timeout(5):
+                    while not browser.fatal:
+                        await asyncio.sleep(.02)
+                self.assertEqual(browser.fatal_reason, 'redirect_denied_xhr')
+                self.assertEqual(escaped, [])
             finally:
                 await asyncio.gather(*tasks, return_exceptions=True)
 

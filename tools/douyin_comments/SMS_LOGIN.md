@@ -75,3 +75,25 @@ esac
 2026-11-02：Python 3.12.16 完整 dyc 套件 194 项全部通过，0 跳过，151.816 秒；包含免口令手机页面、刷新恢复、可配置口令期限、无 TTY 启动以及遇验证停止。服务器 wheel 全部 SHA-256 校验通过、离线安装与 pip check 通过，solver 4 项通过。真实短信与评论验证未执行。
 
 指定 `codex exec review --base origin/server-snapshot-2026-10-30 -c model_reasoning_effort="high"` 已完成一轮：无 P0/P1；按用户范围保留两个 P2：旧 CLI 扫码 login 未显式持久化 session-only Cookie；短信登录在截止前刚成功时，截止后的状态请求可能将成功改为过期。后者影响截止附近的成功提示/退出码，真实操作如遇到应记录为未确认。评审内 80 项测试通过，完整浏览器测试受评审沙箱 Xvfb 限制，主环境完整 194 项通过。
+
+## 2026-11-02 login_failed 定位修复
+
+准备阶段失败曾被统一隐藏成 `login_failed`。现在会在关闭浏览器前，将固定原因码、步骤、
+等待条件、超时预算、实际耗时、脱敏 URL/标题与截图路径写入 stderr 和私有 state 下的
+`login-status.json`；失败截图使用唯一 `login-failure-*.png` 文件名，权限 0600。
+URL 不保存查询串、片段或未知路径；标题仅保留已知官方落地页标题。截图在栅格化前隐藏所有
+文字、输入值、二维码和媒体，保留空白输入框的边框供定位。截图不是原始页面备份。
+出现验证或 HTTP 401/403/429 时记录 `BLOCKED`，不继续发码、解题或重试。
+手机页面准备失败后显示已停止，具体诊断随状态返回；不再一直显示“正在准备”。
+
+服务器实际观察到官方首页脚本从 `privacy.zijieapi.com` 重定向到 `lf9-sec.bytetos.com`，
+原响应保护将其视为危险跳转而停止，另外缺少页面使用的静态 CDN 白名单。新增本次官方页面
+观察到的 `douyinstatic.com`、`bytegoofy.com`、`bytetos.com`、`bytescm.com`、
+`yhgfb-cn-static.com`；仅静态资源的无输入 HTTPS GET/HEAD 可在批准的资源域名间跳转。
+POST、主文档和 API 的重定向限制保留，403/429 仍停止，不放开任意域名。
+
+Chromium dedicated Worker 不支持 `Fetch.enable`。其请求由所属页面 Fetch agent 拦截，
+因此不再向 Worker 重复调用该命令；iframe 仍独立安装保护，子目标递归保护保留。
+离线真实 Chromium 回归核对 Worker 首个 POST 重定向在跟随前被拦截。
+准备流程现在持续检查验证状态，并等待官方手机号输入框可见且可编辑，才返回就绪；
+仅出现登录弹窗不代表准备完成。官方账号成功信号、发码和登录持久化仍需另外验证。

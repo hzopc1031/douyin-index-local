@@ -143,7 +143,10 @@ class WebApp:
         except asyncio.CancelledError:
             raise
         except Exception:
-            return 503, {}, {'error': 'login_failed'}
+            data = {'error': 'login_failed'}
+            if self.session and self.session.failure:
+                data['failure'] = self.session.failure
+            return 503, {}, data
 
     async def tick(self):
         if not self.session:

@@ -74,17 +74,30 @@ class Target:
             self.owner.browser.guard_response(params, self)
 
     async def initialize(self):
+        method = 'fetch_enable'
         try:
-            await self.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
+            # Dedicated-worker requests are intercepted by the owning page's
+            # Fetch agent. Worker targets themselves
+            # do not expose Fetch; invoking it fails with method-not-found.
+            # Keep recursive attachment; iframe targets still need their own
+            # Fetch agent before any child script runs. Other target kinds fail
+            # closed if they cannot install the guard.
+            if self.info.get('type') != 'worker':
+                await self.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
             # Recursion is necessary: a page's child iframe/worker may itself
             # create another target. Each is held until its guard is installed.
+            method = 'auto_attach'
             await self.send('Target.setAutoAttach', dict(autoAttach=True, waitForDebuggerOnStart=True, flatten=False))
+            method = 'resume_target'
             await self.send('Runtime.runIfWaitingForDebugger')
             ready = self.owner.ready.get(self.info['targetId'])
             if ready is not None and not ready.done():
                 ready.set_result(True)
         except Exception:
             if not self.owner.closing:
+                kind = self.info.get('type', 'unknown')
+                kind = kind if kind in ('iframe', 'worker', 'service_worker', 'shared_worker', 'page') else 'unknown'
+                self.owner.browser.fatal_reason = getattr(self.owner.browser, 'fatal_reason', '') or 'child_guard_' + kind + '_' + method
                 self.owner.browser.fatal = True
                 ready = self.owner.ready.get(self.info['targetId'])
                 if ready is not None and not ready.done():
