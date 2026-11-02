@@ -4,9 +4,9 @@
 代码独立实现，未读取或复制无许可证的第三方代码。**2026-11-01 已只读校准公开登录弹窗；账号成功信号、评论字段和接口仍待真实验证。**
 “complete”仅表示所见分页走到末尾且回复数量无已知缺口，不代表拿到平台隐藏或折叠的评论。
 
-新增独立手机登录入口 `bin/dyc login-web`：短信登录、人工验证截图和扫码备用，
+新增独立手机登录入口 `bin/dyc login-web`：短信登录和扫码备用，遇验证码或访问限制停止，
 仅绑定 loopback，通过 Tailscale 私网访问。认证、限频、部署/启用和回滚步骤见 [SMS_LOGIN.md](SMS_LOGIN.md)。
-实现日期 2026-11-01（北京时间 UTC+8）；此次仅离线验证，真实启用须另行批准。
+2026-11-02 已授权部署免口令后台入口；真实短信登录与评论采集仍需上线验证。
 
 ## 使用
 
@@ -51,10 +51,10 @@ bin/dyc selftest
 
 标准库 + `playwright==1.64.1`；使用 Python 3.12。服务器需已有 Xvfb 和对应版本的 Chromium。
 未设置 `PLAYWRIGHT_BROWSERS_PATH` 且 `/opt/ms-playwright` 存在时自动使用它；不自动下载浏览器。
-`bin/dyc` 在用户 systemd manager 可用时使用 `systemd-run --user --scope --quiet -p MemoryMax=1500M`。
+`bin/dyc` 默认不启用内存 scope；设置 `DYC_USE_SCOPE=1` 后在用户 systemd manager 可用时使用 `systemd-run --user --scope --quiet -p MemoryMax=1500M`。
 不可用时向 stderr 发警告并继续，**此时不强制内存上限**；`DYC_NO_SCOPE=1` 可显式关闭 scope。
 `DYC_PYTHON` 可指定解释器，否则优先本目录 `.venv/bin/python`。
-启动可用内存必须至少 2 GiB。除非显式传 `--display :N`，即使环境已有 DISPLAY，也另起自己的
+`login` / `fetch` 启动可用内存必须至少 2 GiB；`login-web` 默认关闭此预检，可用 `--startup-limits` 开启。除非显式传 `--display :N`，即使环境已有 DISPLAY，也另起自己的
 `Xvfb -displayfd`，用私有 0700 临时目录内的 0600 Xauthority 文件和随机授权 cookie 保护本地显示，
 通过 `-auth` / `XAUTHORITY` 仅交给自己的 Xvfb 和 Chromium，退出或启动失败时删除授权文件，只清理本工具的进程。
 

@@ -3,7 +3,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>评论工具 · 登录</title><link rel="stylesheet" href="/app.css">
 <script src="/app.js" defer></script></head>
-<body><main><h1>评论工具登录</h1><p>仅本人使用 · 私网连接 · 北京时间（UTC+8）</p>
+<body data-no-token="{{NO_TOKEN}}"><main><h1>评论工具登录</h1><p>仅本人使用 · 私网连接 · 北京时间（UTC+8）</p>
 <p id="status" role="status" aria-live="polite">请输入启动终端显示的一次性口令。</p>
 <section id="auth"><label for="token">一次性口令</label>
 <input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="128">
@@ -22,5 +22,5 @@
 <button id="refresh">刷新截图</button></section>
 <p id="details"></p><button id="cancel" class="secondary">结束并释放登录会话</button>
 </section><p id="error" role="alert"></p>
-<small>口令只能使用一次，3 分钟内有效；登录会话最长 10 分钟。页面关闭后服务仍会在期限内自动释放。</small>
+<small id="expiry">口令只能使用一次，{{TOKEN_TTL}} 秒内有效；登录会话最长 10 分钟。页面关闭后服务仍会在期限内自动释放。</small>
 </main></body></html>

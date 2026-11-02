@@ -101,7 +101,9 @@ TERMINAL = {"succeeded", "failed", "expired", "cancelled"}
 
 
 class LoginSession:
-    def __init__(self, browser, quota, *, clock=time.monotonic, seconds=600):
+    def __init__(self, browser, quota, *, clock=time.monotonic, seconds=600,
+                 stop_on_verification=False):
+        self.stop_on_verification = stop_on_verification
         self.browser, self.quota, self.clock = browser, quota, clock
         self.deadline = clock() + min(seconds, 600)
         self.state = "ready"
@@ -144,6 +146,9 @@ class LoginSession:
             await self.browser.persist()
             await self.finish("succeeded")
         elif status == "verification":
+            if self.stop_on_verification:
+                await self.finish("failed")
+                return
             if self.state != "verification":
                 self.before_verification = self.state
             self.state = "verification"
@@ -183,6 +188,10 @@ class LoginSession:
                     if action == "mode":
                         if obj["mode"] not in ("sms", "qr"):
                             reject()
+                        if self.stop_on_verification:
+                            await self.poll()
+                            if self.state in TERMINAL:
+                                return self.public()
                         # Switching to the fallback must not first complete
                         # the old SMS challenge and trigger its pending send.
                         await self.browser.reset()

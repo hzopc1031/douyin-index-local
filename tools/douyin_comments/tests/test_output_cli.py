@@ -157,6 +157,7 @@ class CLITests(unittest.TestCase):
                    "DYC_PYTHON": "synthetic-python"}
             env.pop("DYC_IN_SCOPE", None)
             env.pop("DYC_NO_SCOPE", None)
+            env["DYC_USE_SCOPE"] = "1"
             if no_scope:
                 env["DYC_NO_SCOPE"] = "1"
             result = subprocess.run([str(ROOT / "bin/dyc"), "--help"], cwd=root, env=env,
@@ -294,6 +295,7 @@ class CLITests(unittest.TestCase):
             env = {**os.environ, "PATH": temp + ":" + os.environ["PATH"],
                    "DYC_PYTHON": sys.executable, "SYNTHETIC_SCOPE_RECORD": str(record)}
             env.pop("DYC_NO_SCOPE", None)
+            env["DYC_USE_SCOPE"] = "1"
             env.pop("DYC_IN_SCOPE", None)
             result = subprocess.run([str(ROOT / "bin/dyc"), "--help"], env=env, cwd=root,
                                     capture_output=True, text=True)

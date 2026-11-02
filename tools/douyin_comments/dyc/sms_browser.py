@@ -101,7 +101,8 @@ class Challenge:
 
 
 class SmsBrowser:
-    def __init__(self, profile, *, backend=None, solver=None):
+    def __init__(self, profile, *, backend=None, solver=None, startup_limits=False):
+        self.startup_limits = startup_limits
         self.profile = Profile(profile)
         self.display = Display()  # always owned; never use :107 or inherited DISPLAY
         self.backend = backend
@@ -178,7 +179,8 @@ class SmsBrowser:
             await route.abort()
 
     async def start(self):
-        check_memory()
+        if self.startup_limits:
+            check_memory()
         self.profile.__enter__()
         try:
             await self.display.start()

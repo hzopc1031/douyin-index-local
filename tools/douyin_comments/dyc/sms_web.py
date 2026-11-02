@@ -14,7 +14,6 @@ from urllib.parse import urlsplit
 
 from .errors import Stop
 from .sms_browser import SmsBrowser
-from .sms_solver import GapWorker
 from .sms_state import LoginError, LoginSession, SmsQuota, TERMINAL, fields, payload, reject
 
 ERRORS = {'invalid_request', 'unauthorized', 'csrf', 'busy', 'replayed_action',
@@ -43,11 +42,13 @@ def origin_checked(value):
 
 
 class WebApp:
-    def __init__(self, origin, token, factory, *, clock=time.monotonic):
+    def __init__(self, origin, token, factory, *, clock=time.monotonic, no_token=False,
+                 token_ttl=1800, port=8766):
         self.origin, self.host = origin, urlsplit(origin).netloc
         self.clock, self.factory = clock, factory
         self.token_hash = hashlib.sha256(token.encode()).digest()
-        self.auth_deadline = clock() + 180
+        self.no_token, self.token_ttl, self.port = no_token, token_ttl, port
+        self.auth_deadline = float('inf') if no_token else clock() + token_ttl
         self.auth_attempts = 0
         self.session = None
         self.starting = False
@@ -73,13 +74,19 @@ class WebApp:
     async def dispatch(self, method, target, headers, body):
         """Also used by offline tests; only static codes cross this boundary."""
         try:
-            if headers.get('host') != self.host:
+            static = method == 'GET' and target in ('/', '/app.js', '/app.css') and not body
+            if headers.get('host') != self.host and not (
+                    static and headers.get('host') == f'127.0.0.1:{self.port}'):
                 reject('csrf')
-            if method == 'GET' and target in ('/', '/app.js', '/app.css') and not body:
+            if static:
                 name, content_type = {'/': ('sms_login.html', 'text/html; charset=utf-8'),
                                       '/app.js': ('sms_login.js', 'text/javascript; charset=utf-8'),
                                       '/app.css': ('sms_login.css', 'text/css; charset=utf-8')}[target]
-                return 200, {'Content-Type': content_type}, Path(__file__).with_name(name).read_bytes()
+                data = Path(__file__).with_name(name).read_bytes()
+                if target == '/':
+                    data = data.replace(b'{{NO_TOKEN}}', b'true' if self.no_token else b'false')
+                    data = data.replace(b'{{TOKEN_TTL}}', str(self.token_ttl).encode())
+                return 200, {'Content-Type': content_type}, data
             if method != 'POST' or target not in ('/auth', '/api') or len(body) > 8192:
                 reject()
             if (headers.get('origin') != self.origin or
@@ -90,12 +97,14 @@ class WebApp:
             body = b''
             try:
                 if target == '/auth':
-                    fields(obj, {'token'})
-                    if self.starting or self.session or not self.token_hash or self.clock() >= self.auth_deadline:
+                    fields(obj, set() if self.no_token else {'token'})
+                    if self.no_token and self.session and self.authenticated(headers):
+                        return 200, {}, dict(self.session.public(), csrf=self.csrf)
+                    if self.starting or self.session or self.done.is_set() or not self.token_hash or self.clock() >= self.auth_deadline:
                         reject('unauthorized')
                     self.auth_attempts += 1
-                    token = obj.pop('token')
-                    if (not isinstance(token, str) or len(token) > 128 or
+                    token = obj.pop('token', '')
+                    if not self.no_token and (not isinstance(token, str) or len(token) > 128 or
                         not hmac.compare_digest(hashlib.sha256(token.encode()).digest(), self.token_hash)):
                         if self.auth_attempts >= 8:
                             self.token_hash = b''
@@ -233,15 +242,22 @@ async def serve(args):
     for path in (args.profile_dir, args.state_dir):
         if str(path).startswith('/var/lib/douyin-index'):
             raise Stop(1, 'forbidden_login_directory')
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    try:
-        terminal = open('/dev/tty', 'w')
-    except OSError:
-        raise Stop(5, 'login_requires_terminal') from None
-    token = secrets.token_urlsafe(32)
+    limits = getattr(args, 'startup_limits', False)
+    no_token = getattr(args, 'no_token', False)
+    token_ttl = getattr(args, 'token_ttl', 1800)
+    if limits:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    terminal = None
+    if not no_token:
+        try:
+            terminal = open('/dev/tty', 'w')
+        except OSError:
+            raise Stop(5, 'login_requires_terminal') from None
+    token = '' if no_token else secrets.token_urlsafe(32)
     quota = SmsQuota(args.state_dir)
     app = WebApp(origin, token, lambda: LoginSession(
-        SmsBrowser(args.profile_dir, solver=GapWorker()), quota))
+        SmsBrowser(args.profile_dir, startup_limits=limits), quota, stop_on_verification=True),
+        no_token=no_token, token_ttl=token_ttl, port=args.port)
     tasks = set()
     def accepted(reader, writer):
         if len(tasks) >= 8:
@@ -256,10 +272,11 @@ async def serve(args):
         loop.add_signal_handler(sig, app.done.set)
     try:
         server = await asyncio.start_server(accepted, '127.0.0.1', args.port, limit=16384)
-        terminal.write(f'手机登录页：{origin}\n一次性口令（180 秒内兑换）：{token}\n')
-        terminal.flush()
+        if terminal:
+            terminal.write(f'手机登录页：{origin}\n一次性口令（{token_ttl} 秒内兑换）：{token}\n')
+            terminal.flush()
+            terminal.close()
         token = None
-        terminal.close()
         while not app.done.is_set():
             await app.tick()
             try:
@@ -268,7 +285,8 @@ async def serve(args):
                 pass
     finally:
         token = None
-        terminal.close()
+        if terminal:
+            terminal.close()
         if server:
             server.close()
             await server.wait_closed()

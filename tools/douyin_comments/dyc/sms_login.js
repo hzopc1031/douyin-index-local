@@ -5,13 +5,13 @@
   const terminal = new Set(['succeeded', 'failed', 'expired', 'cancelled']);
   const messages = {ready: '已就绪。可发短信或切换扫码。', code_sent: '已请求发码，请查看短信并输入验证码。',
     submitting: '已提交，正在等待官方登录确认。', verification: '请完成下方安全验证。',
-    succeeded: '登录成功，dyc 登录态已保存。', failed: '登录未完成。请回终端检查或稍后重新启动。',
+    succeeded: '登录成功，dyc 登录态已保存。', failed: '登录已停止，可能遇到验证或访问限制。请联系管理员查看状态。',
     expired: '会话已到期并释放。', cancelled: '会话已结束并释放。'};
   const errors = {send_interval: '发码间隔至少 60 秒。', send_hour_limit: '已达到每小时 3 次发码上限。',
     send_day_limit: '已达到北京时间当日 6 次发码上限。', stale_frame: '验证页面已变化，请刷新截图后重试。',
     frame_unavailable: '截图暂未就绪，请稍后刷新。', replayed_action: '操作已处理，请等待刷新状态。',
     replayed_code: '此验证码已提交过，请勿重复提交。', unauthorized: '口令已失效、已用过或不正确。',
-    csrf: '连接来源校验失败，请使用终端显示的完整私网网址。', busy: '正在处理上一项操作，请稍候。',
+    csrf: '连接来源校验失败，请使用完整私网网址。', busy: '正在处理上一项操作，请稍候。',
     wrong_state: '当前不能执行此操作；可切换登录方式或结束会话。'};
   function clearInputs() { for (const id of ['token', 'phone', 'code']) $(id).value = ''; }
   function controls() {
@@ -27,7 +27,7 @@
     $('status').textContent = messages[data.state] || '正在准备。';
     $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
     $('picture').hidden = !(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state);
-    $('details').textContent = `${data.phone || ''} 剩余 ${data.expires_in} 秒；发码冷却 ${data.resend_in} 秒；自动缺口尝试 ${data.auto_attempts}/3`;
+    $('details').textContent = `${data.phone || ''} 剩余 ${data.expires_in} 秒；发码冷却 ${data.resend_in} 秒`;
     controls();
     if (terminal.has(data.state)) {
       clearInputs(); $('frame').removeAttribute('src'); frameId = ''; csrf = ''; nonce = '';
@@ -42,7 +42,7 @@
       raw = '';
       const response = await pending;
       const result = await response.json();
-      if (!response.ok) throw new Error(errors[result.error] || '操作未完成，请刷新状态或回终端重新启动。');
+      if (!response.ok) throw new Error(errors[result.error] || '操作未完成，请联系管理员查看状态。');
       return result;
     } finally { raw = ''; }
   }
@@ -62,7 +62,7 @@
     busy = true; controls(); $('error').textContent = '';
     try { await fn(); }
     catch (error) { $('error').textContent = error.message.startsWith('操作') || Object.values(errors).includes(error.message)
-      ? error.message : '连接中断。请回终端查看；已提交的操作不要重复发送。'; }
+      ? error.message : '连接中断。请联系管理员查看状态；已提交的操作不要重复发送。'; }
     finally { busy = false; controls(); }
   }
   async function action(action, extra = {}) {
@@ -70,11 +70,19 @@
     render(result);
     if (!terminal.has(result.state) && (result.state === 'verification' || result.mode === 'qr')) await frame();
   }
-  $('unlock').onclick = () => run(async () => {
-    const data = {token: $('token').value}; clearInputs();
+  const noToken = document.body.dataset.noToken === 'true';
+  const unlock = () => run(async () => {
+    const data = noToken ? {} : {token: $('token').value}; clearInputs();
     const result = await post('/auth', data); csrf = result.csrf;
     $('auth').hidden = true; $('login').hidden = false; render(result);
   });
+  $('unlock').onclick = unlock;
+  if (noToken) {
+    $('auth').hidden = true;
+    $('status').textContent = '正在准备手机登录。';
+    $('expiry').textContent = '登录会话最长 10 分钟；遇到安全验证或访问限制会停止。';
+    unlock();
+  }
   $('send').onclick = () => run(async () => {
     const data = {phone: $('phone').value}; clearInputs(); await action('send', data);
   });

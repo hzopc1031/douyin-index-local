@@ -14,7 +14,8 @@ python = os.environ.get("DYC_PYTHON") or (str(root / ".venv/bin/python")
 os.environ["PYTHONPATH"] = str(root) + (os.pathsep + os.environ["PYTHONPATH"]
                                        if os.environ.get("PYTHONPATH") else "")
 command = [python, "-m", "dyc", *sys.argv[1:]]
-if not os.environ.get("DYC_NO_SCOPE") and not os.environ.get("DYC_IN_SCOPE"):
+if (os.environ.get("DYC_USE_SCOPE") == "1" and not os.environ.get("DYC_NO_SCOPE")
+        and not os.environ.get("DYC_IN_SCOPE")):
     available = False
     if shutil.which("systemd-run") and shutil.which("systemctl"):
         try:

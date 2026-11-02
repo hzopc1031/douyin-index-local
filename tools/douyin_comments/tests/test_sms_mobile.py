@@ -16,6 +16,12 @@ from tests.test_sms_state import ORIGIN, PHONE, CODE
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
     async def test_mobile_sms_flow_qr_toggle_and_no_browser_storage(self):
+        await self.mobile_flow(no_token=False)
+
+    async def test_mobile_no_token_direct_login_and_refresh(self):
+        await self.mobile_flow(no_token=True)
+
+    async def mobile_flow(self, *, no_token):
         with tempfile.TemporaryDirectory() as root:
             sent = []
             foreign = []
@@ -33,7 +39,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             await browser.start()
             browser.start = AsyncMock()  # owned browser already active, no second profile
             session = LoginSession(browser, SmsQuota(Path(root) / 'state'))
-            app = WebApp(ORIGIN, 'synthetic-owner-token', lambda: session)
+            app = WebApp(ORIGIN, 'synthetic-owner-token', lambda: session, no_token=no_token)
             front = await browser.persistent.browser.new_context(viewport=dict(width=390, height=844),
                                                                  is_mobile=True, has_touch=True, service_workers='block')
             requests = []
@@ -65,9 +71,16 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await page.goto(ORIGIN)
                 self.assertLessEqual(await page.evaluate('document.documentElement.scrollWidth'), 390)
-                await page.locator('#token').fill('synthetic-owner-token')
-                await page.locator('#unlock').click()
+                if not no_token:
+                    await page.locator('#token').fill('synthetic-owner-token')
+                    await page.locator('#unlock').click()
                 await page.locator('#login').wait_for(state='visible')
+                if no_token:
+                    self.assertTrue(await page.locator('#auth').is_hidden())
+                    self.assertEqual(sent, [])
+                    await page.reload()
+                    await page.locator('#login').wait_for(state='visible')
+                    browser.start.assert_awaited_once()
                 self.assertEqual(await page.locator('#token').input_value(), '')
                 await page.locator('#qrMode').click()
                 await asyncio.wait_for(frame_requested.wait(), 5)

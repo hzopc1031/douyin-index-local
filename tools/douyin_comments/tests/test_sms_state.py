@@ -272,6 +272,59 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.app.tick()
         self.browser.start.assert_not_awaited()
 
+    async def test_configurable_token_expiry(self):
+        self.assertEqual(self.app.auth_deadline, self.clock() + 1800)
+        self.app = WebApp(ORIGIN, 'synthetic-owner-token', lambda: self.session,
+                          clock=self.clock, token_ttl=45)
+        self.clock.value += 45
+        self.assertEqual((await self.request('/auth', {'token': 'synthetic-owner-token'}))[0], 403)
+        await self.app.tick()
+        self.assertTrue(self.app.done.is_set())
+        self.browser.start.assert_not_awaited()
+
+    async def test_no_token_waits_then_opens_and_resumes_one_session(self):
+        self.app = WebApp(ORIGIN, '', lambda: self.session, clock=self.clock, no_token=True)
+        self.clock.value += 3600
+        await self.app.tick()
+        self.assertFalse(self.app.done.is_set())
+        self.browser.start.assert_not_awaited()
+        self.session.deadline = self.clock() + 600
+        status, headers, data = await self.request('/auth', {})
+        self.assertEqual(status, 200)
+        self.headers['cookie'] = headers['Set-Cookie'].split(';')[0]
+        self.headers['x-dyc-csrf'] = data['csrf']
+        self.assertEqual((await self.request('/auth', {}))[2]['csrf'], data['csrf'])
+        self.assertEqual((await self.request('/api', {'action': 'status'}))[0], 200)
+        self.browser.start.assert_awaited_once()
+        self.browser.send.assert_not_awaited()
+        self.clock.value += 601
+        await self.app.tick()
+        self.assertEqual(self.session.state, 'expired')
+
+    async def test_verification_stops_without_solver_or_send(self):
+        self.session.stop_on_verification = True
+        self.browser.observe.return_value = 'verification'
+        await self.session.act(dict(action='send', nonce=self.session.nonce, phone=PHONE))
+        self.assertEqual(self.session.state, 'failed')
+        self.browser.auto_step.assert_not_awaited()
+        self.browser.send.assert_not_awaited()
+        self.browser.close.assert_awaited_once()
+
+    async def test_verification_cannot_be_bypassed_by_switching_mode(self):
+        self.session.stop_on_verification = True
+        self.browser.observe.return_value = 'verification'
+        await self.session.act(dict(action='mode', nonce=self.session.nonce, mode='qr'))
+        self.assertEqual(self.session.state, 'failed')
+        self.browser.reset.assert_not_awaited()
+
+    async def test_loopback_static_smoke_does_not_start_browser(self):
+        self.app.no_token = True
+        status, _, data = await self.app.dispatch('GET', '/', {'host': '127.0.0.1:8766'}, b'')
+        self.assertEqual(status, 200)
+        self.assertIn(b'data-no-token="true"', data)
+        self.assertNotIn(b'{{', data)
+        self.browser.start.assert_not_awaited()
+
     async def test_exceptions_and_responses_never_leak_secret(self):
         await self.auth()
         self.browser.send.side_effect = RuntimeError(PHONE + CODE)
@@ -365,3 +418,17 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                     await serve(args)
                 opened.assert_not_called()
                 start.assert_not_called()
+
+    async def test_background_launcher_needs_no_tty_or_startup_limits(self):
+        args = Namespace(origin=ORIGIN, display=None, port=8766, no_token=True,
+                         profile_dir=Path(self.tmp.name) / 'profile', state_dir=Path(self.tmp.name) / 'state')
+        server = type('Server', (), {'close': lambda _: None, 'wait_closed': AsyncMock()})()
+        async def done(app):
+            app.done.set()
+        with patch('dyc.sms_web.open') as opened, \
+             patch('dyc.sms_web.resource.setrlimit') as limits, \
+             patch('dyc.sms_web.asyncio.start_server', AsyncMock(return_value=server)), \
+             patch.object(WebApp, 'tick', done):
+            await serve(args)
+        opened.assert_not_called()
+        limits.assert_not_called()
