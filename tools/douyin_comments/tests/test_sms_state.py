@@ -184,7 +184,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_mode_change_drops_old_challenge_before_probing(self):
         self.session.state = 'verification'
         self.browser.observe.return_value = 'verification'
-        async def reset():
+        async def reset(**_):
             self.browser.observe.assert_not_awaited()
             self.browser.observe.return_value = 'pending'
         self.browser.reset.side_effect = reset
@@ -316,12 +316,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.app.tick()
         self.assertEqual(self.session.state, 'expired')
 
-    async def test_verification_stops_without_solver_or_send(self):
+    async def test_unresolved_verification_stops_without_send(self):
         self.session.stop_on_verification = True
         self.browser.observe.return_value = 'verification'
         await self.session.act(dict(action='send', nonce=self.session.nonce, phone=PHONE))
         self.assertEqual(self.session.state, 'failed')
-        self.browser.auto_step.assert_not_awaited()
+        self.browser.auto_step.assert_awaited_once()
         self.browser.send.assert_not_awaited()
         self.browser.close.assert_awaited_once()
 
@@ -331,6 +331,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.session.act(dict(action='mode', nonce=self.session.nonce, mode='qr'))
         self.assertEqual(self.session.state, 'failed')
         self.browser.reset.assert_not_awaited()
+        self.browser.auto_step.assert_not_awaited()
 
     async def test_loopback_static_smoke_does_not_start_browser(self):
         self.app.no_token = True

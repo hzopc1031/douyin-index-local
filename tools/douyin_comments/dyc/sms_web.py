@@ -308,9 +308,10 @@ async def serve(args):
         except OSError:
             raise Stop(5, 'login_requires_terminal') from None
     token = '' if no_token else secrets.token_urlsafe(32)
+    from .sms_solver import GapWorker
     quota = SmsQuota(args.state_dir)
     app = WebApp(origin, token, lambda: LoginSession(
-        SmsBrowser(args.profile_dir, startup_limits=limits, state_dir=args.state_dir), quota, stop_on_verification=True),
+        SmsBrowser(args.profile_dir, solver=GapWorker(), startup_limits=limits, state_dir=args.state_dir), quota, stop_on_verification=True),
         no_token=no_token, token_ttl=token_ttl, port=args.port)
     tasks = set()
     def accepted(reader, writer):

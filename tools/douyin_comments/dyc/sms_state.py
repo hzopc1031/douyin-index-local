@@ -167,7 +167,11 @@ class LoginSession:
             await self.finish("succeeded")
         elif status == "verification":
             if self.stop_on_verification:
-                await self.fail(reason="verification_required")
+                await self.browser.auto_step()
+                if await self.browser.observe() == "verification":
+                    await self.fail(reason="verification_required")
+                    return
+                await self.poll()
                 return
             if self.state != "verification":
                 self.before_verification = self.state
@@ -200,7 +204,7 @@ class LoginSession:
                 self.nonce = secrets.token_urlsafe(24)  # consumed before any await
             try:
                 # Switching mode also reloads the login panel (60-second wait).
-                budget = 90 if action == 'mode' else 25
+                budget = 90 if action == 'mode' else 40 if action == 'send' else 25
                 async with asyncio.timeout(max(.001, min(budget, self.deadline-self.clock()))):
                     # Cancellation must never probe/solve another challenge or
                     # perform any new online action before releasing the lease.
@@ -211,12 +215,17 @@ class LoginSession:
                         if obj["mode"] not in ("sms", "qr"):
                             reject()
                         if self.stop_on_verification:
-                            await self.poll()
-                            if self.state in TERMINAL:
+                            status = await self.browser.observe()
+                            if status == "verification":
+                                await self.fail(reason="verification_required")
+                                return self.public()
+                            if status == "succeeded":
+                                await self.browser.persist()
+                                await self.finish("succeeded")
                                 return self.public()
                         # Switching to the fallback must not first complete
                         # the old SMS challenge and trigger its pending send.
-                        await self.browser.reset()
+                        await self.browser.reset(mode=obj["mode"])
                         self.mode, self.state = obj["mode"], "ready"
                         self.code_allowed = False
                         self.masked_phone = ""

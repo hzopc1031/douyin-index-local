@@ -26,9 +26,12 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         panel.filter.return_value = panel
         browser.page = Mock(url=browser.url)
         browser.page.goto = AsyncMock()
-        browser.page.locator.side_effect = lambda selector: phone if 'normal-input' in selector else panel
+        browser.page.locator.return_value = panel
+        browser.visible = Mock(return_value=phone)
         browser.challenge = AsyncMock(return_value=None)
         browser.inside = AsyncMock(return_value=False)
+        browser.sms_ready = browser.phone_ready
+        browser.switch_sms = AsyncMock()
         async def advance(_):
             nonlocal now
             now += 4

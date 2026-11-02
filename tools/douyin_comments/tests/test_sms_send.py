@@ -41,23 +41,27 @@ class ResultTests(unittest.TestCase):
             self.assertNotIn(PHONE, json.dumps(result))
             self.assertNotIn(CODE, json.dumps(result))
 
-    def test_response_matcher_accepts_broad_post_paths(self):
+    def test_response_matcher_only_accepts_send_paths(self):
         browser = SmsBrowser('/unused')
-        for path in ('/passport/web/send_code/', '/sms/send', '/passport/login', '/send_activation', '/send_sms_code'):
+        for path in ('/passport/web/send_code/', '/sms/send', '/send_activation_code', '/send_sms_code'):
             self.assertTrue(browser.sms_request('https://sso.amemv.com' + path + '?ignored=1', 'POST'))
             self.assertFalse(browser.sms_request('https://sso.amemv.com' + path, 'GET'))
-        self.assertFalse(browser.sms_request('https://sso.douyin.com/report?path=sms', 'POST'))
+        for path in ('/passport/web/check_qrconnect/', '/passport/login', '/passport/precheck',
+                     '/send_activation', '/sms', '/report?path=send_code', '/sms/check_qrconnect/'):
+            self.assertFalse(browser.sms_request('https://sso.douyin.com' + path, 'POST'))
 
 
 class SendTests(unittest.IsolatedAsyncioTestCase):
     async def run_send(self, responses):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        browser.prepare_send = AsyncMock(return_value='')
+        browser.challenge = AsyncMock(return_value=None)
         listeners = {}
         browser.context = Mock()
         browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
         browser.context.remove_listener.side_effect = lambda event, callback: listeners.pop(event)
-        async def clicked():
+        async def clicked(**_):
             self.assertEqual(set(listeners), {'request', 'response'})
             for path, status, body in responses:
                 request = Mock(url='https://sso.amemv.com' + path + '?cookie=synthetic-secret', method='POST', redirected_from=None)
@@ -69,7 +73,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
         click = AsyncMock(side_effect=clicked)
         browser.page = Mock(url=browser.url)
-        browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = click
+        browser.send_button = Mock(return_value=SimpleNamespace(click=click))
         logs = io.StringIO()
         with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
             result = await browser.send(PHONE)
@@ -88,9 +92,15 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.run_send([('/passport/web/send_code/', status, body)])
                 self.assertEqual(result['outcome'], expected)
 
+    async def test_qr_poll_zero_is_never_send_success(self):
+        result = await self.run_send([('/passport/web/check_qrconnect/', 200, {'code': 0}),
+                                      ('/passport/precheck', 200, {'code': 0})])
+        self.assertEqual(result['outcome'], 'unconfirmed')
+        self.assertIn('未捕获真实发码请求', result['description'])
+
     async def test_all_candidates_observed_and_any_success_wins(self):
-        failed = ('/passport/precheck', 200, {'code': 1001})
-        success = ('/send_activation', 200, {'code': 0})
+        failed = ('/passport/web/send_code/', 200, {'code': 1001})
+        success = ('/send_activation_code', 200, {'code': 0})
         for responses in ((failed, success), (success, failed),
                           (('/report', 200, {'code': 0}), failed, success)):
             result = await self.run_send(responses)
@@ -99,7 +109,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['outcome'], 'business_failed')
 
     async def test_platform_stop_outcomes_take_precedence_over_success(self):
-        success = ('/passport/precheck', 200, {'code': 0})
+        success = ('/send_code', 200, {'code': 0})
         for reason, outcome in (('Security verification required', 'verification_required'),
                                 ('too many', 'rate_limited'), ('risk control', 'access_denied')):
             stopped = ('/send_code', 200, {'code': 9, 'description': reason})
@@ -111,6 +121,8 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
     async def test_redirected_get_late_body_and_old_response(self):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        browser.prepare_send = AsyncMock(return_value='')
+        browser.challenge = AsyncMock(return_value=None)
         listeners = {}
         browser.context = Mock()
         browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
@@ -121,7 +133,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.04)
             body_read.set()
             return {'code': 0}
-        async def clicked():
+        async def clicked(**_):
             old = Mock(url='https://sso.amemv.com/passport/old', method='POST', redirected_from=None)
             listeners['response'](SimpleNamespace(request=old, status=200,
                                                    json=old_body))
@@ -130,7 +142,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
             listeners['response'](SimpleNamespace(request=redirected, status=200, json=body))
         browser.page = Mock(url=browser.url)
-        browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = AsyncMock(side_effect=clicked)
+        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(side_effect=clicked)))
         with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
             result = await browser.send(PHONE)
         old_body.assert_not_awaited()

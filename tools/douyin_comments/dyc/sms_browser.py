@@ -31,7 +31,10 @@ from .sms_cdp import TargetGuard
 # Fixed copy/adaptation of the 2026-10-31 login-B selectors; see SMS_LOGIN.md.
 PHONE = '#douyin_login_comp_mobile_code input#normal-input'
 CODE = '#douyin_login_comp_mobile_code input#button-input'
-SEND = '#douyin_login_comp_button_input_id span'
+MOBILE_PANEL = '#douyin_login_comp_mobile_code'
+SEND_TEXT = re.compile(r'^(?:获取|发送)(?:短信)?验证码$')
+SMS_TABS = ('手机号验证码登录', '手机验证码登录', '短信验证码登录', '验证码登录',
+            '手机号登录', '手机登录', '短信登录')
 SUBMIT = '#douyin_login_comp_btn_id'
 CHALLENGE = ('#captcha_container, .captcha_verify_container, #rc-verifycenter, '
              '.rc-verifycenter, [id^="rc-verifycenter"], [data-e2e="verify-dialog"], '
@@ -62,7 +65,7 @@ def in_domains(host, domains):
 
 def sms_result(status, body):
     """Extract bounded codes and fixed descriptions; never return platform prose."""
-    outcome, description, codes = 'unconfirmed', '未确认是否已发送', []
+    outcome, description, codes = 'unconfirmed', '未确认已发送', []
     message = ''
     if type(body) is dict:
         data = body.get('data')
@@ -98,7 +101,7 @@ def sms_result(status, body):
     elif status is not None and status != 200:
         outcome, description = 'http_failed', '平台发码 HTTP 请求失败'
     elif status is None:
-        outcome, description = 'unconfirmed', '未确认是否已发送'
+        outcome, description = 'unconfirmed', '未确认已发送'
     return dict(outcome=outcome, http_status=status, business_code=','.join(codes) or None,
                 description=description)
 
@@ -222,6 +225,9 @@ class SmsBrowser:
                 await asyncio.sleep(.1)
 
     def visible(self, selector):
+        if selector in (PHONE, CODE):
+            field = 'input#normal-input' if selector == PHONE else 'input#button-input'
+            return self.page.locator(MOBILE_PANEL).filter(visible=True).first.locator(field).filter(visible=True).first
         return self.page.locator(selector).filter(visible=True).first
 
     async def diagnose(self, error=None, reason='login_failed'):
@@ -470,7 +476,7 @@ class SmsBrowser:
             except Exception:
                 pass
 
-    async def reset(self):
+    async def reset(self, mode="sms"):
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
@@ -481,13 +487,16 @@ class SmsBrowser:
         self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', LOGIN_PANEL_SECONDS)
         deadline = time.monotonic() + LOGIN_PANEL_SECONDS
         clicked = False
+        switched = set()
         while time.monotonic() < deadline:
             self.require_origin()
             if await self.challenge():
-                raise Stop(3, 'verification_required')
+                await self.auto_step()
+                if await self.challenge():
+                    raise Stop(3, 'verification_required')
             if await self.inside():
                 return
-            if await self.phone_ready():
+            if (mode == "qr" and await ready_qr(self.page)) or (mode == "sms" and await self.sms_ready()):
                 self.require_origin()
                 return
             panel_visible = await self.read_dom('login_panel_count',
@@ -501,6 +510,13 @@ class SmsBrowser:
                     self.operation = 'login_button_click'
                     await login.click()
                     clicked = True
+            if mode == "sms":
+                await self.switch_sms(switched)
+            else:
+                tab = self.page.get_by_text("扫码登录", exact=True).filter(visible=True)
+                if "qr" not in switched and await tab.count() == 1:
+                    await tab.click(timeout=1500)
+                    switched.add("qr")
             await asyncio.sleep(.2)
         raise Stop(5, 'phone_input_missing' if clicked else 'login_panel_missing')
 
@@ -510,6 +526,82 @@ class SmsBrowser:
         # Re-resolve after each read: React may have replaced the input.
         return await self.read_dom('phone_editable',
                                    lambda: self.visible(PHONE).is_editable(timeout=500))
+
+    def send_button(self):
+        panel = self.page.locator(MOBILE_PANEL).filter(visible=True).first
+        return panel.locator('button, [role="button"], #douyin_login_comp_button_input_id > span').filter(
+            has_text=SEND_TEXT).filter(visible=True)
+
+    async def sms_ready(self):
+        return (await self.phone_ready() and
+                await self.visible(CODE).is_visible() and
+                await self.visible(CODE).is_editable() and
+                await self.send_button().count() == 1)
+
+    async def switch_sms(self, switched):
+        panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True)
+        for label in SMS_TABS:
+            tab = panel.get_by_text(label, exact=True).filter(visible=True)
+            if label not in switched and await tab.count() == 1:
+                self.require_origin()
+                await tab.click(timeout=1500)
+                switched.add(label)
+                audit('sms_view_switch', session=self.audit_id, target=label)
+                return
+
+    async def prepare_send(self):
+        switched = set()
+        for _ in range(len(SMS_TABS) + 1):
+            self.require_origin()
+            if await self.sms_ready():
+                break
+            await self.switch_sms(switched)
+            await asyncio.sleep(.2)
+        if not await self.sms_ready():
+            return '未确认已发送：未进入手机号验证码登录视图，或发送按钮未唯一命中'
+        # Scope agreement controls to the login panel; never toggle an already checked box.
+        boxes = self.page.locator(site.LOGIN_PANEL).filter(visible=True).get_by_role('checkbox').filter(visible=True)
+        for i in range(await boxes.count()):
+            self.require_origin()
+            await boxes.nth(i).check(timeout=1500)
+        self.require_origin()
+        return ''
+
+    async def send_evidence(self, phase):
+        if self.state_dir is None:
+            return
+        try:
+            folder = private_dir(self.state_dir / 'send-evidence')
+            stem = 'h7-' + secrets.token_hex(8) + '-' + phase
+            # Rebuild only key controls with fixed labels/attributes, never serialize live HTML.
+            fragment = await self.page.evaluate("""({selectors, labels}) => {
+              const root = document.createElement('section');
+              for (const selector of selectors) {
+                for (const e of document.querySelectorAll(selector)) {
+                  const node = document.createElement('div');
+                  node.dataset.selector = selector;
+                  const r = e.getBoundingClientRect();
+                  node.dataset.visible = String(Boolean(r.width && r.height && getComputedStyle(e).visibility !== 'hidden'));
+                  node.dataset.tag = e.tagName.toLowerCase();
+                  node.dataset.checked = String(e.checked === true || e.getAttribute('aria-checked') === 'true');
+                  node.dataset.disabled = String(e.disabled === true || e.getAttribute('aria-disabled') === 'true');
+                  const text = e.textContent.trim();
+                  node.textContent = labels.includes(text) ? text : '[redacted]';
+                  root.append(node);
+                }
+              }
+              return '<!doctype html><meta charset="utf-8">' + root.outerHTML;
+            }""", dict(selectors=[site.LOGIN_PANEL, MOBILE_PANEL, PHONE, CODE,
+                '#douyin_login_comp_button_input_id span', '#douyin_login_comp_scan_code',
+                '[role="tab"]', 'button', 'input[type="checkbox"]', '[role="checkbox"]'],
+                labels=[*SMS_TABS, '扫码登录', '获取验证码', '发送验证码', '获取短信验证码', '发送短信验证码']))
+            png = await self.diagnostic_snapshot()
+            for suffix, data in (('.html', fragment.encode()), ('.png', png)):
+                with os.fdopen(private_open(folder / (stem + suffix), os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
+                    stream.write(data)
+            audit('send_evidence', session=self.audit_id, phase=phase, file=stem, outcome='saved_redacted')
+        except Exception:
+            audit('send_evidence', session=self.audit_id, phase=phase, outcome='capture_failed')
 
     async def inside(self):
         return await self.read_dom('account_signal', self._inside)
@@ -536,17 +628,32 @@ class SmsBrowser:
         return 'pending'
 
     def sms_request(self, url, method):
-        path = urlsplit(url).path.lower()
-        return method == 'POST' and any(marker in path for marker in
-                                       ('send_code', 'sms', 'passport', 'send_activation'))
+        parsed = urlsplit(url)
+        path = parsed.path.lower()
+        return (method == 'POST' and parsed.scheme == 'https' and
+                'check_qrconnect' not in path and
+                bool(re.search(r'/(?:send_code|send_activation_code|send_sms_code)(?:/|$)|/sms/', path)))
 
     async def send(self, phone):
         self.step('send_sms', 'official send-code response after one click', SMS_RESPONSE_SECONDS)
         self.require_origin()
         self.private_values.append(phone)
+        try:
+            reason = await self.prepare_send()
+        except Exception:
+            reason = '未确认已发送：登录控件被弹窗遮挡、协议未勾选或按钮不可操作'
+        if reason:
+            await self.send_evidence('before')
+            await self.send_evidence('after')
+            result = sms_result(None, None)
+            result['description'] = reason
+            audit('send_response', session=self.audit_id, outcome='unconfirmed', reason='controls_not_ready')
+            return result
         await self.visible(PHONE).fill(phone)
         self.require_origin()
+        await self.send_evidence('before')
         requests, tasks, results = set(), set(), []
+        click_failed = False
 
         def requested(request):
             if time.monotonic() < self.sms_deadline and request.method == 'POST':
@@ -583,12 +690,22 @@ class SmsBrowser:
         try:
             audit('send_click_start', session=self.audit_id)
             try:
-                await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
+                self.require_origin()
+                await self.send_button().click(timeout=1500)
             except Exception:
                 audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
-                raise
-            audit('send_click_complete', session=self.audit_id)
-            await asyncio.sleep(max(0, self.sms_deadline - time.monotonic()))
+                click_failed = True
+            else:
+                audit('send_click_complete', session=self.audit_id)
+            await self.send_evidence('after')
+            while time.monotonic() < self.sms_deadline and not self.fatal:
+                if await self.challenge():
+                    try:
+                        async with asyncio.timeout(max(.001, self.sms_deadline - time.monotonic())):
+                            await self.auto_step()
+                    except TimeoutError:
+                        break
+                await asyncio.sleep(min(.2, max(0, self.sms_deadline - time.monotonic())))
             self.sms_deadline = 0
             # Responses received before the deadline may still be reading their body.
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -608,6 +725,10 @@ class SmsBrowser:
                           results[-1] if results else sms_result(None, None))
         if self.fatal_reason in ('http_401', 'http_403', 'http_429'):
             result = sms_result(int(self.fatal_reason[5:]), None)
+        if result['outcome'] == 'unconfirmed':
+            result['description'] = ('未确认已发送：发送按钮未命中或被弹窗遮挡' if click_failed else
+                '未确认已发送：15 秒内未捕获真实发码请求' if not any(self.sms_request(r.url, r.method) for r in requests) else
+                '未确认已发送：已捕获发码请求，但没有明确成功响应')
         audit('send_response', session=self.audit_id, http_status=result['http_status'],
               business_code=result['business_code'], outcome=result['outcome'])
         return result
