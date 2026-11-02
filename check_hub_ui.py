@@ -154,9 +154,29 @@ def run(output=None):
                 assert page.locator('#queryEnd').input_value()==''
                 page.locator('#queryEnd').fill(END)
                 page.locator('#queryEnd').dispatch_event('change')
+                # Modal errors must be visible in the top layer even on a short phone viewport.
+                page.set_viewport_size(dict(width=width,height=700))
+                for words in ['杭州\n杭州','一\n二\n三\n四\n五\n六']:
+                    page.locator('#queryWords').fill(words)
+                    page.locator('#submitButton').click()
+                    assert page.locator('#queryError').is_visible()
+                    error_box=page.locator('#queryError').bounding_box()
+                    assert 0 <= error_box['y'] and error_box['y']+error_box['height'] <= 700
+                    assert '不同的关键词' in page.locator('#queryError').inner_text()
+                    assert len(writes)==0
+                page.locator('#queryWords').fill('杭州')
+                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed')")
+                page.locator('#submitButton').click()
+                assert '上一批' in page.locator('#queryError').inner_text()
+                assert len(writes)==0
+                page.evaluate('reportBatch=null;saveBatch()')
+                page.set_viewport_size(dict(width=width,height=height))
                 page.keyboard.press('Escape')
                 assert not page.locator('#queryDialog').is_visible()
                 assert page.locator('#openQuery').evaluate('e=>e===document.activeElement')
+                page.evaluate("$('#insightStart').value='2024-01-01';$('#insightEnd').value='2024-01-07'")
+                assert page.evaluate("rangeError('insight')") == ''
+                page.evaluate("$('#insightStart').value='2026-10-25';$('#insightEnd').value='2026-10-31'")
                 # Missing and unavailable states never become zero or stale successful summaries.
                 fixture['missing_latest']=True
                 page.evaluate('loadSeries()')
