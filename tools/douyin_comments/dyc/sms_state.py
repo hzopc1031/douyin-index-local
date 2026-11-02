@@ -246,7 +246,7 @@ class LoginSession:
                             self.masked_phone = phone[:3] + "****" + phone[-4:]
                             audit('send_admitted', session=self.audit_id, reason='quota_reserved')
                             self.send_result = await self.browser.send(phone)
-                            if self.send_result['outcome'] != 'accepted':
+                            if self.send_result['outcome'] not in ('accepted', 'code_sent_by_countdown'):
                                 await self.fail(reason='sms_' + self.send_result['outcome'])
                                 return self.public()
                             self.code_allowed = True

@@ -60,6 +60,37 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             }''')
             self.assertEqual(first, await browser.diagnostic_snapshot())
 
+    async def test_existing_panel_and_fallback_fields(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate("""() => {
+              document.querySelector('#normal-input').outerHTML = '<input name="normal-input">';
+              document.querySelector('#button-input').outerHTML = '<input placeholder="验证码">';
+              document.querySelector('[role=tab]').onclick = () => { window.unwantedSwitch = true; };
+            }""")
+            self.assertTrue(await browser.sms_ready())
+            await browser.switch_sms(set())
+            self.assertIsNone(await browser.page.evaluate('window.unwantedSwitch'))
+
+    async def test_nested_send_and_unrelated_countdown(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate("""() => {
+              const span = document.querySelector('#douyin_login_comp_button_input_id span');
+              span.outerHTML = '<div><span>获取验证码</span></div>';
+              document.querySelector('#douyin_login_comp_mobile_code').insertAdjacentHTML('beforeend', '<button>59秒后</button>');
+            }""")
+            self.assertEqual(await browser.send_button().count(), 1)
+            self.assertFalse(await browser.countdown())
+            await browser.page.evaluate("document.querySelector('#douyin_login_comp_button_input_id span').textContent='59秒后'")
+            self.assertTrue(await browser.countdown())
+
+    async def test_disabled_span_is_not_clicked(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate("document.querySelector('#douyin_login_comp_button_input_id').setAttribute('aria-disabled','true')")
+            with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
+                result = await browser.send(PHONE)
+            self.assertEqual(result['outcome'], 'unconfirmed')
+            self.assertEqual(self.sends, 0)
+
     async def test_role_button_enabled_by_phone_and_checked_agreement(self):
         async with self.browser() as browser:
             await browser.page.locator('#terms').check()
@@ -143,7 +174,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             async def click(**kwargs):
                 await button.click(**kwargs)
                 await browser.page.evaluate('challenge()')
-            browser.send_button = lambda: type('Button', (), {'count': button.count, 'click': staticmethod(click)})()
+            browser.send_button = lambda: type('Button', (), {'count': button.count, 'click': staticmethod(click), 'wait_for': button.wait_for, 'evaluate': button.evaluate})()
             browser.auto_step = AsyncMock(side_effect=lambda: None)
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
                 result = await browser.send(PHONE)

@@ -52,10 +52,11 @@ class ResultTests(unittest.TestCase):
 
 
 class SendTests(unittest.IsolatedAsyncioTestCase):
-    async def run_send(self, responses, *, rejected_challenge=False):
+    async def run_send(self, responses, *, rejected_challenge=False, countdown=False):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
         browser.prepare_send = AsyncMock(return_value='')
+        browser.countdown = AsyncMock(side_effect=[False] + [countdown] * 100)
         browser.challenge = AsyncMock(return_value=True if rejected_challenge else None)
         browser.auto_step = AsyncMock()
         listeners = {}
@@ -74,7 +75,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
         click = AsyncMock(side_effect=clicked)
         browser.page = Mock(url=browser.url)
-        browser.send_button = Mock(return_value=SimpleNamespace(click=click))
+        browser.send_button = Mock(return_value=SimpleNamespace(click=click, wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         logs = io.StringIO()
         with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
             result = await browser.send(PHONE)
@@ -101,15 +102,23 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['outcome'], 'unconfirmed')
         self.assertIn('未捕获真实发码请求', result['description'])
 
-    async def test_all_candidates_observed_and_any_success_wins(self):
+    async def test_rejection_takes_precedence_over_success(self):
         failed = ('/passport/web/send_code/', 200, {'code': 1001})
         success = ('/send_activation_code', 200, {'code': 0})
         for responses in ((failed, success), (success, failed),
                           (('/report', 200, {'code': 0}), failed, success)):
             result = await self.run_send(responses)
-            self.assertEqual(result['outcome'], 'accepted')
+            self.assertEqual(result['outcome'], 'business_failed')
         result = await self.run_send([('/report', 200, {'code': 0}), failed, ('/sms', 200, {})])
         self.assertEqual(result['outcome'], 'business_failed')
+
+    async def test_countdown_only_and_rejection_priority(self):
+        result = await self.run_send([], countdown=True)
+        self.assertEqual(result['outcome'], 'code_sent_by_countdown')
+        result = await self.run_send([('/send_code', 200, {'code': 9})], countdown=True)
+        self.assertEqual(result['outcome'], 'business_failed')
+        result = await self.run_send([('/check_qrconnect/', 200, {'code': 0})], countdown=True)
+        self.assertEqual(result['outcome'], 'code_sent_by_countdown')
 
     async def test_platform_stop_outcomes_take_precedence_over_success(self):
         success = ('/send_code', 200, {'code': 0})
@@ -131,6 +140,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
         browser.prepare_send = AsyncMock(return_value='')
+        browser.countdown = AsyncMock(return_value=False)
         browser.challenge = AsyncMock(return_value=None)
         listeners = {}
         browser.context = Mock()
@@ -151,7 +161,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
             listeners['response'](SimpleNamespace(request=redirected, status=200, json=body))
         browser.page = Mock(url=browser.url)
-        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(side_effect=clicked)))
+        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(side_effect=clicked), wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
             result = await browser.send(PHONE)
         old_body.assert_not_awaited()

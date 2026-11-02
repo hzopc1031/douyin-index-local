@@ -86,6 +86,8 @@ def sms_result(status, body):
             outcome, description = 'verification_required', '平台要求安全验证，已停止'
         elif any(word in message for word in ('frequent', 'too many', '频繁', '频率', '限流', '限频')):
             outcome, description = 'rate_limited', '平台限制发码频率，已停止'
+        elif any(word in message for word in ('busy', '繁忙', '忙碌')):
+            outcome, description = 'business_failed', '平台繁忙，未确认发码，已停止'
         elif any(word in message for word in ('risk', '风控', '风险')):
             outcome, description = 'access_denied', '平台风险校验未通过，已停止'
         elif any(word in message for word in ('invalid phone', 'invalid mobile', '手机号格式', '手机号码错误')):
@@ -226,7 +228,8 @@ class SmsBrowser:
 
     def visible(self, selector):
         if selector in (PHONE, CODE):
-            field = 'input#normal-input' if selector == PHONE else 'input#button-input'
+            field = ('input#normal-input, input[name=normal-input], input[placeholder*=手机号]' if selector == PHONE else
+                     'input#button-input, input[name=button-input], input[placeholder*=验证码], input[autocomplete=one-time-code]')
             return self.page.locator(MOBILE_PANEL).filter(visible=True).first.locator(field).filter(visible=True).first
         return self.page.locator(selector).filter(visible=True).first
 
@@ -530,7 +533,7 @@ class SmsBrowser:
     def send_button(self):
         panel = self.page.locator(MOBILE_PANEL).filter(visible=True).first
         return panel.get_by_role('button', name=SEND_TEXT).or_(
-            panel.locator('#douyin_login_comp_button_input_id > span').filter(has_text=SEND_TEXT)).filter(visible=True)
+            panel.locator('#douyin_login_comp_button_input_id span:not(:has(span)):not(button *):not([role=button] *), #douyin_login_comp_button_input_id div:not(:has(span, div)):not(button *):not([role=button] *)').filter(has_text=SEND_TEXT)).filter(visible=True)
 
     async def sms_ready(self):
         return (await self.phone_ready() and
@@ -539,6 +542,8 @@ class SmsBrowser:
                 await self.send_button().count() == 1)
 
     async def switch_sms(self, switched):
+        if await self.page.locator(MOBILE_PANEL).filter(visible=True).count():
+            return
         panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True)
         for label in SMS_TABS:
             tab = panel.get_by_text(label, exact=True).filter(visible=True)
@@ -636,6 +641,15 @@ class SmsBrowser:
                 'check_qrconnect' not in path and
                 bool(re.search(r'/(?:send_code|send_activation_code|send_sms_code)(?:/|$)|/sms/', path)))
 
+    async def countdown(self):
+        return await self.page.locator(MOBILE_PANEL).filter(visible=True).first.locator(
+            '#douyin_login_comp_button_input_id'
+        ).filter(visible=True).evaluate_all(r'''elements => elements.some(e => {
+            const text = (e.innerText || '').trim();
+            const match = text.match(/(?:^|\D)([1-9]\d*)\s*(?:秒|s(?:后)?)/i);
+            return Boolean(match);
+        })''')
+
     async def send(self, phone):
         self.step('send_sms', 'official send-code response after one click', SMS_RESPONSE_SECONDS)
         self.require_origin()
@@ -654,7 +668,11 @@ class SmsBrowser:
         await self.visible(PHONE).fill(phone)
         self.require_origin()
         await self.send_evidence('before')
+        # A pre-existing countdown cannot establish that this attempt sent a code.
+        countdown_before = await self.countdown()
         requests, tasks, results = set(), set(), []
+        countdown_seen = False
+        challenge_seen = False
         click_failed = False
 
         def requested(request):
@@ -696,7 +714,19 @@ class SmsBrowser:
             audit('send_click_start', session=self.audit_id)
             try:
                 self.require_origin()
-                await self.send_button().click(timeout=1500)
+                button = self.send_button()
+                await button.wait_for(state='visible', timeout=1500)
+                async with asyncio.timeout(5):
+                    while not await button.evaluate('''e => {
+                      for (let p=e; p; p=p.parentElement) {
+                        if (p.matches(':disabled, [disabled], [aria-disabled=true], [data-disabled=true]') ||
+                            getComputedStyle(p).pointerEvents === 'none' ||
+                            [...p.classList].some(c => /(^|[-_])disabled($|[-_])/i.test(c))) return false;
+                      }
+                      return true;
+                    }'''):
+                        await asyncio.sleep(.1)
+                await button.click(timeout=1500)
             except Exception:
                 audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
                 click_failed = True
@@ -706,11 +736,14 @@ class SmsBrowser:
             try:
                 while time.monotonic() < self.sms_deadline and not self.fatal:
                     if await self.challenge():
+                        challenge_seen = True
                         try:
                             async with asyncio.timeout(max(.001, self.sms_deadline - time.monotonic())):
                                 await self.auto_step()
                         except TimeoutError:
                             break
+                    if not click_failed and not countdown_before and await self.countdown():
+                        countdown_seen = True
                     await asyncio.sleep(min(.2, max(0, self.sms_deadline - time.monotonic())))
             except Stop:
                 if not self.fatal:
@@ -728,10 +761,12 @@ class SmsBrowser:
         result = next((r for r in results if r['outcome'] in
                        ('verification_required', 'rate_limited', 'access_denied')), None)
         if result is None:
-            result = next((r for r in results if r['outcome'] == 'accepted'), None)
+            result = next((r for r in results if r['outcome'] not in ('unconfirmed', 'accepted')), None)
         if result is None:
-            result = next((r for r in results if r['outcome'] != 'unconfirmed'),
+            result = next((r for r in results if r['outcome'] == 'accepted'),
                           results[-1] if results else sms_result(None, None))
+        if not results and countdown_seen and not self.fatal and not challenge_seen and not await self.challenge():
+            result.update(outcome='code_sent_by_countdown', description='发送按钮出现倒计时，但未捕获发码接口响应；请查看短信')
         if self.fatal_reason in ('http_401', 'http_403', 'http_429'):
             result = sms_result(int(self.fatal_reason[5:]), None)
         if result['outcome'] == 'unconfirmed':
@@ -953,6 +988,13 @@ class SmsBrowser:
                 not self.contains_private(json.dumps(cookie))]
         if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') for c in safe):
             raise Stop(4, 'login_cookie_missing')
+        for cookie in safe:
+            if cookie['name'] == 'sessionid':
+                domain = cookie.get('domain', '')
+                audit('sessionid_attributes', session=self.audit_id,
+                      domain=domain if domain in ('.douyin.com', 'douyin.com', 'www.douyin.com') else 'other',
+                      path=cookie.get('path') if cookie.get('path') == '/' else 'other',
+                      expires=cookie.get('expires') if type(cookie.get('expires')) in (int, float) and math.isfinite(cookie['expires']) else None)
         # Chromium discards session-only cookies on a clean restart. Give only
         # these allowlisted login cookies a conservative local 24-hour horizon;
         # this never extends the platform's server-side session validity. Keep
