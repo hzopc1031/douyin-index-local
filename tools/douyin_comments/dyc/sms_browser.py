@@ -593,7 +593,8 @@ class SmsBrowser:
               return '<!doctype html><meta charset="utf-8">' + root.outerHTML;
             }""", dict(selectors=[site.LOGIN_PANEL, MOBILE_PANEL, PHONE, CODE,
                 '#douyin_login_comp_button_input_id span', '#douyin_login_comp_scan_code',
-                '[role="tab"]', 'button', 'input[type="checkbox"]', '[role="checkbox"]'],
+                '[role="tab"]', 'button', '#login-panel-new span, #douyin_login_comp_flat_panel span',
+                'input[type="checkbox"]', '[role="checkbox"]'],
                 labels=[*SMS_TABS, '扫码登录', '获取验证码', '发送验证码', '获取短信验证码', '发送短信验证码']))
             png = await self.diagnostic_snapshot()
             for suffix, data in (('.html', fragment.encode()), ('.png', png)):
@@ -669,6 +670,9 @@ class SmsBrowser:
                     async with asyncio.timeout(2):
                         body = await response.json()
                     result.update(sms_result(response.status, body))
+                    if result['outcome'] in ('verification_required', 'rate_limited', 'access_denied'):
+                        self.fatal_reason = self.fatal_reason or 'sms_' + result['outcome']
+                        self.fatal = True
                 except Exception:
                     pass
 
@@ -698,14 +702,18 @@ class SmsBrowser:
             else:
                 audit('send_click_complete', session=self.audit_id)
             await self.send_evidence('after')
-            while time.monotonic() < self.sms_deadline and not self.fatal:
-                if await self.challenge():
-                    try:
-                        async with asyncio.timeout(max(.001, self.sms_deadline - time.monotonic())):
-                            await self.auto_step()
-                    except TimeoutError:
-                        break
-                await asyncio.sleep(min(.2, max(0, self.sms_deadline - time.monotonic())))
+            try:
+                while time.monotonic() < self.sms_deadline and not self.fatal:
+                    if await self.challenge():
+                        try:
+                            async with asyncio.timeout(max(.001, self.sms_deadline - time.monotonic())):
+                                await self.auto_step()
+                        except TimeoutError:
+                            break
+                    await asyncio.sleep(min(.2, max(0, self.sms_deadline - time.monotonic())))
+            except Stop:
+                if not self.fatal:
+                    raise
             self.sms_deadline = 0
             # Responses received before the deadline may still be reading their body.
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -882,6 +890,7 @@ class SmsBrowser:
                 if self.cancel.is_set():
                     raise asyncio.CancelledError
                 await asyncio.sleep((stamp-previous)/1000)
+                self.require_origin()
                 await self.page.mouse.move(meta.x0+x*meta.width, meta.y0+y*meta.height, steps=2)
                 if index == 0:
                     await self.page.mouse.down()
@@ -924,6 +933,10 @@ class SmsBrowser:
             return
         self.auto_attempts += 1  # charge before mouse-down, never reset on mode switch
         await self.replay(points, capture.metadata)
+        # Mouse-up starts asynchronous verification; allow its response before declaring failure.
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and await self.challenge():
+            await asyncio.sleep(.1)
 
     async def persist(self):
         self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)

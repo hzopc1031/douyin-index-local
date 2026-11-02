@@ -116,7 +116,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('code_invalid', await page.locator('#details').inner_text())
                 self.assertTrue(await page.locator('#sms').is_hidden())
                 self.assertFalse(app.done.is_set())
-                for outcome, description in (('unconfirmed', '未确认是否已发送'),
+                for outcome, description in (('unconfirmed', '未确认已发送：15 秒内未捕获真实发码请求'),
                         ('business_failed', '平台拒绝发码'), ('rate_limited', '平台限制发码频率'),
                         ('verification_required', '平台要求安全验证')):
                     app.session.send_result = dict(outcome=outcome, http_status=None,

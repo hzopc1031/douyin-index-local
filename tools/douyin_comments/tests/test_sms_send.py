@@ -52,11 +52,12 @@ class ResultTests(unittest.TestCase):
 
 
 class SendTests(unittest.IsolatedAsyncioTestCase):
-    async def run_send(self, responses):
+    async def run_send(self, responses, *, rejected_challenge=False):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
         browser.prepare_send = AsyncMock(return_value='')
-        browser.challenge = AsyncMock(return_value=None)
+        browser.challenge = AsyncMock(return_value=True if rejected_challenge else None)
+        browser.auto_step = AsyncMock()
         listeners = {}
         browser.context = Mock()
         browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
@@ -78,6 +79,8 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
             result = await browser.send(PHONE)
         click.assert_awaited_once()
+        if rejected_challenge:
+            browser.auto_step.assert_not_awaited()
         self.assertEqual(listeners, {})
         self.assertEqual(browser.sms_deadline, 0)
         for event in ('send_click_start', 'send_click_complete', 'send_response'):
@@ -117,6 +120,12 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(outcome=outcome, responses=responses):
                     result = await self.run_send(responses)
                     self.assertEqual(result['outcome'], outcome)
+
+    async def test_business_stop_does_not_solve_remaining_challenge(self):
+        for description in ('too many', 'risk control', 'security verification required'):
+            result = await self.run_send([('/send_code', 200, {'code': 9, 'description': description})],
+                                         rejected_challenge=True)
+            self.assertIn(result['outcome'], ('rate_limited', 'access_denied', 'verification_required'))
 
     async def test_redirected_get_late_body_and_old_response(self):
         browser = SmsBrowser('/unused')

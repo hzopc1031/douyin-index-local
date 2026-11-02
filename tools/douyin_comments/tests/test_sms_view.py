@@ -106,6 +106,36 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await browser.frame(False))['image'])
             self.assertEqual(self.sends, 0)
 
+    async def test_gap_waits_for_delayed_platform_confirmation(self):
+        solver = type('Solver', (), {'solve': AsyncMock(return_value=[[.1,.9,0],[.5,.9,10]]),
+                                      'close': AsyncMock()})()
+        async with self.browser(solver) as browser:
+            await browser.page.evaluate("challenge()")
+            async def replay(*_):
+                await browser.page.evaluate("setTimeout(()=>document.querySelector('#captcha_container').remove(), 250)")
+            browser.replay = replay
+            await browser.auto_step()
+            self.assertIsNone(await browser.challenge())
+            self.assertEqual(browser.auto_attempts, 1)
+            self.assertEqual(self.sends, 0)
+
+    async def test_business_stop_during_solver_prevents_replay(self):
+        browser_ref = None
+        async def rejected(*_):
+            browser_ref.fatal = True
+            browser_ref.fatal_reason = 'sms_rate_limited'
+            return [[.1,.9,0],[.5,.9,10]]
+        solver = type('Solver', (), {'solve': AsyncMock(side_effect=rejected), 'close': AsyncMock()})()
+        async with self.browser(solver) as browser:
+            browser_ref = browser
+            await browser.page.evaluate("challenge()")
+            browser.replay = AsyncMock()
+            from dyc.errors import Stop
+            with self.assertRaises(Stop):
+                await browser.auto_step()
+            browser.replay.assert_not_awaited()
+            self.assertEqual(browser.auto_attempts, 0)
+
     async def test_gap_during_send_uses_existing_solver_once(self):
         async with self.browser() as browser:
             original = browser.send_button
