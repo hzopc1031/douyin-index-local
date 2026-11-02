@@ -11,7 +11,7 @@ from dyc.sms_browser import SmsBrowser
 from dyc.sms_state import LoginSession, SmsQuota
 from dyc.sms_web import HEADERS, WebApp
 from tests.test_sms_browser import HTML
-from tests.test_sms_state import ORIGIN, PHONE, CODE
+from tests.test_sms_state import ORIGIN, PHONE, CODE, DummyBrowser
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
@@ -20,6 +20,79 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mobile_no_token_direct_login_and_refresh(self):
         await self.mobile_flow(no_token=True)
+
+    async def test_preparation_failure_manual_retry_refresh_and_polling(self):
+        with tempfile.TemporaryDirectory() as root:
+            async def official(route):
+                await route.fulfill(content_type='text/html; charset=utf-8', body=HTML)
+            engine = SmsBrowser(Path(root)/'profile', backend=official)
+            await engine.start()
+            browsers = []
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def wait():
+                entered.set()
+                await release.wait()
+            def factory():
+                browser = DummyBrowser()
+                browser.diagnose = AsyncMock(return_value=dict(reason='browser_operation_failed',
+                    step='phone_input_ready', operation='challenge_candidates_count'))
+                if not browsers:
+                    browser.start.side_effect = RuntimeError('synthetic-private')
+                else:
+                    browser.start.side_effect = wait
+                browsers.append(browser)
+                return LoginSession(browser, SmsQuota(Path(root)/'state'))
+            app = WebApp(ORIGIN, '', factory, no_token=True)
+            front = await engine.persistent.browser.new_context(viewport=dict(width=390,height=844),
+                is_mobile=True, has_touch=True, service_workers='block')
+            requests = []
+            async def frontend(route):
+                req = route.request
+                if not req.url.startswith(ORIGIN + '/'):
+                    await route.abort(); return
+                headers = await req.all_headers()
+                headers['host'] = urlsplit(req.url).netloc
+                target = urlsplit(req.url).path
+                action = json.loads(req.post_data or '{}').get('action') if target == '/api' else None
+                requests.append((target, action))
+                status, extra, data = await app.dispatch(req.method, target, headers, (req.post_data or '').encode())
+                if isinstance(data, dict): data=json.dumps(data).encode()
+                await route.fulfill(status=status, headers=HEADERS | {'Content-Type':'application/json'} | extra, body=data)
+            await front.route('**/*', frontend)
+            await front.route_web_socket('**/*', lambda socket:socket.close())
+            page = await front.new_page()
+            await page.clock.install()
+            try:
+                await page.goto(ORIGIN)
+                await page.locator('#retry').wait_for(state='visible')
+                self.assertIn('challenge_candidates_count', await page.locator('#details').inner_text())
+                self.assertTrue(await page.locator('#cancel').is_enabled())
+                await page.clock.fast_forward(30_000)
+                await app.tick()
+                self.assertEqual(len(browsers),1)
+                self.assertFalse(app.done.is_set())
+                await page.reload()
+                await page.locator('#retry').wait_for(state='visible')
+                self.assertEqual(len(browsers),1)
+                await page.locator('#retry').click()
+                await asyncio.wait_for(entered.wait(),5)
+                await page.clock.fast_forward(30_000)
+                self.assertTrue(await page.locator('#retry').is_disabled())
+                self.assertEqual(requests.count(('/api','retry')),1)
+                self.assertEqual(requests.count(('/api','status')),0)
+                release.set()
+                await page.locator('#sms').wait_for(state='visible')
+                self.assertTrue(await page.locator('#retry').is_hidden())
+                await page.clock.fast_forward(2600)
+                await page.wait_for_function("() => document.querySelector('#send').disabled === false")
+                self.assertGreaterEqual(requests.count(('/api','status')),1)
+                await page.locator('#cancel').click()
+                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已结束')")
+                self.assertEqual(len(browsers),2)
+                for browser in browsers: browser.send.assert_not_awaited()
+            finally:
+                release.set()
+                await front.close(); await app.close(); await engine.close()
 
     async def mobile_flow(self, *, no_token):
         with tempfile.TemporaryDirectory() as root:

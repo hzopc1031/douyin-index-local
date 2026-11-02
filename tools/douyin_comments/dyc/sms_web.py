@@ -56,6 +56,49 @@ class WebApp:
         self.csrf = ''
         self.done = asyncio.Event()
         self.terminal_at = None
+        self.preparation_failed = False
+        self.retry_nonce = ''
+        self.retryable = False
+
+    def public(self):
+        data = self.session.public()
+        if self.preparation_failed:
+            data.update(preparation_failed=True, retryable=self.retryable,
+                        nonce=self.retry_nonce)
+        return dict(data, csrf=self.csrf)
+
+    async def prepare(self, deadline=None):
+        self.starting = True
+        self.preparation_failed = self.retryable = False
+        self.retry_nonce = ''
+        try:
+            self.session = self.factory()
+            if deadline is not None:
+                self.session.deadline = deadline
+            async with asyncio.timeout(max(.001, min(90, self.session.deadline-self.clock()))):
+                await self.session.browser.start()
+            return 200, self.public()
+        except asyncio.CancelledError:
+            if self.session:
+                await self.session.finish('cancelled')
+            raise
+        except Exception as error:
+            if not self.session:
+                self.done.set()
+                raise
+            await self.session.fail(error)
+            self.preparation_failed = True
+            self.retry_nonce = secrets.token_urlsafe(24)
+            failure = self.session.failure or {}
+            # Only preparation failures without an access/verification stop
+            # may be retried. Each retry needs an authenticated explicit POST.
+            self.retryable = (failure.get('reason') in (
+                'browser_operation_failed', 'login_step_timeout',
+                'phone_input_missing', 'login_panel_missing') and
+                not getattr(self.session.browser, 'fatal', False))
+            return 503, dict(self.public(), error='login_failed')
+        finally:
+            self.starting = False
 
     def authenticated(self, headers):
         # Cookies are scoped to a hostname, not a port. Other trusted services
@@ -98,9 +141,11 @@ class WebApp:
             try:
                 if target == '/auth':
                     fields(obj, set() if self.no_token else {'token'})
+                    if self.starting:
+                        reject('busy')
                     if self.no_token and self.session and self.authenticated(headers):
-                        return 200, {}, dict(self.session.public(), csrf=self.csrf)
-                    if self.starting or self.session or self.done.is_set() or not self.token_hash or self.clock() >= self.auth_deadline:
+                        return 200, {}, self.public()
+                    if self.session or self.done.is_set() or not self.token_hash or self.clock() >= self.auth_deadline:
                         reject('unauthorized')
                     self.auth_attempts += 1
                     token = obj.pop('token', '')
@@ -111,28 +156,40 @@ class WebApp:
                             self.done.set()
                         reject('unauthorized')
                     token = None
-                    self.token_hash = b''  # one redemption, even if browser startup fails
-                    self.starting = True
-                    try:
-                        self.session = self.factory()
-                        async with asyncio.timeout(90):
-                            await self.session.browser.start()
-                        cookie = secrets.token_urlsafe(32)
-                        self.cookie_hash = hashlib.sha256(cookie.encode()).digest()
-                        self.csrf = secrets.token_urlsafe(32)
-                        data = dict(self.session.public(), csrf=self.csrf)
-                        return 200, {'Set-Cookie': f'__Host-dyc_login={cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600'}, data
-                    except BaseException as error:
-                        if self.session:
-                            await self.session.fail(error)
-                        self.done.set()
-                        raise
-                    finally:
-                        self.starting = False
+                    self.token_hash = b''  # still one redemption; retry uses cookie + CSRF + nonce
+                    cookie = secrets.token_urlsafe(32)
+                    self.cookie_hash = hashlib.sha256(cookie.encode()).digest()
+                    self.csrf = secrets.token_urlsafe(32)
+                    status, data = await self.prepare()
+                    return status, {'Set-Cookie': f'__Host-dyc_login={cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=600'}, data
                 if not self.authenticated(headers):
                     reject('unauthorized')
                 if not self.csrf or not hmac.compare_digest(headers.get('x-dyc-csrf', ''), self.csrf):
                     reject('csrf')
+                if self.starting:
+                    reject('busy')
+                if self.preparation_failed:
+                    action = obj.get('action')
+                    fields(obj, {'action'} if action == 'status' else {'action', 'nonce'})
+                    if self.clock() >= self.session.deadline:
+                        self.preparation_failed = self.retryable = False
+                        self.retry_nonce = ''
+                        await self.session.finish('expired')
+                        return 200, {}, self.session.public()
+                    if action == 'status':
+                        return 200, {}, self.public()
+                    nonce = obj.get('nonce')
+                    if not isinstance(nonce, str) or not hmac.compare_digest(nonce, self.retry_nonce):
+                        reject('replayed_action')
+                    if action == 'cancel':
+                        self.preparation_failed = self.retryable = False
+                        self.retry_nonce = ''
+                        await self.session.finish('cancelled')
+                        return 200, {}, self.session.public()
+                    if action != 'retry' or not self.retryable:
+                        reject('wrong_state')
+                    status, data = await self.prepare(self.session.deadline)
+                    return status, {}, data
                 return 200, {}, await self.session.act(obj)
             finally:
                 obj.clear()
@@ -157,6 +214,12 @@ class WebApp:
         session = self.session
         if session.gate.locked() or self.starting:
             return
+        if self.preparation_failed:
+            if self.clock() < session.deadline:
+                return  # retain failure for manual retry; never restart from tick
+            self.preparation_failed = self.retryable = False
+            self.retry_nonce = ''
+            await session.finish('expired')
         async with session.gate:
             try:
                 async with asyncio.timeout(max(.001, min(15, session.deadline-self.clock()))):

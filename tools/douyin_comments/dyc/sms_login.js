@@ -17,6 +17,8 @@
   function controls() {
     for (const id of ['unlock', 'send', 'submit', 'smsMode', 'qrMode', 'refresh', 'cancel'])
       $(id).disabled = busy || Boolean(gesture) || terminal.has(state?.state);
+    $('retry').disabled = busy || !state?.retryable;
+    if (state?.preparation_failed) $('cancel').disabled = busy;
     if (state) {
       $('send').disabled ||= state.resend_in > 0 || !['ready', 'code_sent'].includes(state.state);
       $('submit').disabled ||= state.state !== 'code_sent';
@@ -24,13 +26,19 @@
   }
   function render(data) {
     state = data; nonce = data.nonce;
-    $('status').textContent = messages[data.state] || '正在准备。';
+    $('status').textContent = data.preparation_failed
+      ? (data.retryable ? '手机登录准备失败。可点击重试。' : '登录已停止，遇到验证或访问限制时不能重试。')
+      : messages[data.state] || '正在准备。';
+    $('retry').hidden = !data.retryable;
+    $('modes').hidden = Boolean(data.preparation_failed);
     $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
     $('picture').hidden = !(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state);
     $('details').textContent = `${data.phone || ''} 剩余 ${data.expires_in} 秒；发码冷却 ${data.resend_in} 秒`;
+    if (data.failure) $('details').textContent = `失败步骤：${data.failure.step}；原因：${data.failure.reason}；操作：${data.failure.operation || '未记录'}`;
     controls();
     if (terminal.has(data.state)) {
-      clearInputs(); $('frame').removeAttribute('src'); frameId = ''; csrf = ''; nonce = '';
+      clearInputs(); $('frame').removeAttribute('src'); frameId = '';
+      if (!data.preparation_failed) { csrf = ''; nonce = ''; }
     }
   }
   async function post(path, data) {
@@ -45,7 +53,12 @@
       const response = await pending;
       const result = await response.json();
       if (!response.ok) {
-        if (result.error === 'login_failed') {
+        if (result.preparation_failed && result.csrf) {
+          csrf = result.csrf;
+          $('auth').hidden = true; $('login').hidden = false;
+          render(result);
+          return result;
+        } else if (result.error === 'login_failed') {
           $('status').textContent = '手机登录准备失败，已停止。请联系管理员查看状态。';
           if (result.failure) $('details').textContent = `失败步骤：${result.failure.step}；原因：${result.failure.reason}`;
         }
@@ -99,6 +112,10 @@
   });
   $('smsMode').onclick = () => run(() => action('mode', {mode: 'sms'}));
   $('qrMode').onclick = () => run(() => action('mode', {mode: 'qr'}));
+  $('retry').onclick = () => run(async () => {
+    $('status').textContent = '正在重新准备手机登录，可能需要约 90 秒。';
+    clearInputs(); await action('retry');
+  });
   $('cancel').onclick = () => run(() => action('cancel'));
   $('refresh').onclick = () => run(frame);
   function point(event, start) {

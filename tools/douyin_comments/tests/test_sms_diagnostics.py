@@ -18,7 +18,8 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         browser = SmsBrowser('/unused')
         now = 0
         phone = Mock(is_visible=AsyncMock(return_value=True))
-        phone.is_editable = AsyncMock(side_effect=lambda: now >= 24)
+        phone.is_editable = AsyncMock(side_effect=lambda **_: now >= 24)
+        phone.filter.return_value.first = phone
         panel = Mock(count=AsyncMock(return_value=1))
         panel.filter.return_value = panel
         browser.page = Mock(url=browser.url)

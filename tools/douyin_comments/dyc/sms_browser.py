@@ -125,6 +125,8 @@ class SmsBrowser:
     def __init__(self, profile, *, backend=None, solver=None, startup_limits=False, state_dir=None):
         self.state_dir = private_dir(state_dir) if state_dir is not None else None
         self.diagnostic = None
+        self.operation = 'initializing'
+        self.last_read_error = None
         self.fatal_reason = ''
         self.fatal_context = None
         self.step('initializing', 'browser startup', 90)
@@ -150,9 +152,52 @@ class SmsBrowser:
 
     def step(self, name, condition, timeout):
         self.stage = name
+        self.operation = name
         self.condition = condition
         self.stage_timeout = timeout
         self.stage_started = time.monotonic()
+
+    @staticmethod
+    def exception_info(error):
+        # Inspect known markers in memory only. Never retain exception text or
+        # arbitrary class names (which can themselves contain private values).
+        name = type(error).__name__
+        kind = name if name in ('Error', 'TimeoutError', 'TargetClosedError',
+                               'TypeError', 'AttributeError', 'RuntimeError',
+                               'CancelledError', 'Stop') else 'other'
+        message = str(error)
+        category = next((label for marker, label in (
+            ('strict mode violation', 'strict_mode'),
+            ('Execution context was destroyed', 'context_destroyed'),
+            ('Cannot find context with specified id', 'context_destroyed'),
+            ('Frame was detached', 'frame_detached'),
+            ('not attached to the DOM', 'element_detached')) if marker in message), 'other')
+        return dict(exception_type=kind, category=category)
+
+    async def read_dom(self, operation, read):
+        # Only repeat reads, never navigation, input or clicks. A transient
+        # document replacement must not skip the challenge/access checks.
+        for attempt in range(3):
+            self.operation = operation
+            self.require_origin()
+            try:
+                result = await read()
+                self.require_origin()
+                return result
+            except Exception as error:
+                info = self.exception_info(error)
+                self.last_read_error = dict(operation=self.operation, **info)
+                transient = (info['exception_type'] == 'Error' and info['category'] in
+                             ('context_destroyed', 'frame_detached', 'element_detached'))
+                transient |= operation == 'phone_editable' and info['exception_type'] == 'TimeoutError'
+                if not transient or attempt == 2:
+                    raise
+                print(json.dumps(dict(event='browser_read_retry', attempt=attempt + 1,
+                                      **self.last_read_error)), file=sys.stderr, flush=True)
+                await asyncio.sleep(.1)
+
+    def visible(self, selector):
+        return self.page.locator(selector).filter(visible=True).first
 
     async def diagnose(self, error=None, reason='login_failed'):
         """Never serialize exception messages, input, URL parameters or DOM text."""
@@ -168,6 +213,8 @@ class SmsBrowser:
         data = dict(recorded_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                     guard=self.fatal_context, reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required') else 'FAILED',
                     step=self.stage, condition=self.condition,
+                    operation=self.operation, exception=self.exception_info(error) if error else None,
+                    last_read_error=self.last_read_error,
                     timeout_seconds=self.stage_timeout,
                     elapsed_seconds=round(time.monotonic()-self.stage_started, 3),
                     url='unavailable', title='unavailable', screenshot='',
@@ -198,8 +245,9 @@ class SmsBrowser:
                         stream.write(png)
                     data['screenshot'] = str(path)
                     data['screenshot_status'] = 'saved_redacted'
-                except Exception:
+                except Exception as capture_error:
                     data['screenshot_status'] = 'capture_failed'
+                    data['screenshot_error'] = self.exception_info(capture_error)
         line = json.dumps(data, ensure_ascii=False)
         if self.state_dir is not None:
             try:
@@ -386,6 +434,7 @@ class SmsBrowser:
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
         self.step('navigate', 'DOMContentLoaded on fixed login URL', 15)
+        self.operation = 'page_goto'
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
         self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', LOGIN_PANEL_SECONDS)
@@ -397,23 +446,34 @@ class SmsBrowser:
                 raise Stop(3, 'verification_required')
             if await self.inside():
                 return
-            phone = self.page.locator(PHONE)
-            if await phone.is_visible() and await phone.is_editable():
+            if await self.phone_ready():
                 self.require_origin()
                 return
-            panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True)
-            if not clicked and not await panel.count():
-                login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True)
-                if await login.count() == 1:
+            panel_visible = await self.read_dom('login_panel_count',
+                lambda: self.page.locator(site.LOGIN_PANEL).filter(visible=True).count())
+            if not clicked and not panel_visible:
+                login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True).first
+                if await self.read_dom('login_button_visible', login.is_visible):
                     self.step('phone_input_ready', PHONE + ' visible and editable after header 登录 click',
                               round(max(0, deadline-time.monotonic()), 3))
                     self.require_origin()
+                    self.operation = 'login_button_click'
                     await login.click()
                     clicked = True
             await asyncio.sleep(.2)
         raise Stop(5, 'phone_input_missing' if clicked else 'login_panel_missing')
 
+    async def phone_ready(self):
+        if not await self.read_dom('phone_visible', lambda: self.visible(PHONE).is_visible()):
+            return False
+        # Re-resolve after each read: React may have replaced the input.
+        return await self.read_dom('phone_editable',
+                                   lambda: self.visible(PHONE).is_editable(timeout=500))
+
     async def inside(self):
+        return await self.read_dom('account_signal', self._inside)
+
+    async def _inside(self):
         # Require absence of the login panel AND the existing dyc account signal.
         # Live account signals remain pending verification; never infer success
         # from navigation, an absent error or a submit click alone.
@@ -429,7 +489,8 @@ class SmsBrowser:
             return 'verification'
         if await self.inside():
             return 'succeeded'
-        if await self.page.get_by_text('验证码错误', exact=False).filter(visible=True).count():
+        if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
+                '验证码错误', exact=False).filter(visible=True).count()):
             raise Stop(4, 'code_invalid')
         return 'pending'
 
@@ -437,36 +498,43 @@ class SmsBrowser:
         self.step('send_sms', PHONE + ' editable; ' + SEND + ' clickable', 3)
         self.require_origin()
         self.private_values.append(phone)
-        await self.page.locator(PHONE).fill(phone)
+        await self.visible(PHONE).fill(phone)
         self.require_origin()
-        await self.page.locator(SEND).filter(has_text='获取验证码').click()
+        await self.page.locator(SEND).filter(has_text='获取验证码').filter(visible=True).first.click()
 
     async def submit(self, code):
         self.step('submit_code', CODE + ' editable; ' + SUBMIT + ' clickable', 3)
         self.require_origin()
         self.private_values.append(code)
         try:
-            await self.page.locator(CODE).fill(code)
+            await self.visible(CODE).fill(code)
             self.require_origin()
-            await self.page.locator(SUBMIT).click()
+            await self.visible(SUBMIT).click()
         finally:
             # Clear DOM even when click/verification fails. The context is also
             # destroyed at timeout/cancel; never save storage_state.
             try:
-                await self.page.locator(CODE).fill('', timeout=500)
+                await self.visible(CODE).fill('', timeout=500)
             except Exception:
                 pass
 
     async def challenge(self):
+        return await self.read_dom('challenge_read', self._challenge)
+
+    async def _challenge(self):
         self.require_origin()
         for frame in self.page.frames:
             candidates = frame.locator(CHALLENGE).filter(visible=True)
+            self.operation = 'challenge_candidates_count'
             for index in range(await candidates.count()):
                 element = candidates.nth(index)
+                self.operation = 'challenge_bounds'
                 rect = await element.bounding_box()
                 if rect and rect['width'] >= 40 and rect['height'] >= 40:
                     owner = frame
+                    self.operation = 'challenge_tag'
                     if await element.evaluate('(e) => e.tagName') == 'IFRAME':
+                        self.operation = 'challenge_content_frame'
                         handle = await element.element_handle()
                         owner = await handle.content_frame() if handle else None
                         if owner is not None:

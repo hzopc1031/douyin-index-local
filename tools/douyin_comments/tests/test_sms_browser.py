@@ -97,6 +97,53 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.sends, 0)
             self.assertEqual(self.submits, 0)
 
+    async def test_duplicate_hidden_and_visible_inputs_still_become_ready(self):
+        async def duplicate(route):
+            await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + """
+            <script>
+            const panel=document.querySelector('#login-panel-new');
+            const visible=panel.cloneNode(true); visible.hidden=false;
+            document.body.append(visible, visible.cloneNode(true));
+            </script>""")
+        self.backend = duplicate
+        async with self.browser() as browser:
+            self.assertEqual(await browser.page.locator('#normal-input').count(), 3)
+            self.assertTrue(await browser.phone_ready())
+            self.assertEqual(await browser.visible('#normal-input').input_value(), '')
+            self.assertEqual(await browser.observe(), 'pending')
+            self.assertEqual((self.sends, self.submits), (0, 0))
+
+    async def test_actual_detached_iframe_read_recovers_without_skipping_challenge(self):
+        async with self.browser() as browser:
+            page = browser.page
+            await page.evaluate("""() => {
+                const f=document.createElement('iframe'); f.srcdoc='<p>synthetic</p>';
+                document.body.append(f);
+            }""")
+            handle = await page.locator('iframe').element_handle()
+            frame = await handle.content_frame()
+            await page.locator('iframe').evaluate('e=>e.remove()')
+            self.assertTrue(frame.is_detached())
+            class PageProxy:
+                stale = True
+                def __getattr__(self, name):
+                    return getattr(page, name)
+                @property
+                def frames(self):
+                    if self.stale:
+                        self.stale = False
+                        return [frame]
+                    return page.frames
+            browser.page = PageProxy()
+            try:
+                self.assertIsNone(await browser.challenge())
+                self.assertEqual(browser.last_read_error['category'], 'frame_detached')
+                self.assertEqual(browser.last_read_error['operation'], 'challenge_candidates_count')
+                await page.evaluate('challenge()')
+                self.assertIsNotNone(await browser.challenge())
+            finally:
+                browser.page = page
+
     async def test_start_stops_on_challenge_before_opening_login(self):
         async def blocked(route):
             await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + '<script>challenge()</script>')
