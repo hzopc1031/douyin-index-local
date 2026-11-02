@@ -181,6 +181,63 @@ class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.hub.store.update_job(queued['id'], 'failed')
 
 class InsightApiTests(_ApiTests):
+    async def test_all_saved_ranges_and_attempt_metadata_are_read_only(self):
+        q = {**QUERY, 'kind': 'audience'}
+        def saved(query, stamp, empty=False):
+            result = {'metadata': {**query, 'fetched_at': stamp}, 'no_data': empty,
+                      'data': {'dimensions': [{'dimension': 'gender', 'labels': []}]},
+                      'private_extra': 'SYNTHETIC_NOT_PUBLIC'}
+            self.hub.store.save_insight(query, result)
+        saved(q, '2025-01-08T00:00:00+08:00')
+        saved(q, '2025-01-09T00:00:00+08:00', empty=True)
+        old = {**q, 'start_date': '2022-01-01', 'end_date': '2022-01-07'}
+        saved(old, '2022-01-08T00:00:00+08:00')
+        empty = {**q, 'start_date': '2025-02-01', 'end_date': '2025-02-07'}
+        saved(empty, '2025-02-08T00:00:00+08:00', empty=True)
+        saved({**q, 'keywords': ['其他词']}, '2025-01-08T00:00:00+08:00')
+        saved({**q, 'kind': 'related'}, '2025-01-08T00:00:00+08:00')
+        failed, _ = self.hub.store.submit(old, 'admin', 'old-failed')
+        self.hub.store.update_job(failed['id'], 'failed', error={'code': 'business_error', 'message': 'SYNTHETIC_NOT_PUBLIC'})
+        for i in range(31):
+            job, _ = self.hub.store.submit({**q, 'keywords': ['其他词']}, 'admin', f'filler-{i}')
+            self.hub.store.update_job(job['id'], 'failed')
+        read = self.hub.store.issue_key('ranges-read', ['read'])
+        headers = {'Authorization': 'Bearer '+read['token']}
+        before = self.hub.store.get('daily'), self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
+        response = await self.client.get('/api/v1/insights/ranges?keyword=酵素&kind=audience', headers=headers)
+        self.assertEqual(response.status, 200)
+        data = await response.json()
+        self.assertEqual(data['ranges'], [
+            {'start_date': '2025-02-01', 'end_date': '2025-02-07', 'status': 'no_data'},
+            {'start_date': q['start_date'], 'end_date': q['end_date'], 'status': 'available'},
+            {'start_date': '2022-01-01', 'end_date': '2022-01-07', 'status': 'available'}])
+        self.assertEqual(len(data['attempts']), 1)
+        self.assertEqual(data['attempts'][0]['error_code'], 'business_error')
+        self.assertNotIn('SYNTHETIC_NOT_PUBLIC', json.dumps(data))
+        self.assertFalse(data['live_request'])
+        self.assertFalse(self.calls)
+        self.assertEqual(before, (self.hub.store.get('daily'), self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]))
+        # A listed historical range must remain readable after the online window moves on.
+        response = await self.client.get('/api/v1/insights', params={
+            'keyword': '酵素', 'kind': 'audience', 'start_date': old['start_date'], 'end_date': old['end_date']}, headers=headers)
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['status'], 'available')
+        # Historical reads must not relax either online submission endpoint.
+        for path, query in [('insights/queries', old), ('queries', {k:v for k,v in old.items() if k != 'kind'})]:
+            response = await self.client.post('/api/v1/'+path, json=query,
+                                             headers={**self.bearer, 'Idempotency-Key': 'reject-old-'+path.replace('/', '-')})
+            self.assertEqual(response.status, 400)
+            self.assertEqual((await response.json())['error']['code'], 'invalid_dates')
+        for start, end in [('2022-01-08','2022-01-07'), ('2022-01-01','2025-01-07'), ('invalid','2022-01-07')]:
+            response = await self.client.get('/api/v1/insights', params={
+                'keyword': '酵素', 'kind': 'audience', 'start_date': start, 'end_date': end}, headers=headers)
+            self.assertEqual(response.status, 400)
+        self.assertFalse(self.calls)
+        self.assertEqual((await self.client.get('/api/v1/insights/ranges?keyword=酵素&kind=audience')).status, 401)
+        for params in ['keyword=酵素', 'keyword=&kind=audience', 'keyword=酵素&kind=unknown',
+                       'keyword=酵素&kind=audience&extra=1', 'keyword=酵素&keyword=其他&kind=audience']:
+            self.assertEqual((await self.client.get('/api/v1/insights/ranges?'+params, headers=headers)).status, 400)
+
     async def test_priority_fifteen_seconds_and_http_diagnostics(self):
         import time
         related,_=self.hub.store.submit({**QUERY,'kind':'related'},'admin','priority-related')

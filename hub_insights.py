@@ -15,7 +15,7 @@ def related_end_lag_days():
         return 3
 
 
-def validate_insight(body):
+def validate_insight(body, *, historical=False):
     if type(body) is not dict:
         raise HubError('invalid_query', '请求须为 JSON 对象。')
     body = dict(body)
@@ -23,7 +23,7 @@ def validate_insight(body):
     if kind not in KINDS:
         raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
     requested_end = body.pop('requested_end_date', None)
-    query = validate_query(body)
+    query = validate_query(body, historical=historical)
     if kind == 'related':
         end = dt.date.fromisoformat(query['end_date'])
         start = dt.date.fromisoformat(query['start_date'])
@@ -35,7 +35,7 @@ def validate_insight(body):
             requested_end = requested_end or query['end_date']
             if start > max_end:
                 start = max_end - (end - start)
-            query = validate_query({**query, 'start_date': start.isoformat(), 'end_date': max_end.isoformat()})
+            query = validate_query({**query, 'start_date': start.isoformat(), 'end_date': max_end.isoformat()}, historical=historical)
         if requested_end is not None:
             try:
                 requested = dt.date.fromisoformat(requested_end)

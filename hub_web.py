@@ -42,7 +42,7 @@ SAFE_ERRORS = {
     'response_format': '平台返回格式异常，请检查官方页面。',
     'cooldown': '采集进程仍处于请求冷却期，任务已回到队列。',
     'busy': '采集进程正忙，任务已回到队列。',
-    'skipped_trend_no_data': '该词趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
+    'skipped_trend_no_data': '该词在相同日期段趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
     'no_data': '平台未返回该关键词在此日期范围的有效指数；可能未收录或该范围无数据，不代表指数为零。',
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
     'request_failed': '本次取数未完成，未自动重试。',
@@ -186,9 +186,11 @@ class Hub:
             with self.store.db:
                 self.store.db.execute('UPDATE jobs SET cache_hit=1 WHERE id=?', (row['id'],))
             return True
-        if query.get('kind') and self.store.trend_no_data(query['keywords'][0]):
+        source_trend = self.store.trend_no_data(query) if query.get('kind') else None
+        if source_trend:
             code = 'skipped_trend_no_data'
-            self.store.update_job(row['id'], 'no_data', error={'code': code, 'message': SAFE_ERRORS[code]})
+            self.store.update_job(row['id'], 'no_data', error={
+                'code': code, 'message': SAFE_ERRORS[code], 'source_trend': source_trend})
             return True
         now = time.time()
         if now - self.store.get('last_attempt_at', 0) < 15:
@@ -358,6 +360,7 @@ def openapi():
         ('/api/v1/series', 'get', '查询本地已存储趋势，不触发平台取数'),
         ('/api/v1/history', 'get', '查询采集历史'),
         ('/api/v1/insights', 'get', '读取已保存的关联词或人群画像'),
+        ('/api/v1/insights/ranges', 'get', '列出全部已存扩展日期段及每段最近任务状态（只读）'),
         ('/api/v1/insights/queries', 'post', '提交扩展采集任务（试验接入）'),
         ('/api/v1/export.csv', 'get', '导出已存储趋势 CSV'),
     ]:
@@ -374,6 +377,8 @@ def openapi():
                 'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':['douyin']},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
         if path == '/api/v1/insights':
             operation['parameters']=[{'in':'query','name':k,'required':k in ('keyword','kind','end_date'),'schema':{'type':'string'}} for k in ('keyword','kind','start_date','end_date')]
+        if path == '/api/v1/insights/ranges':
+            operation['parameters']=[{'in':'query','name':k,'required':True,'schema':{'type':'string'}} for k in ('keyword','kind')]
         if '{job_id}' in path:
             operation['parameters'] = [{'in': 'path', 'name': 'job_id', 'required': True, 'schema': {'type': 'string'}}]
         if path.endswith(('series', 'export.csv')):
@@ -567,6 +572,18 @@ def mount(app, hub):
         return web.Response(body=('\ufeff' + output.getvalue()).encode(), content_type='text/csv',
                             charset='utf-8', headers={'Content-Disposition': 'attachment; filename="index-series.csv"'})
 
+    async def insight_ranges(request):
+        require(request)
+        if set(request.query) - {'keyword', 'kind'} or any(len(request.query.getall(k)) != 1 for k in request.query):
+            raise HubError('invalid_parameters', '仅接受单个 keyword 和 kind。')
+        word, kind = request.query.get('keyword'), request.query.get('kind')
+        if kind not in {'audience', 'related'}:
+            raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
+        if (not isinstance(word, str) or not 1 <= len(word) <= 100 or word != word.strip()
+                or any(ord(c) < 32 or ord(c) == 127 for c in word)):
+            raise HubError('invalid_keywords', '请输入一个有效关键词，每词 1—100 字。')
+        return reply(s.insight_ranges(word, kind))
+
     async def insights(request):
         require(request)
         from hub_insights import validate_insight
@@ -575,7 +592,7 @@ def mount(app, hub):
         body={'platform':request.query.get('platform','douyin'),'keywords':[request.query.get('keyword')],
               'kind':request.query.get('kind'),'end_date':request.query.get('end_date')}
         if request.query.get('start_date'):body['start_date']=request.query['start_date']
-        query=validate_insight(body)
+        query=validate_insight(body, historical=True)
         result=s.insight(query)
         newer_no_data=None
         if result and result.get('no_data'):
@@ -592,8 +609,9 @@ def mount(app, hub):
 
     async def history(request):
         require(request)
-        s.import_results(hub.root / 'results')
-        return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()]})
+        return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()],
+                      'latest_available_date': s.latest_available_date(),
+                      'latest_available_date_source': 'stored_search_index'})
 
     async def keys(request):
         require(request, admin=True)
@@ -644,6 +662,7 @@ def mount(app, hub):
     app.router.add_get('/api/v1/export.csv', export)
     app.router.add_get('/api/v1/history', history)
     app.router.add_get('/api/v1/insights', insights)
+    app.router.add_get('/api/v1/insights/ranges', insight_ranges)
     app.router.add_post('/api/v1/insights/queries', submit)
     app.router.add_route('GET', '/api/v1/keys', keys)
     app.router.add_route('POST', '/api/v1/keys', keys)

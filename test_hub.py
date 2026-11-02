@@ -50,6 +50,27 @@ class StoreTests(unittest.TestCase):
         self.s.ingest(newer)
         self.assertEqual(len(self.s.history()), 2)
 
+    def test_latest_available_date_uses_all_valid_points_not_latest_dataset_range(self):
+        self.assertIsNone(self.s.latest_available_date())
+        result = public_result(fixture())
+        result['rows'][-1]['search_index'] = 0  # Zero is an observed value.
+        self.s.ingest(result)
+        for index in range(31):
+            older = public_result(fixture())
+            older['metadata']['start_date'] = '2024-12-01'
+            older['metadata']['end_date'] = '2024-12-07'
+            older['metadata']['fetched_at'] = (dt.datetime.now(TZ) + dt.timedelta(seconds=index+1)).isoformat()
+            for row in older['rows']:
+                row['date'] = row['date'].replace('2025-01', '2024-12')
+            self.s.ingest(older)
+        self.assertEqual(len(self.s.history()), 30)
+        self.assertTrue(all(d['metadata']['end_date'] == '2024-12-07' for d in self.s.history()))
+        with self.s.db:
+            self.s.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                              ('douyin', 'search_index', '全国', '合成词', '2025-01-08',
+                               'null', '123', time.time(), 'synthetic'))
+        self.assertEqual(self.s.latest_available_date(), END)
+
     def test_existing_duplicates_migrate_without_losing_points(self):
         from hub_store import encode
         result = public_result(fixture())
@@ -184,6 +205,44 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.temp.cleanup()
+
+    async def test_history_get_is_read_only_even_with_new_results_on_disk(self):
+        folder = self.root / 'results' / 'synthetic'
+        folder.mkdir(parents=True)
+        (folder / 'result.json').write_text(json.dumps(fixture()))
+        store = self.hub.store
+        before = list(store.db.iterdump())
+        changes = store.db.total_changes
+        with patch.object(store, 'import_results', side_effect=AssertionError('GET must not import')):
+            store.db.execute('PRAGMA query_only=ON')
+            try:
+                for headers in (self.admin, self.bearer):
+                    response = await self.client.get('/api/v1/history', headers=headers)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual((await response.json())['datasets'], [])
+            finally:
+                store.db.execute('PRAGMA query_only=OFF')
+        self.assertEqual(store.db.total_changes, changes)
+        self.assertEqual(list(store.db.iterdump()), before)
+        self.assertEqual(self.calls, [])
+
+    async def test_startup_still_imports_existing_results(self):
+        folder = self.root / 'results' / 'synthetic'
+        folder.mkdir(parents=True)
+        (folder / 'result.json').write_text(json.dumps(fixture()))
+        await self.hub.start({})
+        self.hub.worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.hub.worker_task
+        response = await self.client.get('/api/v1/history', headers=self.admin)
+        self.assertEqual(response.status, 200)
+        datasets = (await response.json())['datasets']
+        self.assertEqual(len(datasets), 1)
+        self.assertEqual(datasets[0]['metadata']['end_date'], END)
+        body = await response.json()
+        self.assertEqual(body['latest_available_date'], END)
+        self.assertEqual(body['latest_available_date_source'], 'stored_search_index')
+        self.assertEqual(self.calls, [])
 
     async def test_request_source_admin_only_and_idempotent(self):
         headers = {**self.bearer, 'Idempotency-Key': 'source-test', 'User-Agent': 'WorkBuddy-Test/1', 'X-Forwarded-For': '203.0.113.99'}

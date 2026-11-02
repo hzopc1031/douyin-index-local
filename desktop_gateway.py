@@ -72,7 +72,9 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
             if anonymous_admin or (auth_enabled and hmac.compare_digest(auth.encode(), expected)):
                 principal = {'id': 'admin', 'admin': True, 'scopes': ['read', 'query']}
             elif bearer_auth:
-                principal = hub.store.key_principal(auth[7:])
+                principal = hub.store.key_principal(
+                    auth[7:], record_usage=not (
+                        request.path == '/api/v1/history' and request.method in ('GET', 'HEAD')))
             if principal is None and ticket_auth:
                 expiry = tickets.pop(hashlib.sha256(request.query['ticket'].encode()).digest(), 0)
                 if expiry > clock():

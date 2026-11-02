@@ -42,7 +42,7 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
 
 
-def validate_query(body):
+def validate_query(body, *, historical=False):
     if type(body) is not dict or set(body) - {'platform', 'keywords', 'start_date', 'end_date'}:
         raise HubError('invalid_query', '仅接受 platform、keywords、start_date、end_date。')
     if body.get('platform', 'douyin') != 'douyin':
@@ -61,12 +61,14 @@ def validate_query(body):
             earliest = today.replace(year=today.year-2)
         except ValueError:
             earliest = today.replace(year=today.year-2, day=28)
-        if end.isoformat() != end_text or end >= today or start < earliest:
+        if end.isoformat() != end_text or end >= today or (not historical and start < earliest):
             raise ValueError
         if not 0 <= (end-start).days < 731 or ('start_date' in body and body['start_date'] != start.isoformat()):
             raise ValueError
     except (ValueError, TypeError, OverflowError):
-        raise HubError('invalid_dates', '日期格式 YYYY-MM-DD，仅接受最近两个日历年内的过去日期；截止日以官方页面为准。') from None
+        message = ('日期格式 YYYY-MM-DD，须为过去日期，起止有序且最多 731 天。' if historical else
+                   '日期格式 YYYY-MM-DD，仅接受最近两个日历年内的过去日期；截止日以官方页面为准。')
+        raise HubError('invalid_dates', message) from None
     return {'platform': 'douyin', 'keywords': list(words), 'start_date': start.isoformat(),
             'end_date': end.isoformat()}
 
@@ -171,15 +173,16 @@ class Store:
                              token[:12], encode(sorted(set(scopes))), now, now + days * 86400))
         return {'id': identifier, 'token': token, 'expires_at': now + days * 86400}
 
-    def key_principal(self, token):
+    def key_principal(self, token, *, record_usage=True):
         if not isinstance(token, str) or not token.startswith('idx_') or len(token) > 150:
             return None
         row = self.db.execute('SELECT * FROM keys WHERE hash=? AND revoked=0 AND expires>?',
                               (hashlib.sha256(token.encode()).hexdigest(), time.time())).fetchone()
         if not row:
             return None
-        with self.db:
-            self.db.execute('UPDATE keys SET last_used=? WHERE id=?', (time.time(), row['id']))
+        if record_usage:
+            with self.db:
+                self.db.execute('UPDATE keys SET last_used=? WHERE id=?', (time.time(), row['id']))
         return {'id': row['id'], 'scopes': json.loads(row['scopes']), 'admin': False}
 
     def list_keys(self):
@@ -278,6 +281,34 @@ class Store:
                 return result
         return None
 
+    def insight_ranges(self, keyword, kind):
+        """Read all saved ranges and latest task metadata; never return raw results."""
+        ranges, attempts = {}, {}
+        def matches(meta):
+            return (meta.get('platform') == 'douyin' and meta.get('kind') == kind
+                    and meta.get('keywords') == [keyword])
+        for row in self.db.execute('SELECT result FROM insights ORDER BY fetched DESC, id DESC'):
+            result = json.loads(row['result'])
+            meta = result['metadata']
+            if not matches(meta):
+                continue
+            key = (meta['start_date'], meta['end_date'])
+            status = 'no_data' if result.get('no_data') else 'available'
+            # Match GET /insights: a later empty answer does not hide saved data.
+            if key not in ranges or (ranges[key]['status'] == 'no_data' and status == 'available'):
+                ranges[key] = dict(start_date=key[0], end_date=key[1], status=status)
+        for row in self.db.execute('SELECT query,status,error,created,updated FROM jobs ORDER BY created DESC, id DESC'):
+            query = json.loads(row['query'])
+            if not matches(query):
+                continue
+            key = (query['start_date'], query['end_date'])
+            if key not in attempts:
+                error = json.loads(row['error']) if row['error'] else {}
+                attempts[key] = dict(start_date=key[0], end_date=key[1], status=row['status'],
+                                     error_code=error.get('code'), updated_at=row['updated'])
+        return {'ranges': sorted(ranges.values(), key=lambda r: (r['end_date'], r['start_date']), reverse=True),
+                'attempts': list(attempts.values()), 'live_request': False}
+
     def cached(self, query):
         if query.get('kind'):
             return self.insight(query, 86400)
@@ -289,34 +320,42 @@ class Store:
                 return result
         return None
 
-    def trend_no_data(self, keyword, within_seconds=86400):
+    def trend_no_data(self, query, within_seconds=86400):
+        """Return the empty trend's provenance only for this exact query range."""
+        keyword = query['keywords'][0]
+        scope = {key: query[key] for key in ('platform', 'start_date', 'end_date')}
         latest = None
         for row in self.db.execute(
-                "SELECT query,status,result FROM jobs WHERE updated>=? "
+                "SELECT id,query,status,result FROM jobs WHERE updated>=? "
                 "AND status IN ('no_data','partial','succeeded') ORDER BY updated DESC,rowid DESC",
                 (time.time() - within_seconds,)):
-            query = json.loads(row['query'])
-            if not query.get('kind') and keyword in query.get('keywords', []):
+            trend = json.loads(row['query'])
+            if (not trend.get('kind') and keyword in trend.get('keywords', [])
+                    and all(trend.get(key) == value for key, value in scope.items())):
                 latest = row
                 break
         if latest is None:
-            return False
+            return None
         result = json.loads(latest['result']) if latest['result'] else {}
         rows = [r for r in result.get('rows', []) if r.get('keyword') == keyword]
         if any(r.get('search_index') is not None for r in rows):
-            return False
+            return None
         if not rows and latest['status'] != 'no_data':
-            return False
-        # Historical nonempty observations prevent classifying a known term as empty.
-        for row in self.db.execute('SELECT value FROM points WHERE keyword=? AND metric=?',
-                                   (keyword, 'search_index')):
+            return None
+        # A saved nonempty observation in this range still prevents a skip.
+        for row in self.db.execute('SELECT value FROM points WHERE platform=? AND keyword=? '
+                                   'AND metric=? AND day BETWEEN ? AND ?',
+                                   (scope['platform'], keyword, 'search_index',
+                                    scope['start_date'], scope['end_date'])):
             if json.loads(row['value']) is not None:
-                return False
-        for row in self.db.execute('SELECT result FROM datasets'):
+                return None
+        for row in self.db.execute('SELECT result FROM datasets WHERE json_extract(query,\'$.platform\')=?',
+                                   (scope['platform'],)):
             if any(r.get('keyword') == keyword and r.get('search_index') is not None
+                   and scope['start_date'] <= r.get('date', '') <= scope['end_date']
                    for r in json.loads(row['result']).get('rows', [])):
-                return False
-        return True
+                return None
+        return {'job_id': latest['id'], 'keyword': keyword, **scope}
 
     def job(self, identifier):
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identifier,)).fetchone()
@@ -386,6 +425,14 @@ class Store:
     def history(self, limit=30):
         return [dict(row) | {'metadata': json.loads(row['result'])['metadata']}
                 for row in self.db.execute('SELECT id,fetched,result FROM datasets ORDER BY fetched DESC LIMIT ?', (limit,))]
+
+    def latest_available_date(self):
+        """Latest locally known usable search day, not a claim about upstream freshness."""
+        row = self.db.execute(
+            "SELECT MAX(day) FROM points WHERE platform='douyin' AND metric='search_index' "
+            "AND region='全国' AND value!='null' AND day<?",
+            (dt.datetime.now(TZ).date().isoformat(),)).fetchone()
+        return row[0]
 
     def series(self, platform, keyword, start=None, end=None):
         if platform != 'douyin':

@@ -60,7 +60,7 @@ OpenAPI 3.1 文档：`GET /api/v1/openapi.json`，需要有效 Key 或管理登�
 | GET `/jobs` | read | 最近三十个任务 |
 | GET `/jobs/{job_id}` | read | 任务状态、标准日序列与完整性 |
 | GET `/series` | read | 读取数据库趋势；必填 keyword，可选 platform、start_date、end_date |
-| GET `/history` | read | 最近三十组采集结果与口径 |
+| GET `/history` | read | 只读最近三十组采集结果与口径，以及本地已知最新搜索日 |
 | GET `/export.csv` | read | 同 series 参数，CSV 中缺失留空，关键词防表格公式注入 |
 | GET `/tls-certificate.pem` | read | 公共证书，绝不包含私钥 |
 | GET/POST `/keys`、DELETE `/keys/{id}` | 仅管理登录 | 创建、列出前缀或撤销密钥 |
@@ -111,7 +111,10 @@ Hub 持久模式下，`login_state` 与 `app._client()` 共用修复后的 `get_
 
 运行：原有 `douyin-index.service`，同一个 HTTPS 端口 8443，不新增公开管理端口。
 `.cloud-state/index-hub.sqlite3` 使用 WAL，保存任务、密钥哈希、平台日值和来源。
-既有 `results/*/result.json` 可导入，用户人工报告以独立 `user-confirmation.json` 为依据。
+既有 `results/*/result.json` 在网关启动时导入，用户人工报告以独立 `user-confirmation.json` 为依据。
+`GET /history` 只读取 SQLite，不扫描文件或导入；运行中新增的桌面结果要等下次网关启动才导入。
+Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
+历史 GET/HEAD 的 Bearer 鉴权也不更新密钥 `last_used`，确保这条请求链路不写数据库；其他接口仍记录密钥使用时间。
 原始结果、SQLite、会话、密码和证书私钥不提交 GitHub。
 
 应用进程设置 `INDEX_HUB_ENABLED=1` 后启动 0600 的 Unix socket，只有本机同账号可使用。
@@ -200,3 +203,35 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 手机号、验证码和截图不进日志、SQLite、结果或页面 storage；仅存在内存中，表单提交立即清空。日志兜底遮盖手机号及 phone/mobile/sms/otp/verify_code 等赋值，SMS 异常不格式化原文。Python 字符串不能保证清零；官方页面仍可能自行把手机号写进已授权的持久 profile。短信 DOM 规则集中于 `SMS_SELECTORS`。登录/二维码选择器已按 2026-10-31 公开页面 DOM 校准（未输入手机号、未发短信）：点击页头「登录」，可能跳转 `/jingxuan`，弹窗不在 iframe；验证码登录默认激活，保留 +86；发码是 span、提交是 div，等待控件启用后点击；协议文字仅作提示，没有勾选框。稳定 ID 优先，name/placeholder/aria/text 和 `login-full-panel-` 前缀作为回退。验证检测保留原规则并覆盖可见 verifycenter/verify iframe，忽略隐藏辅助 iframe。滑块尚未见到真实页面，几何/题目身份规则仍待验证，识别器逻辑未改。本次未作真实登录或取数验证。
 
 离线验收使用 `test_sms_browser.py` 的 127.0.0.1 假页面和真实 Qt，包含完整成功流程后的日志/临时文件/SQLite/API 响应泄露扫描。命令与 RSS 测量见 [README.md](README.md)；这些结果不等同真实短信或官方验证通过率。
+
+### 已存扩展日期段（可选网关升级）
+
+`GET /api/v1/insights/ranges?keyword=酵素&kind=audience` 接受一个 `keyword` 和
+`kind=audience|related`，需要 `read` 权限。仅扫描本地已存结果和任务，不调用浏览器或平台，
+不创建任务、不计在线尝试，不受 `/jobs` 最近 30 条限制。
+
+响应包含 `ranges`（去重的 `start_date`、`end_date`、`status=available|no_data`）、
+`attempts`（每段最新任务的起止日期、`status`、`error_code`、`updated_at`）和
+`live_request=false`。同段较新的空响应不会掩盖较早已存的有效数据。
+不返回画像内容、任务来源、原始错误消息或凭据；无历史返回两个空数组。
+
+该接口改动需重启 gateway 后才生效；不需要重启 desktop。仅替换 `hub.html` 时，
+旧网关的 404 会让网页回退到最近 30 条任务、本会话和当前范围已确认的数据，
+并明确注明可能遗漏更早日期段。其他读取错误显示列表读取失败，不能当成没有历史。
+
+`GET /insights` 的历史读取不受滚动的近两年下界限制，仍校验日期格式、过去日期、
+起止顺序和最多 731 天；在线 POST 仍执行原有近两年限制。网页同时保留本会话未提交/
+未确认的任务状态，引导用户沿用原批次继续提交，不把它误标为需要新建查询。
+
+### 完整日期跳过策略与初始日期
+
+`skipped_trend_no_data` 只匹配扩展任务实际 `platform`、关键词、`start_date`、`end_date`，
+在最近 24 小时内取该完整范围最新成功/部分/无数据趋势任务；同段已有非空历史值时不跳过。
+关联词经现有截止日规则截短后，若没有完全一致的趋势日期段，则不跳过。
+任务 `error.source_trend` 包含 `job_id`、`platform`、`keyword`、`start_date`、`end_date`，
+说明这是中枢跳过，并非关联/人群平台返回无数据。没有数据库迁移，不更改旧任务记录。
+
+`GET /history` 另外返回 `latest_available_date`（YYYY-MM-DD 或 null）及
+`latest_available_date_source=stored_search_index`。日期取全部本地全国抖音搜索日值中
+非空且早于上海今天的最大日期；不是最近采集任务的请求截止日，也不是官方实时最新日期。
+页面首次初始化截至该日最近 30 天；未知时留空，未确认批次保留原日期，刷新不覆盖用户选择。

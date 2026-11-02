@@ -104,7 +104,7 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
         return job
 
     async def test_skip_both_before_cooldown_and_daily_limit(self):
-        self.trend()
+        trend = self.trend()
         daily = {'date': '2026-10-28', 'count': 50}
         self.hub.store.set('daily', daily)
         last = time.time()
@@ -115,6 +115,9 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
             result = self.hub.store.job(job['id'])
             self.assertEqual(result['status'], 'no_data')
             self.assertEqual(result['error']['code'], 'skipped_trend_no_data')
+            self.assertEqual(result['error']['source_trend'], {
+                'job_id': trend['id'], 'platform': 'douyin', 'keyword': '合成词',
+                'start_date': self.q['start_date'], 'end_date': self.q['end_date']})
             self.assertEqual(self.hub.store.get('daily'), daily)
             self.assertEqual(self.hub.store.get('last_attempt_at'), last)
         self.bridge.assert_not_called()
@@ -126,7 +129,7 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
                 with self.hub.store.db:
                     self.hub.store.db.execute('DELETE FROM jobs')
                 self.trend(status, value, age)
-                self.assertFalse(self.hub.store.trend_no_data('合成词'))
+                self.assertFalse(self.hub.store.trend_no_data(self.q))
         job, _ = self.hub.store.submit({**self.q, 'kind': 'related'}, 'fixture', 'not-skipped')
         self.hub.bridge = Mock(return_value={'ok': False, 'state': 'unavailable'})
         await self.hub.run_one()
@@ -136,20 +139,56 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
 
     def test_latest_matching_and_historical_observations(self):
         self.trend('partial', None)
-        self.assertTrue(self.hub.store.trend_no_data('合成词'))
-        self.assertFalse(self.hub.store.trend_no_data('其他词'))
+        self.assertTrue(self.hub.store.trend_no_data(self.q))
+        self.assertFalse(self.hub.store.trend_no_data({**self.q, 'keywords': ['其他词']}))
         self.trend('succeeded', 0)
-        self.assertFalse(self.hub.store.trend_no_data('合成词'))
+        self.assertFalse(self.hub.store.trend_no_data(self.q))
         self.trend()
         s = self.hub.store
         with s.db:
             s.db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)',
                          ('synthetic', 'hash', encode(self.q), time.time(),
-                          encode({'rows': [{'keyword': '合成词', 'search_index': 0}]}), time.time()))
-        self.assertFalse(s.trend_no_data('合成词'))
+                          encode({'rows': [{'keyword': '合成词', 'date': '2026-10-20', 'search_index': 0}]}), time.time()))
+        self.assertFalse(s.trend_no_data(self.q))
         with s.db:
             s.db.execute('DELETE FROM datasets')
             s.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
                          ('douyin', 'search_index', '全国', '合成词', '2026-10-20',
                           '0', 'null', time.time(), 'synthetic'))
-        self.assertFalse(s.trend_no_data('合成词'))
+        self.assertFalse(s.trend_no_data(self.q))
+
+    async def test_other_ranges_and_platforms_do_not_skip(self):
+        self.trend()
+        self.hub.store.set('last_attempt_at', time.time())
+        for changes in ({'start_date': '2026-10-19'}, {'end_date': '2026-10-24'},
+                        {'platform': 'other'}, {'keywords': ['其他词']}):
+            with self.subTest(changes=changes):
+                query = {**self.q, **changes, 'kind': 'audience'}
+                self.assertIsNone(self.hub.store.trend_no_data(query))
+                job, _ = self.hub.store.submit(query, 'fixture', str(time.time_ns()))
+                self.assertFalse(await self.hub.run_one())
+                self.assertEqual(self.hub.store.job(job['id'])['status'], 'queued')
+                with self.hub.store.db:
+                    self.hub.store.db.execute('DELETE FROM jobs WHERE id=?', (job['id'],))
+        self.bridge.assert_not_called()
+
+    def test_matching_batch_and_newer_unrelated_trend(self):
+        self.q['keywords'].append('其他词')
+        source = self.trend()
+        query = {**self.q, 'keywords': ['合成词'], 'kind': 'audience'}
+        self.q = {**self.q, 'start_date': '2026-10-19'}
+        self.trend('succeeded', 123)
+        self.assertEqual(self.hub.store.trend_no_data(query)['job_id'], source['id'])
+
+    def test_old_observations_outside_range_do_not_suppress_skip(self):
+        self.trend()
+        s = self.hub.store
+        with s.db:
+            s.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                         ('douyin', 'search_index', '全国', '合成词', '2026-10-19',
+                          '0', 'null', time.time(), 'synthetic'))
+            s.db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)',
+                         ('synthetic', 'hash', encode(self.q), time.time(),
+                          encode({'rows': [{'keyword': '合成词', 'date': '2026-10-19',
+                                            'search_index': 0}]}), time.time()))
+        self.assertIsNotNone(s.trend_no_data(self.q))

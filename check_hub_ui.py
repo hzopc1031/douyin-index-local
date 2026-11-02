@@ -13,6 +13,7 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent
 START, END = '2026-10-25', '2026-10-31'
+DEFAULT_START = '2026-10-02'
 WORDS = ['杭州旅游', '西湖', '杭州美食', '灵隐寺', '杭州周末', '西溪湿地', '杭州住宿']
 RELATED = [dict(keyword=WORDS[i] if i < len(WORDS) else f'杭州主题 {i+1}',
                 relation_score=950-i*17, search_index=9000-i*101,
@@ -61,9 +62,10 @@ def run(output=None):
                     elif path == 'status':
                         data = dict(browser='browser_ready',login_state='cookie_present',login_mode='desktop',counts=dict(keywords=1,points=7),
                                     daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=None,last_result=None)
-                    elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [])
+                    elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['missing_latest'] and i==6 else 12000+i*900,
                                     composite_index=30000+i*1200) for i in range(7)])
@@ -79,9 +81,9 @@ def run(output=None):
                 context.route('**/*', route)
                 page.goto('http://hub-ui.invalid/')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
-                assert page.locator('#queryStart').input_value() == START
+                assert page.locator('#queryStart').input_value() == DEFAULT_START
                 assert page.locator('#queryEnd').input_value() == END
-                assert page.locator('#insightRangeLabel').inner_text().endswith('7 天')
+                assert page.locator('#insightRangeLabel').inner_text().endswith('30 天')
                 assert page.locator('#resultPanel-summary').is_visible()
                 assert page.locator('#relatedSummary .rank-row').count() == 3
                 assert page.locator('#audienceSummary .audience-leader').count() == 3
@@ -183,7 +185,7 @@ def run(output=None):
                 assert '—' in page.locator('#trendSummary').inner_text()
                 fixture['audience']='missing'
                 page.evaluate('loadInsights()')
-                assert '尚无' in page.locator('#audienceSummary').inner_text()
+                assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
                 page.locator('[data-platform=baidu]').click()
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
