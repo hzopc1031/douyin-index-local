@@ -108,6 +108,7 @@ class SmsBrowser:
         self.state_dir = private_dir(state_dir) if state_dir is not None else None
         self.diagnostic = None
         self.fatal_reason = ''
+        self.fatal_context = None
         self.step('initializing', 'browser startup', 35)
         self.startup_limits = startup_limits
         self.profile = Profile(profile)
@@ -141,12 +142,13 @@ class SmsBrowser:
             return self.diagnostic
         if isinstance(error, Stop):
             reason = error.reason
-        elif isinstance(error, (TimeoutError, asyncio.CancelledError)):
+        elif isinstance(error, (TimeoutError, asyncio.CancelledError)) or type(error).__name__ == 'TimeoutError':
             reason = 'login_step_timeout'
         elif error is not None:
             reason = 'browser_operation_failed'
         reason = self.fatal_reason or reason
-        data = dict(reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required') else 'FAILED',
+        data = dict(recorded_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                    guard=self.fatal_context, reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required') else 'FAILED',
                     step=self.stage, condition=self.condition,
                     timeout_seconds=self.stage_timeout,
                     elapsed_seconds=round(time.monotonic()-self.stage_started, 3),

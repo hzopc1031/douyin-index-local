@@ -7,6 +7,7 @@ through the documented Target.sendMessageToTarget transport. Nothing is logged.
 """
 import asyncio
 import json
+import re
 
 from .errors import Stop
 
@@ -23,10 +24,12 @@ class Target:
         self.pending = {}
         self.sequence = 0
         self.closed = False
+        self.protocol_error_code = None
 
     async def send(self, method, params=None):
         if self.closed:
             raise failure()
+        self.protocol_error_code = None
         self.sequence += 1
         number = self.sequence
         future = asyncio.get_running_loop().create_future()
@@ -51,6 +54,8 @@ class Target:
             pending = self.pending.get(data['id'])
             if pending is not None and not pending.done():
                 if 'error' in data:
+                    code = data['error'].get('code')
+                    self.protocol_error_code = code if type(code) is int else None
                     pending.set_exception(failure())
                 else:
                     pending.set_result(data.get('result', {}))
@@ -96,7 +101,9 @@ class Target:
         except Exception:
             if not self.owner.closing:
                 kind = self.info.get('type', 'unknown')
-                kind = kind if kind in ('iframe', 'worker', 'service_worker', 'shared_worker', 'page') else 'unknown'
+                kind = kind if isinstance(kind, str) and re.fullmatch('[a-z_]{1,32}', kind) else 'unknown'
+                self.owner.browser.fatal_context = dict(target_type=kind, command=method,
+                    protocol_error_code=self.protocol_error_code)
                 self.owner.browser.fatal_reason = getattr(self.owner.browser, 'fatal_reason', '') or 'child_guard_' + kind + '_' + method
                 self.owner.browser.fatal = True
                 ready = self.owner.ready.get(self.info['targetId'])
