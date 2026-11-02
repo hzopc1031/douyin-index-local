@@ -106,6 +106,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
         browser.context.remove_listener.side_effect = lambda event, callback: listeners.pop(event)
         body_read = asyncio.Event()
+        old_body = AsyncMock(return_value={'code': 0})
         async def body():
             await asyncio.sleep(.04)
             body_read.set()
@@ -113,7 +114,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         async def clicked():
             old = Mock(url='https://sso.amemv.com/passport/old', method='POST', redirected_from=None)
             listeners['response'](SimpleNamespace(request=old, status=200,
-                                                   json=AsyncMock(return_value={'code': 9})))
+                                                   json=old_body))
             first = Mock(url='https://sso.amemv.com/sms/send', method='POST', redirected_from=None)
             listeners['request'](first)
             redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
@@ -122,6 +123,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         browser.page.locator.return_value.filter.return_value.filter.return_value.first.click = AsyncMock(side_effect=clicked)
         with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
             result = await browser.send(PHONE)
+        old_body.assert_not_awaited()
         self.assertTrue(body_read.is_set())
         self.assertEqual(result['outcome'], 'accepted')
         self.assertEqual(listeners, {})

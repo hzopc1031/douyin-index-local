@@ -395,6 +395,7 @@ class SmsBrowser:
             await self.context.route('**/*', self.route)
             await self.context.route_web_socket('**/*', self.websocket)
             await self.context.add_cookies(await self.persistent.cookies(self.url))
+            self.context.on('request', self.redirected_request)
             self.context.on('response', self.response)
             self.page = await self.context.new_page()
             self.page.set_default_timeout(3000)
@@ -407,6 +408,12 @@ class SmsBrowser:
             await self.diagnose(error)
             await self.close()
             raise
+
+    def redirected_request(self, request):
+        # Playwright routes only see the first URL in a redirect chain.
+        if request.redirected_from is not None and request.method != 'GET':
+            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_redirect',
+                  **self.request_metadata(request.url, request.method))
 
     def response(self, response):
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):

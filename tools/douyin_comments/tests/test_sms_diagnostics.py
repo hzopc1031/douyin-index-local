@@ -161,3 +161,17 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e['path'] for e in posts], ['/device/register', '/send_activation', '/report'])
         self.assertNotIn('13900000000', logs.getvalue())
         self.assertNotIn('?', logs.getvalue())
+
+    async def test_redirected_non_get_request_is_audited_without_route(self):
+        browser = SmsBrowser('/unused')
+        log = io.StringIO()
+        with redirect_stderr(log):
+            browser.redirected_request(Mock(url='https://sdk.amemv.com/register?cookie=secret',
+                                            method='POST', redirected_from=object()))
+            browser.redirected_request(Mock(url='https://sdk.amemv.com/next',
+                                            method='GET', redirected_from=object()))
+        event = json.loads(log.getvalue())
+        self.assertEqual((event['method'], event['domain'], event['path']),
+                         ('POST', 'sdk.amemv.com', '/register'))
+        self.assertTrue(event['allowed'])
+        self.assertNotIn('secret', log.getvalue())
