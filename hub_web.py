@@ -358,6 +358,7 @@ def openapi():
         ('/api/v1/series', 'get', '查询本地已存储趋势，不触发平台取数'),
         ('/api/v1/history', 'get', '查询采集历史'),
         ('/api/v1/insights', 'get', '读取已保存的关联词或人群画像'),
+        ('/api/v1/insights/ranges', 'get', '列出全部已存扩展日期段及每段最近任务状态（只读）'),
         ('/api/v1/insights/queries', 'post', '提交扩展采集任务（试验接入）'),
         ('/api/v1/export.csv', 'get', '导出已存储趋势 CSV'),
     ]:
@@ -374,6 +375,8 @@ def openapi():
                 'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':['douyin']},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
         if path == '/api/v1/insights':
             operation['parameters']=[{'in':'query','name':k,'required':k in ('keyword','kind','end_date'),'schema':{'type':'string'}} for k in ('keyword','kind','start_date','end_date')]
+        if path == '/api/v1/insights/ranges':
+            operation['parameters']=[{'in':'query','name':k,'required':True,'schema':{'type':'string'}} for k in ('keyword','kind')]
         if '{job_id}' in path:
             operation['parameters'] = [{'in': 'path', 'name': 'job_id', 'required': True, 'schema': {'type': 'string'}}]
         if path.endswith(('series', 'export.csv')):
@@ -567,6 +570,18 @@ def mount(app, hub):
         return web.Response(body=('\ufeff' + output.getvalue()).encode(), content_type='text/csv',
                             charset='utf-8', headers={'Content-Disposition': 'attachment; filename="index-series.csv"'})
 
+    async def insight_ranges(request):
+        require(request)
+        if set(request.query) - {'keyword', 'kind'} or any(len(request.query.getall(k)) != 1 for k in request.query):
+            raise HubError('invalid_parameters', '仅接受单个 keyword 和 kind。')
+        word, kind = request.query.get('keyword'), request.query.get('kind')
+        if kind not in {'audience', 'related'}:
+            raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
+        if (not isinstance(word, str) or not 1 <= len(word) <= 100 or word != word.strip()
+                or any(ord(c) < 32 or ord(c) == 127 for c in word)):
+            raise HubError('invalid_keywords', '请输入一个有效关键词，每词 1—100 字。')
+        return reply(s.insight_ranges(word, kind))
+
     async def insights(request):
         require(request)
         from hub_insights import validate_insight
@@ -644,6 +659,7 @@ def mount(app, hub):
     app.router.add_get('/api/v1/export.csv', export)
     app.router.add_get('/api/v1/history', history)
     app.router.add_get('/api/v1/insights', insights)
+    app.router.add_get('/api/v1/insights/ranges', insight_ranges)
     app.router.add_post('/api/v1/insights/queries', submit)
     app.router.add_route('GET', '/api/v1/keys', keys)
     app.router.add_route('POST', '/api/v1/keys', keys)

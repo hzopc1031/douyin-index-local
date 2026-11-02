@@ -278,6 +278,34 @@ class Store:
                 return result
         return None
 
+    def insight_ranges(self, keyword, kind):
+        """Read all saved ranges and latest task metadata; never return raw results."""
+        ranges, attempts = {}, {}
+        def matches(meta):
+            return (meta.get('platform') == 'douyin' and meta.get('kind') == kind
+                    and meta.get('keywords') == [keyword])
+        for row in self.db.execute('SELECT result FROM insights ORDER BY fetched DESC, id DESC'):
+            result = json.loads(row['result'])
+            meta = result['metadata']
+            if not matches(meta):
+                continue
+            key = (meta['start_date'], meta['end_date'])
+            status = 'no_data' if result.get('no_data') else 'available'
+            # Match GET /insights: a later empty answer does not hide saved data.
+            if key not in ranges or (ranges[key]['status'] == 'no_data' and status == 'available'):
+                ranges[key] = dict(start_date=key[0], end_date=key[1], status=status)
+        for row in self.db.execute('SELECT query,status,error,created,updated FROM jobs ORDER BY created DESC, id DESC'):
+            query = json.loads(row['query'])
+            if not matches(query):
+                continue
+            key = (query['start_date'], query['end_date'])
+            if key not in attempts:
+                error = json.loads(row['error']) if row['error'] else {}
+                attempts[key] = dict(start_date=key[0], end_date=key[1], status=row['status'],
+                                     error_code=error.get('code'), updated_at=row['updated'])
+        return {'ranges': sorted(ranges.values(), key=lambda r: (r['end_date'], r['start_date']), reverse=True),
+                'attempts': list(attempts.values()), 'live_request': False}
+
     def cached(self, query):
         if query.get('kind'):
             return self.insight(query, 86400)
