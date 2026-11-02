@@ -5,6 +5,17 @@ systemd/ 下两个 unit 仅作模板，不自动安装；desktop 启动桌面和
 INDEX_HUB_STATE_DIR 默认项目下 .cloud-state；两服务须配置同一目录以共享 socket、SQLite、access.json 和证书。
 INDEX_HUB_LOG_DIR 默认项目下 logs；Python 日志只写轮转文件（INDEX_HUB_LOG_STDERR=1 才复制到 stderr），进程输出追加到 *.stdout.log，由 deploy/logrotate/douyin-index 轮转。
 INDEX_HUB_BIND 默认 0.0.0.0，INDEX_HUB_PORT 默认 8443（1–65535）。
+`INDEX_HUB_AUTH_ENABLED` 默认 `1`（开启管理员 HTTP Basic 认证）；仅精确值 `0` 关闭，其他值仍开启。关闭时不读取 `access.json`，启动日志 `gateway.log` 写一行匿名管理员访问警告；首页、状态及管理员功能无需 Basic。显式提交的 Bearer API Key 仍校验有效性和权限，CSRF、Origin、请求限流及采集限制保持原样。此开关不改变抖音登录状态。
+
+临时关闭只配置在服务器 `/etc/systemd/system/douyin-index-gateway.service.d/90-auth-toggle.conf`：
+
+```ini
+[Service]
+Environment=INDEX_HUB_AUTH_ENABLED=0
+```
+
+由 root 写入后执行 `systemctl daemon-reload && systemctl restart douyin-index-gateway.service`。恢复时将值改为 `1` 并执行相同命令；不更改凭证文件或权限。服务模板和源码始终默认开启，仓库不保存服务器的关闭配置。
+
 启动桌面前，以服务账号运行 x11vnc -storepasswd，将口令保存到状态目录的 vnc.passwd 并 chmod 600；缺失或权限过宽会拒绝启动。
 
 ### 实验短信与扫码登录
