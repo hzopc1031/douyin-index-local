@@ -35,12 +35,12 @@ def run(output=None):
         browser = pw.chromium.launch()
         try:
             for width,height in [(430,932),(1280,900)]:
-                context = browser.new_context(viewport=dict(width=width,height=height), locale='zh-CN', timezone_id='Asia/Shanghai', service_workers='block')
+                context = browser.new_context(viewport=dict(width=width,height=height), has_touch=width==430, is_mobile=width==430, locale='zh-CN', timezone_id='Asia/Shanghai', service_workers='block')
                 page = context.new_page()
-                page.clock.set_fixed_time(datetime(2026, 11, 2, tzinfo=timezone.utc))
-                errors, unexpected, writes = [], [], []
+                page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
+                errors, unexpected, writes, status_reads = [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False}
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'login': 'cookie_present', 'paused': None}
 
                 def route(request_route):
                     request = request_route.request
@@ -60,8 +60,9 @@ def run(output=None):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
                     elif path == 'platforms': data = dict(platforms=PLATFORMS)
                     elif path == 'status':
-                        data = dict(browser='browser_ready',login_state='cookie_present',login_mode='desktop',counts=dict(keywords=1,points=7),
-                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=None,last_result=None)
+                        status_reads.append(request.url)
+                        data = dict(browser='browser_ready',login_state=fixture['login'],login_mode='desktop',counts=dict(keywords=1,points=7),
+                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None)
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
@@ -91,7 +92,55 @@ def run(output=None):
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 if output:
                     page.evaluate("""() => {const n=document.createElement('div');n.textContent='离线合成样例 · 未调用真实查询';n.style='float:right;font-size:9px;font-weight:400;letter-spacing:0;color:#b2c8bc;padding-top:5px';document.querySelector('.brand').append(n)}""")
-                    page.screenshot(path=str(output/f'hub-ui2-result-{"mobile" if width==430 else "desktop"}.png'))
+                    page.screenshot(path=str(output/f'hub-tips-{"mobile" if width==430 else "desktop"}.png'))
+                # Native popovers: touch, mouse hover, keyboard, dismissal and viewport bounds.
+                tip = page.locator('#relatedSummary .info-button')
+                popup = page.locator('#' + tip.get_attribute('aria-describedby'))
+                assert tip.get_attribute('aria-controls') == popup.get_attribute('id')
+                assert tip.get_attribute('aria-expanded') == 'false'
+                assert not popup.is_visible()
+                assert '关联分不是概率' not in page.locator('#relatedSummary').inner_text()
+                assert '关联词数据到 10-31' in page.locator('#relatedSummary').inner_text()
+                if width == 430:
+                    tip.tap()
+                else:
+                    tip.hover()
+                    assert popup.is_visible()
+                    popup.hover()
+                    assert popup.is_visible()  # Hovered explanation remains readable.
+                    page.locator('h2').filter(has_text='关键词洞察').hover()
+                    assert not popup.is_visible()
+                    tip.click()
+                assert popup.is_visible()
+                assert tip.get_attribute('aria-expanded') == 'true'
+                assert '关联分不是概率' in popup.inner_text()
+                bounds = popup.bounding_box()
+                assert bounds['x'] >= 0 and bounds['x'] + bounds['width'] <= width
+                assert bounds['y'] >= 0 and bounds['y'] + bounds['height'] <= height
+                if output and width == 430:
+                    page.screenshot(path=str(output/'hub-tips-popover-mobile.png'))
+                before_reads = len(status_reads)
+                page.clock.fast_forward(15000)
+                assert len(status_reads) == before_reads
+                assert popup.is_visible()
+                page.keyboard.press('Escape')
+                assert not popup.is_visible()
+                assert tip.get_attribute('aria-expanded') == 'false'
+                tip.focus()
+                page.keyboard.press('Enter')
+                assert popup.is_visible()
+                page.keyboard.press('Escape')
+                assert tip.evaluate('(n) => n === document.activeElement')
+                page.keyboard.press('Space')
+                assert popup.is_visible()
+                heading = page.get_by_role('heading', name='关键词洞察', exact=True)
+                heading.tap() if width == 430 else heading.click()
+                assert not popup.is_visible()
+                assert tip.get_attribute('aria-expanded') == 'false'
+                assert not writes
+                page.clock.fast_forward(15000)
+                page.wait_for_function('!refreshing')
+                assert len(status_reads) > before_reads
                 page.get_by_role('tab', name='关联需求', exact=True).click()
                 assert page.locator('#relatedData .rank-row').count() == 10
                 assert page.locator('#relatedData tbody tr:visible').count() == 0
@@ -124,7 +173,7 @@ def run(output=None):
                 page.locator('[data-range=query][data-period="30d"]').click()
                 assert page.locator('#queryStart').input_value() == '2026-10-02'
                 if output and width==430:
-                    page.screenshot(path=str(output/'hub-ui2-range-mobile.png'))
+                    page.screenshot(path=str(output/'hub-tips-range-mobile.png'))
                 expected = {'7d':'2026-10-25','3m':'2026-08-01','6m':'2026-05-01','12m':'2025-11-01'}
                 for period,start in expected.items():
                     page.locator(f'[data-range=query][data-period="{period}"]').click()
@@ -183,6 +232,10 @@ def run(output=None):
                 fixture['missing_latest']=True
                 page.evaluate('loadSeries()')
                 assert '—' in page.locator('#trendSummary').inner_text()
+                fixture['related']='no_data'
+                page.evaluate('loadInsights()')
+                assert ''.join(page.locator('#relatedSummary').inner_text().split()) == '无数据ⓘ'
+                fixture['related']='available'
                 fixture['audience']='missing'
                 page.evaluate('loadInsights()')
                 assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
@@ -198,6 +251,13 @@ def run(output=None):
                 assert [path for path,_ in writes]==['queries','insights/queries','insights/queries']
                 assert writes[0][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
                 assert not page.locator('#queryDialog').is_visible()
+                fixture.update(login='expired', paused=dict(code='authentication_required'))
+                page.evaluate('refresh()')
+                assert '需要重新登录' in page.locator('#browserBadge').inner_text()
+                assert page.locator('#notice').is_visible()
+                assert '恢复采集' in page.locator('#notice').inner_text()
+                assert not page.locator('#browserBadge .info-button').count()
+                fixture.update(login='cookie_present', paused=None)
                 fixture['history']=False
                 page.evaluate('sessionStorage.clear()')
                 page.reload()
@@ -207,7 +267,7 @@ def run(output=None):
                 assert len(writes)==3
                 assert not unexpected, unexpected
                 assert not errors, errors
-                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard, full data, missing values, offline submit')
+                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
                 context.close()
         finally:
             browser.close()
