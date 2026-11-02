@@ -185,6 +185,41 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.temp.cleanup()
 
+    async def test_history_get_is_read_only_even_with_new_results_on_disk(self):
+        folder = self.root / 'results' / 'synthetic'
+        folder.mkdir(parents=True)
+        (folder / 'result.json').write_text(json.dumps(fixture()))
+        store = self.hub.store
+        before = list(store.db.iterdump())
+        changes = store.db.total_changes
+        with patch.object(store, 'import_results', side_effect=AssertionError('GET must not import')):
+            store.db.execute('PRAGMA query_only=ON')
+            try:
+                for headers in (self.admin, self.bearer):
+                    response = await self.client.get('/api/v1/history', headers=headers)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual((await response.json())['datasets'], [])
+            finally:
+                store.db.execute('PRAGMA query_only=OFF')
+        self.assertEqual(store.db.total_changes, changes)
+        self.assertEqual(list(store.db.iterdump()), before)
+        self.assertEqual(self.calls, [])
+
+    async def test_startup_still_imports_existing_results(self):
+        folder = self.root / 'results' / 'synthetic'
+        folder.mkdir(parents=True)
+        (folder / 'result.json').write_text(json.dumps(fixture()))
+        await self.hub.start({})
+        self.hub.worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self.hub.worker_task
+        response = await self.client.get('/api/v1/history', headers=self.admin)
+        self.assertEqual(response.status, 200)
+        datasets = (await response.json())['datasets']
+        self.assertEqual(len(datasets), 1)
+        self.assertEqual(datasets[0]['metadata']['end_date'], END)
+        self.assertEqual(self.calls, [])
+
     async def test_request_source_admin_only_and_idempotent(self):
         headers = {**self.bearer, 'Idempotency-Key': 'source-test', 'User-Agent': 'WorkBuddy-Test/1', 'X-Forwarded-For': '203.0.113.99'}
         response = await self.client.post('/api/v1/queries', headers=headers, json=QUERY)

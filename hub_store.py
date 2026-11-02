@@ -173,15 +173,16 @@ class Store:
                              token[:12], encode(sorted(set(scopes))), now, now + days * 86400))
         return {'id': identifier, 'token': token, 'expires_at': now + days * 86400}
 
-    def key_principal(self, token):
+    def key_principal(self, token, *, record_usage=True):
         if not isinstance(token, str) or not token.startswith('idx_') or len(token) > 150:
             return None
         row = self.db.execute('SELECT * FROM keys WHERE hash=? AND revoked=0 AND expires>?',
                               (hashlib.sha256(token.encode()).hexdigest(), time.time())).fetchone()
         if not row:
             return None
-        with self.db:
-            self.db.execute('UPDATE keys SET last_used=? WHERE id=?', (time.time(), row['id']))
+        if record_usage:
+            with self.db:
+                self.db.execute('UPDATE keys SET last_used=? WHERE id=?', (time.time(), row['id']))
         return {'id': row['id'], 'scopes': json.loads(row['scopes']), 'admin': False}
 
     def list_keys(self):

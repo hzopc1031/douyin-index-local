@@ -609,7 +609,6 @@ def mount(app, hub):
 
     async def history(request):
         require(request)
-        s.import_results(hub.root / 'results')
         return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()]})
 
     async def keys(request):

@@ -111,7 +111,10 @@ Hub 持久模式下，`login_state` 与 `app._client()` 共用修复后的 `get_
 
 运行：原有 `douyin-index.service`，同一个 HTTPS 端口 8443，不新增公开管理端口。
 `.cloud-state/index-hub.sqlite3` 使用 WAL，保存任务、密钥哈希、平台日值和来源。
-既有 `results/*/result.json` 可导入，用户人工报告以独立 `user-confirmation.json` 为依据。
+既有 `results/*/result.json` 在网关启动时导入，用户人工报告以独立 `user-confirmation.json` 为依据。
+`GET /history` 只读取 SQLite，不扫描文件或导入；运行中新增的桌面结果要等下次网关启动才导入。
+Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
+历史 GET/HEAD 的 Bearer 鉴权也不更新密钥 `last_used`，确保这条请求链路不写数据库；其他接口仍记录密钥使用时间。
 原始结果、SQLite、会话、密码和证书私钥不提交 GitHub。
 
 应用进程设置 `INDEX_HUB_ENABLED=1` 后启动 0600 的 Unix socket，只有本机同账号可使用。
