@@ -1,4 +1,5 @@
 """Synthetic failure evidence; no network, real credentials or profiles."""
+import asyncio
 from contextlib import redirect_stderr
 import io
 import base64
@@ -36,7 +37,7 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             nonlocal now
             now += 4
         with patch('dyc.sms_browser.time', SimpleNamespace(monotonic=lambda: now)), \
-             patch('dyc.sms_browser.asyncio', SimpleNamespace(sleep=advance)):
+             patch('dyc.sms_browser.asyncio.sleep', advance):
             await browser.reset()
         self.assertEqual(now, 24)
         self.assertEqual(browser.stage_timeout, 60)
@@ -50,6 +51,48 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await browser.challenge())
         self.assertEqual(browser._challenge.await_count, 2)
         browser.page.click.assert_not_called()
+
+    async def test_detached_frame_is_reacquired(self):
+        from playwright.async_api import Error
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser._challenge = AsyncMock(side_effect=[Error('Frame was detached'), None])
+        self.assertIsNone(await browser.challenge())
+        self.assertEqual(browser._challenge.await_count, 2)
+
+    async def test_single_read_timeout_is_explicit(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        timeout = asyncio.timeout
+        async def stuck():
+            await asyncio.Event().wait()
+        with patch('dyc.sms_browser.asyncio.timeout', lambda _: timeout(.01)):
+            with self.assertRaises(TimeoutError):
+                await browser.read_dom('account_signal', stuck)
+
+    async def test_challenge_snapshot_failure_preserves_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            browser = SmsBrowser('/unused', state_dir=root)
+            browser.page = Mock(url=browser.url, title=AsyncMock(return_value='抖音'))
+            browser.diagnostic_snapshot = AsyncMock(side_effect=RuntimeError('secret'))
+            result = await browser.diagnose(reason='challenge_detected')
+            self.assertEqual(result['reason'], 'challenge_detected')
+            self.assertEqual(result['screenshot_status'], 'capture_failed')
+            self.assertNotIn('secret', json.dumps(result))
+
+    async def test_challenge_exposes_only_redacted_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            browser = SmsBrowser('/unused', state_dir=root)
+            browser.page = Mock(url=browser.url, title=AsyncMock(return_value='抖音'))
+            browser.diagnostic_snapshot = AsyncMock(return_value=b'redacted-png')
+            browser.close = AsyncMock()
+            session = LoginSession(browser, SmsQuota(root), stop_on_verification=True)
+            browser.observe = AsyncMock(return_value='verification')
+            await session.poll()
+            self.assertEqual(session.failure['reason'], 'challenge_detected')
+            self.assertEqual(session.failure['status'], 'BLOCKED')
+            self.assertEqual(base64.b64decode(session.public()['failure_image']), b'redacted-png')
+            browser.close.assert_awaited_once()
 
     async def test_login_requests_only_block_comments_and_private_urls(self):
         domains = ('douyin.com', 'snssdk.com', 'zijieapi.com', 'bytedance.com',

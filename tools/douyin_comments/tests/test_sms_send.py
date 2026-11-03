@@ -58,7 +58,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             press=AsyncMock(), press_sequentially=AsyncMock(), input_value=AsyncMock(return_value=PHONE)))
         browser.prepare_send = AsyncMock(return_value='')
         browser.countdown = AsyncMock(side_effect=[False] + [countdown] * 100)
-        browser.challenge = AsyncMock(return_value=True if rejected_challenge else None)
+        browser.challenge = AsyncMock(side_effect=lambda: bool(rejected_challenge and browser.fatal))
         browser.auto_step = AsyncMock()
         listeners = {}
         browser.context = Mock()

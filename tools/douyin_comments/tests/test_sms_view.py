@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from dyc import site
+from dyc.errors import Stop
 from dyc.sms_browser import PHONE as PHONE_SELECTOR
 from tests import test_sms_browser as fixture
 from tests.test_sms_state import PHONE, CODE
@@ -60,6 +61,21 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                 document.querySelector('#button-input').value='YYYYYY';
             }''')
             self.assertEqual(first, await browser.diagnostic_snapshot())
+
+    async def test_challenge_iframe_and_text_detected(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate("""() => {
+                const frame = document.createElement('iframe');
+                frame.src = '/captcha'; frame.style = 'width:80px;height:80px';
+                document.body.append(frame);
+            }""")
+            self.assertIsNotNone(await browser.challenge())
+            await browser.page.evaluate("""() => {
+                document.querySelector('iframe[src="/captcha"]').remove();
+                document.body.insertAdjacentHTML('beforeend', '<div>安全验证</div>');
+            }""")
+            self.assertIsNotNone(await browser.challenge())
+            self.assertEqual(self.sends, 0)
 
     async def test_existing_panel_and_fallback_fields(self):
         async with self.browser() as browser:
@@ -212,7 +228,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             browser.replay.assert_not_awaited()
             self.assertEqual(browser.auto_attempts, 0)
 
-    async def test_gap_during_send_uses_existing_solver_once(self):
+    async def test_gap_during_send_stops_without_solving_or_resending(self):
         async with self.browser() as browser:
             await browser.page.locator('#terms').check()
             original = browser.send_button
@@ -223,6 +239,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             browser.send_button = lambda: type('Button', (), {'count': button.count, 'click': staticmethod(click), 'wait_for': button.wait_for, 'evaluate': button.evaluate})()
             browser.auto_step = AsyncMock(side_effect=lambda: None)
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
-                result = await browser.send(PHONE)
-            self.assertEqual(result['outcome'], 'accepted')
-            browser.auto_step.assert_awaited()
+                with self.assertRaisesRegex(Stop, 'challenge_detected'):
+                    await browser.send(PHONE)
+            browser.auto_step.assert_not_awaited()
+            self.assertEqual(self.sends, 1)

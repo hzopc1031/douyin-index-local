@@ -321,8 +321,34 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.browser.observe.return_value = 'verification'
         await self.session.act(dict(action='send', nonce=self.session.nonce, phone=PHONE))
         self.assertEqual(self.session.state, 'failed')
-        self.browser.auto_step.assert_awaited_once()
+        self.browser.auto_step.assert_not_awaited()
+        self.assertEqual(self.session.failure['reason'], 'challenge_detected')
         self.browser.send.assert_not_awaited()
+        self.browser.close.assert_awaited_once()
+
+    async def test_busy_rejection_audited_and_never_sends(self):
+        await self.auth()
+        await self.session.gate.acquire()
+        logs = io.StringIO()
+        try:
+            with redirect_stderr(logs):
+                status, _, data = await self.request('/api', dict(action='send', nonce=self.session.nonce, phone=PHONE))
+        finally:
+            self.session.gate.release()
+        self.assertEqual((status, data['error']), (409, 'busy'))
+        self.assertIn('"reason": "busy"', logs.getvalue())
+        self.assertNotIn(PHONE, logs.getvalue())
+        self.browser.send.assert_not_awaited()
+
+    async def test_poll_timeout_releases_lock_and_closes(self):
+        await self.auth()
+        async def stuck():
+            await asyncio.Event().wait()
+        self.browser.observe.side_effect = stuck
+        self.session.deadline = self.clock() + .01
+        await self.app.tick()
+        self.assertFalse(self.session.gate.locked())
+        self.assertEqual(self.session.state, 'failed')
         self.browser.close.assert_awaited_once()
 
     async def test_verification_cannot_be_bypassed_by_switching_mode(self):

@@ -211,7 +211,8 @@ class SmsBrowser:
             self.operation = operation
             self.require_origin()
             try:
-                result = await read()
+                async with asyncio.timeout(3):
+                    result = await read()
                 self.require_origin()
                 return result
             except Exception as error:
@@ -245,7 +246,7 @@ class SmsBrowser:
             reason = 'browser_operation_failed'
         reason = self.fatal_reason or reason
         data = dict(recorded_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                    guard=self.fatal_context, reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required') else 'FAILED',
+                    guard=self.fatal_context, reason=reason, status='BLOCKED' if reason in ('http_401', 'http_403', 'http_429', 'verification_required', 'challenge_detected') else 'FAILED',
                     step=self.stage, condition=self.condition,
                     operation=self.operation, exception=self.exception_info(error) if error else None,
                     last_read_error=self.last_read_error,
@@ -273,7 +274,10 @@ class SmsBrowser:
                 pass
             if self.state_dir is not None:
                 try:
-                    png = await self.diagnostic_snapshot()
+                    async with asyncio.timeout(4):
+                        png = await self.diagnostic_snapshot()
+                    if reason == 'challenge_detected':
+                        self.failure_image = base64.b64encode(png).decode('ascii')
                     path = self.state_dir / ('login-failure-' + secrets.token_hex(8) + '.png')
                     with os.fdopen(private_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
                         stream.write(png)
@@ -379,6 +383,7 @@ class SmsBrowser:
         try:
             self.step('profile_lock', 'exclusive dyc profile lock', 0)
             self.profile.__enter__()
+            audit('profile_lock_acquired', session=self.audit_id, stage=self.stage)
             self.step('display_start', 'owned Xvfb ready', 10)
             await self.display.start()
             browser_defaults()
@@ -414,8 +419,12 @@ class SmsBrowser:
             await self.target_guard.start(self.response_session)
             await self.reset()
         except BaseException as error:
-            await self.diagnose(error)
-            await self.close()
+            try:
+                await self.diagnose(error)
+            except Exception:
+                audit('diagnose_failed', session=self.audit_id, reason='prepare_failed')
+            finally:
+                await self.close()
             raise
 
     def redirected_request(self, request):
@@ -494,9 +503,7 @@ class SmsBrowser:
         while time.monotonic() < deadline:
             self.require_origin()
             if await self.challenge():
-                await self.auto_step()
-                if await self.challenge():
-                    raise Stop(3, 'verification_required')
+                raise Stop(3, 'challenge_detected')
             if await self.inside():
                 return
             if (mode == "qr" and await ready_qr(self.page)) or (mode == "sms" and await self.sms_ready()):
@@ -536,10 +543,12 @@ class SmsBrowser:
             panel.locator('#douyin_login_comp_button_input_id span:not(:has(span)):not(button *):not([role=button] *), #douyin_login_comp_button_input_id div:not(:has(span, div)):not(button *):not([role=button] *)').filter(has_text=SEND_TEXT)).filter(visible=True)
 
     async def sms_ready(self):
-        return (await self.phone_ready() and
-                await self.visible(CODE).is_visible() and
-                await self.visible(CODE).is_editable() and
-                await self.send_button().count() == 1)
+        ready = (await self.phone_ready() and
+                 await self.visible(CODE).is_visible() and
+                 await self.visible(CODE).is_editable() and
+                 await self.send_button().count() == 1)
+        audit('readiness', session=self.audit_id, check='controls', passed=ready)
+        return ready
 
     async def switch_sms(self, switched):
         if await self.page.locator(MOBILE_PANEL).filter(visible=True).count():
@@ -648,8 +657,12 @@ class SmsBrowser:
         self.step('send_sms', 'official send-code response after one click', SMS_RESPONSE_SECONDS)
         self.require_origin()
         self.private_values.append(phone)
+        if await self.challenge():
+            raise Stop(3, 'challenge_detected')
         try:
             reason = await self.prepare_send()
+        except (Stop, TimeoutError):
+            raise
         except Exception:
             reason = '未确认已发送：登录控件被弹窗遮挡、协议未勾选或按钮不可操作'
         if reason:
@@ -657,6 +670,7 @@ class SmsBrowser:
             await self.send_evidence('after')
             result = sms_result(None, None)
             result['description'] = reason
+            audit('send_rejected', session=self.audit_id, reason='controls_not_ready')
             audit('send_response', session=self.audit_id, outcome='unconfirmed', reason='controls_not_ready')
             return result
         try:
@@ -667,15 +681,22 @@ class SmsBrowser:
             await field.press_sequentially(phone)
             if re.sub(r'\D', '', await field.input_value()) != phone:
                 await field.fill(phone)
-            if re.sub(r'\D', '', await field.input_value()) != phone:
+            matches = re.sub(r'\D', '', await field.input_value()) == phone
+            audit('readiness', session=self.audit_id, check='phone_matches', passed=matches)
+            if not matches:
                 raise ValueError('phone mismatch')
             panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True).first
             boxes = panel.get_by_role('checkbox', include_hidden=True)
             if await boxes.count():
-                if not all([await boxes.nth(i).is_checked() for i in range(await boxes.count())]):
+                agreement = all([await boxes.nth(i).is_checked() for i in range(await boxes.count())])
+                audit('readiness', session=self.audit_id, check='agreement', passed=agreement)
+                if not agreement:
                     raise ValueError('agreement unchecked')
-            elif not await panel.get_by_text('登录即代表同意', exact=False).filter(visible=True).count():
-                raise ValueError('agreement missing')
+            else:
+                agreement = bool(await panel.get_by_text('登录即代表同意', exact=False).filter(visible=True).count())
+                audit('readiness', session=self.audit_id, check='agreement', passed=agreement)
+                if not agreement:
+                    raise ValueError('agreement missing')
         except Exception as error:
             result = sms_result(None, None)
             result['description'] = '未确认已发送：' + {
@@ -683,6 +704,9 @@ class SmsBrowser:
                 'agreement unchecked': '协议复选框未勾选',
                 'agreement missing': '协议提示不存在或不可见',
             }.get(str(error), '手机号输入或协议检查失败')
+            audit('send_rejected', session=self.audit_id, reason={
+                'phone mismatch': 'phone_mismatch', 'agreement unchecked': 'agreement_unchecked',
+                'agreement missing': 'agreement_missing'}.get(str(error), 'input_check_failed'))
             await self.send_evidence('before')
             return result
         self.require_origin()
@@ -748,6 +772,7 @@ class SmsBrowser:
                       return true;
                     }'''):
                         await asyncio.sleep(.1)
+                audit('readiness', session=self.audit_id, check='send_target', passed=True)
                 if re.sub(r'\D', '', await self.visible(PHONE).input_value()) != phone:
                     raise ValueError('手机号输入值不一致')
                 if await boxes.count():
@@ -755,11 +780,17 @@ class SmsBrowser:
                         raise ValueError('协议复选框未勾选')
                 elif not await panel.get_by_text('登录即代表同意', exact=False).filter(visible=True).count():
                     raise ValueError('协议提示不存在或不可见')
+                if await self.challenge():
+                    raise Stop(3, 'challenge_detected')
                 self.sms_deadline = time.monotonic() + SMS_RESPONSE_SECONDS
                 await button.click(timeout=1500)
+            except Stop:
+                raise
             except Exception as error:
                 if isinstance(error, ValueError):
                     click_reason = str(error)
+                audit('readiness', session=self.audit_id, check='send_target', passed=False)
+                audit('send_rejected', session=self.audit_id, reason='target_unavailable_or_preflight_failed')
                 audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
                 click_failed = True
             else:
@@ -769,16 +800,12 @@ class SmsBrowser:
                 while time.monotonic() < self.sms_deadline and not self.fatal:
                     if await self.challenge():
                         challenge_seen = True
-                        try:
-                            async with asyncio.timeout(max(.001, self.sms_deadline - time.monotonic())):
-                                await self.auto_step()
-                        except TimeoutError:
-                            break
+                        raise Stop(3, 'challenge_detected')
                     if not click_failed and not countdown_before and await self.countdown():
                         countdown_seen = True
                     await asyncio.sleep(min(.2, max(0, self.sms_deadline - time.monotonic())))
-            except Stop:
-                if not self.fatal:
+            except Stop as error:
+                if error.reason == 'challenge_detected' or not self.fatal:
                     raise
             self.sms_deadline = 0
             # Responses received before the deadline may still be reading their body.
@@ -837,7 +864,7 @@ class SmsBrowser:
                 element = candidates.nth(index)
                 self.operation = 'challenge_bounds'
                 rect = await element.bounding_box()
-                if rect and rect['width'] >= 40 and rect['height'] >= 40:
+                if rect and rect['width'] > 0 and rect['height'] > 0:
                     owner = frame
                     self.operation = 'challenge_tag'
                     if await element.evaluate('(e) => e.tagName') == 'IFRAME':
@@ -847,6 +874,12 @@ class SmsBrowser:
                         if owner is not None:
                             element = owner.locator('body')
                     return Challenge(element, rect, owner)
+            for text in ('安全验证', '滑块'):
+                element = frame.get_by_text(text, exact=False).filter(visible=True).first
+                if await element.count():
+                    rect = await element.bounding_box()
+                    if rect:
+                        return Challenge(element, rect, frame)
         return None
 
     async def safe_prompt(self, challenge):
@@ -1066,4 +1099,7 @@ class SmsBrowser:
             if self.solver:
                 await self.solver.close()
             await self.display.close()
+            held = self.profile.fd is not None
             self.profile.__exit__(None, None, None)
+            if held:
+                audit('profile_lock_released', session=self.audit_id, stage=self.stage)

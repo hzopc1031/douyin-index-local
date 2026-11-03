@@ -71,16 +71,19 @@ class WebApp:
         self.preparation_failed = False
         self.retry_nonce = ''
         self.terminal_at = None
+        audit('prepare_start')
         try:
             self.session = self.factory()
             async with asyncio.timeout(max(.001, min(90, self.session.deadline-self.clock()))):
                 await self.session.browser.start()
+            audit('prepare_result', result='ready')
             return 200, self.public()
         except asyncio.CancelledError:
             if self.session:
                 await self.session.finish('cancelled')
             raise
         except Exception as error:
+            audit('prepare_result', result='failed', reason='timeout' if isinstance(error, TimeoutError) else 'browser_failure')
             if self.session:
                 await self.session.fail(error)
             self.preparation_failed = True
@@ -132,6 +135,7 @@ class WebApp:
             action = candidate if isinstance(candidate, str) and candidate in (
                 'status', 'frame', 'send', 'code', 'mode', 'pointer', 'cancel', 'retry') else 'unknown'
             body = b''
+            audit('action_received', action=action)
             try:
                 if target == '/auth':
                     fields(obj, set() if self.no_token else {'token'})
@@ -189,6 +193,15 @@ class WebApp:
             code = str(error)
             code = code if code in ERRORS else 'login_failed'
             audit('request_rejected', action=action, reason=code)
+            if (action == 'send' and code not in ('csrf', 'unauthorized', 'busy') and
+                    self.session and not self.starting and not self.session.gate.locked() and
+                    hasattr(self.session.browser, 'send_evidence')):
+                try:
+                    async with self.session.locked('send_rejection_evidence'):
+                        async with asyncio.timeout(5):
+                            await self.session.browser.send_evidence('before')
+                except Exception:
+                    audit('send_evidence', session=self.session.audit_id, phase='before', outcome='capture_failed')
             if code == 'login_failed' and self.session and self.session.state in TERMINAL:
                 return 200, {}, self.public()
             return (403 if code in ('csrf', 'unauthorized') else 409), {}, {'error': code}
@@ -208,7 +221,7 @@ class WebApp:
         session = self.session
         if session.gate.locked() or self.starting:
             return
-        async with session.gate:
+        async with session.locked('poll'):
             try:
                 async with asyncio.timeout(max(.001, min(15, session.deadline-self.clock()))):
                     await session.poll()

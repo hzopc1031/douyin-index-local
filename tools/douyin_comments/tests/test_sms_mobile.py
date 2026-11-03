@@ -66,7 +66,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await page.goto(ORIGIN)
                 await page.locator('#retry').wait_for(state='visible')
-                self.assertIn('challenge_candidates_count', await page.locator('#details').inner_text())
+                self.assertIn('准备手机号输入', await page.locator('#details').inner_text())
                 self.assertTrue(await page.locator('#cancel').is_disabled())
                 await page.clock.fast_forward(30_000)
                 await app.tick()
@@ -113,7 +113,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 await page.locator('#retry').wait_for(state='visible')
                 self.assertIn('登录已停止', await page.locator('#status').inner_text())
                 self.assertNotIn('平台已接受', await page.locator('#status').inner_text())
-                self.assertIn('code_invalid', await page.locator('#details').inner_text())
+                self.assertIn('验证码错误', await page.locator('#details').inner_text())
                 self.assertTrue(await page.locator('#sms').is_hidden())
                 self.assertFalse(app.done.is_set())
                 for outcome, description in (('unconfirmed', '未确认已发送：15 秒内未捕获真实发码请求'),

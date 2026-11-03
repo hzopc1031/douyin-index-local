@@ -4,6 +4,7 @@ No phone/code is retained here or included in exception messages. All clocks
 shown to people use Asia/Shanghai; deadlines use monotonic time.
 """
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime
 import hashlib
 import hmac
@@ -133,12 +134,26 @@ class LoginSession:
                     nonce=self.nonce, expires_in=max(0, math.ceil(self.deadline-self.clock())),
                     resend_in=max(0, math.ceil(self.next_send-self.clock())),
                     auto_attempts=self.browser.auto_attempts, failure=self.failure,
-                    send_result=self.send_result)
+                    send_result=self.send_result,
+                    failure_image=getattr(self.browser, 'failure_image', '') if self.failure and self.failure.get('reason') == 'challenge_detected' else '')
+
+    @asynccontextmanager
+    async def locked(self, phase):
+        await self.gate.acquire()
+        audit('lock_acquired', session=self.audit_id, phase=phase, stage=getattr(self.browser, 'stage', 'unknown'))
+        try:
+            yield
+        finally:
+            audit('lock_released', session=self.audit_id, phase=phase, stage=getattr(self.browser, 'stage', 'unknown'))
+            self.gate.release()
 
     async def fail(self, error=None, reason='login_failed', state='failed'):
         self.failure = {'reason': reason}
         if hasattr(self.browser, 'diagnose'):
-            self.failure = await self.browser.diagnose(error, reason)
+            try:
+                self.failure = await self.browser.diagnose(error, reason)
+            except Exception:
+                audit('diagnose_failed', session=self.audit_id, reason=reason)
         audit('session_failure', session=self.audit_id, reason=self.failure.get('reason', reason))
         await self.finish(state)
 
@@ -167,11 +182,7 @@ class LoginSession:
             await self.finish("succeeded")
         elif status == "verification":
             if self.stop_on_verification:
-                await self.browser.auto_step()
-                if await self.browser.observe() == "verification":
-                    await self.fail(reason="verification_required")
-                    return
-                await self.poll()
+                await self.fail(reason="challenge_detected")
                 return
             if self.state != "verification":
                 self.before_verification = self.state
@@ -183,7 +194,8 @@ class LoginSession:
     async def act(self, obj):
         if self.gate.locked():
             reject("busy")
-        async with self.gate:
+        async with self.locked(obj.get('action') if obj.get('action') in
+                               ('status', 'frame', 'send', 'code', 'mode', 'pointer', 'cancel') else 'unknown'):
             if self.state not in TERMINAL and self.clock() >= self.deadline:
                 await self.fail(reason="login_expired", state="expired")
             if self.state in TERMINAL:
@@ -217,7 +229,7 @@ class LoginSession:
                         if self.stop_on_verification:
                             status = await self.browser.observe()
                             if status == "verification":
-                                await self.fail(reason="verification_required")
+                                await self.fail(reason="challenge_detected")
                                 return self.public()
                             if status == "succeeded":
                                 await self.browser.persist()

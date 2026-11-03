@@ -12,7 +12,15 @@
     frame_unavailable: '截图暂未就绪，请稍后刷新。', replayed_action: '操作已处理，请等待刷新状态。',
     replayed_code: '此验证码已提交过，请勿重复提交。', unauthorized: '口令已失效、已用过或不正确。',
     csrf: '连接来源校验失败，请使用完整私网网址。', busy: '正在处理上一项操作，请稍候。',
-    wrong_state: '当前不能执行此操作；可切换登录方式或结束会话。'};
+    wrong_state: '当前不能执行此操作；可切换登录方式或结束会话。',
+    quota_unavailable: '发码配额检查失败，请联系管理员。', invalid_request: '请求格式不正确。'};
+  const reasons = {challenge_detected: 'challenge_detected：检测到安全验证，已停止。',
+    login_step_timeout: '操作超时，已停止。', browser_operation_failed: '页面操作失败，已停止。',
+    login_failed: '登录准备或操作失败。', code_invalid: '验证码错误。', sms_unconfirmed: '发码前置检查或发送结果未确认。'};
+  const steps = {profile_lock: '登录资源锁定', display_start: '启动登录环境',
+    playwright_start: '启动浏览器', browser_launch: '启动浏览器', isolated_context: '准备登录页面',
+    redirect_guard: '准备登录保护', navigate: '打开登录页面', login_entry: '准备登录页面',
+    phone_input_ready: '准备手机号输入', observe_login: '登录状态检查', send_sms: '发码检查'};
   function clearInputs() { for (const id of ['token', 'phone', 'code']) $(id).value = ''; }
   function controls() {
     for (const id of ['unlock', 'send', 'submit', 'smsMode', 'qrMode', 'refresh', 'cancel'])
@@ -29,10 +37,11 @@
     $('retry').hidden = !data.retryable;
     $('modes').hidden = terminal.has(data.state);
     $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
-    $('picture').hidden = !(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state);
+    $('picture').hidden = !data.failure_image && (!(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state));
+    if (data.failure_image) { $('frame').src = 'data:image/png;base64,' + data.failure_image; $('hint').textContent = '检测到安全验证，已停止；截图已脱敏。'; $('refresh').hidden = true; } else $('refresh').hidden = false;
     $('details').textContent = terminal.has(data.state) ? '' : `${data.phone || ''} 剩余 ${data.expires_in} 秒`;
     if (data.state === 'code_sent') $('details').textContent += `；发码冷却 ${data.resend_in} 秒`;
-    if (data.failure) $('details').textContent = `失败步骤：${data.failure.step || '会话'}；原因：${data.failure.reason}；操作：${data.failure.operation || '未记录'}`;
+    if (data.failure) $('details').textContent = `失败步骤：${steps[data.failure.step] || (data.preparation_failed ? '准备' : '登录操作')}；原因：${reasons[data.failure.reason] || '页面检查失败或访问受限。'}`;
     if (data.send_result && (data.state === 'code_sent' ||
         (data.state === 'failed' && data.send_result.outcome !== 'accepted'))) {
       $('status').textContent = data.send_result.description;
@@ -40,11 +49,12 @@
     }
     controls();
     if (terminal.has(data.state)) {
-      clearInputs(); $('frame').removeAttribute('src'); frameId = '';
+      clearInputs(); if (!data.failure_image) $('frame').removeAttribute('src'); frameId = '';
       if (data.state === 'succeeded') { csrf = ''; nonce = ''; }
     }
   }
   async function post(path, data) {
+    const requestAction = data.action;
     let raw = JSON.stringify(data);
     for (const key of Object.keys(data)) delete data[key];
     try {
@@ -65,7 +75,7 @@
           $('status').textContent = '手机登录准备失败，已停止。请联系管理员查看状态。';
           if (result.failure) $('details').textContent = `失败步骤：${result.failure.step}；原因：${result.failure.reason}`;
         }
-        throw new Error(errors[result.error] || '操作未完成，请联系管理员查看状态。');
+        throw new Error((requestAction === 'send' ? '发码步骤被拒绝：' : '操作被拒绝：') + (errors[result.error] || '请求未通过检查。'));
       }
       return result;
     } finally { raw = ''; }
@@ -85,7 +95,7 @@
     if (busy || gesture) return;
     busy = true; controls(); $('error').textContent = '';
     try { await fn(); }
-    catch (error) { $('error').textContent = error.message.startsWith('操作') || Object.values(errors).includes(error.message)
+    catch (error) { $('error').textContent = error.message.startsWith('操作') || error.message.startsWith('发码步骤被拒绝：') || Object.values(errors).includes(error.message)
       ? error.message : '连接中断。请联系管理员查看状态；已提交的操作不要重复发送。'; }
     finally { busy = false; controls(); }
   }

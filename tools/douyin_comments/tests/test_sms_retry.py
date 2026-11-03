@@ -25,6 +25,7 @@ class ReadTests(unittest.IsolatedAsyncioTestCase):
             side_effect=Error('Frame was detached synthetic-private'))
         live = Mock()
         live.locator.return_value.filter.return_value.count = AsyncMock(return_value=0)
+        live.get_by_text.return_value.filter.return_value.first.count = AsyncMock(return_value=0)
         browser.page = SimpleNamespace(url=browser.url, frames=[dead])
         original = dead.locator.return_value.filter.return_value.count
         async def detach():

@@ -148,9 +148,9 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
         async def blocked(route):
             await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + '<script>challenge()</script>')
         browser = SmsBrowser(self.profile, backend=blocked, state_dir=Path(self.tmp.name) / 'state')
-        with self.assertRaisesRegex(Stop, 'verification_required'):
+        with self.assertRaisesRegex(Stop, 'challenge_detected'):
             await browser.start()
-        self.assertEqual(browser.diagnostic['reason'], 'verification_required')
+        self.assertEqual(browser.diagnostic['reason'], 'challenge_detected')
         self.assertTrue(Path(browser.diagnostic['screenshot']).exists())
         self.assertIsNone(browser.page)
         self.assertEqual(self.sends, 0)
