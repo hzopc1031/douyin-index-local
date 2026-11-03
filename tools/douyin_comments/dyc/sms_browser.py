@@ -564,12 +564,6 @@ class SmsBrowser:
             await asyncio.sleep(.2)
         if not await self.sms_ready():
             return '未确认已发送：未进入手机号验证码登录视图，或发送按钮未唯一命中'
-        # Scope agreement controls to the login panel; never toggle an already checked box.
-        boxes = self.page.locator(site.LOGIN_PANEL).filter(visible=True).get_by_role('checkbox').filter(visible=True)
-        for i in range(await boxes.count()):
-            self.require_origin()
-            await boxes.nth(i).check(timeout=1500)
-        self.require_origin()
         return ''
 
     async def send_evidence(self, phase):
@@ -665,7 +659,32 @@ class SmsBrowser:
             result['description'] = reason
             audit('send_response', session=self.audit_id, outcome='unconfirmed', reason='controls_not_ready')
             return result
-        await self.visible(PHONE).fill(phone)
+        try:
+            field = self.visible(PHONE)
+            await field.click(timeout=1500)
+            await field.press('Control+A')
+            await field.press('Backspace')
+            await field.press_sequentially(phone)
+            if re.sub(r'\D', '', await field.input_value()) != phone:
+                await field.fill(phone)
+            if re.sub(r'\D', '', await field.input_value()) != phone:
+                raise ValueError('phone mismatch')
+            panel = self.page.locator(site.LOGIN_PANEL).filter(visible=True).first
+            boxes = panel.get_by_role('checkbox', include_hidden=True)
+            if await boxes.count():
+                if not all([await boxes.nth(i).is_checked() for i in range(await boxes.count())]):
+                    raise ValueError('agreement unchecked')
+            elif not await panel.get_by_text('登录即代表同意', exact=False).filter(visible=True).count():
+                raise ValueError('agreement missing')
+        except Exception as error:
+            result = sms_result(None, None)
+            result['description'] = '未确认已发送：' + {
+                'phone mismatch': '手机号输入值不一致',
+                'agreement unchecked': '协议复选框未勾选',
+                'agreement missing': '协议提示不存在或不可见',
+            }.get(str(error), '手机号输入或协议检查失败')
+            await self.send_evidence('before')
+            return result
         self.require_origin()
         await self.send_evidence('before')
         # A pre-existing countdown cannot establish that this attempt sent a code.
@@ -674,6 +693,7 @@ class SmsBrowser:
         countdown_seen = False
         challenge_seen = False
         click_failed = False
+        click_reason = '发送按钮未启用或被弹窗遮挡'
 
         def requested(request):
             if time.monotonic() < self.sms_deadline and request.method == 'POST':
@@ -721,13 +741,25 @@ class SmsBrowser:
                       for (let p=e; p; p=p.parentElement) {
                         if (p.matches(':disabled, [disabled], [aria-disabled=true], [data-disabled=true]') ||
                             getComputedStyle(p).pointerEvents === 'none' ||
+                            // shortcut: current span uses pointer only when enabled; revisit if the official UI changes.
+                            (p === e && e.tagName === 'SPAN' && getComputedStyle(e).cursor !== 'pointer') ||
                             [...p.classList].some(c => /(^|[-_])disabled($|[-_])/i.test(c))) return false;
                       }
                       return true;
                     }'''):
                         await asyncio.sleep(.1)
+                if re.sub(r'\D', '', await self.visible(PHONE).input_value()) != phone:
+                    raise ValueError('手机号输入值不一致')
+                if await boxes.count():
+                    if not all([await boxes.nth(i).is_checked() for i in range(await boxes.count())]):
+                        raise ValueError('协议复选框未勾选')
+                elif not await panel.get_by_text('登录即代表同意', exact=False).filter(visible=True).count():
+                    raise ValueError('协议提示不存在或不可见')
+                self.sms_deadline = time.monotonic() + SMS_RESPONSE_SECONDS
                 await button.click(timeout=1500)
-            except Exception:
+            except Exception as error:
+                if isinstance(error, ValueError):
+                    click_reason = str(error)
                 audit('send_click_failed', session=self.audit_id, reason='click_failed_or_unconfirmed')
                 click_failed = True
             else:
@@ -770,7 +802,7 @@ class SmsBrowser:
         if self.fatal_reason in ('http_401', 'http_403', 'http_429'):
             result = sms_result(int(self.fatal_reason[5:]), None)
         if result['outcome'] == 'unconfirmed':
-            result['description'] = ('未确认已发送：发送按钮未命中或被弹窗遮挡' if click_failed else
+            result['description'] = ('未确认已发送：' + click_reason if click_failed else
                 '未确认已发送：15 秒内未捕获真实发码请求' if not any(self.sms_request(r.url, r.method) for r in requests) else
                 '未确认已发送：已捕获发码请求，但没有明确成功响应')
         audit('send_response', session=self.audit_id, http_status=result['http_status'],

@@ -19,7 +19,7 @@ from dyc.sms_state import LoginError
 from tests.test_sms_state import PHONE, CODE
 
 HTML = '''<!doctype html><meta charset="utf-8"><style>
-body {margin:0} #captcha_container {width:320px;height:220px;background:#abcdef;position:relative}
+body {margin:0} #douyin_login_comp_button_input_id span {cursor:pointer} #captcha_container {width:320px;height:220px;background:#abcdef;position:relative}
 .secsdk-captcha-drag-wrapper {position:absolute;left:5px;top:180px;width:300px;height:30px;background:gray}
 .secsdk-captcha-drag-icon {position:absolute;width:30px;height:30px;background:blue}
 #captcha-verify-image {position:absolute;left:5px;top:30px;width:300px;height:140px;background:gray}
@@ -29,7 +29,7 @@ body {margin:0} #captcha_container {width:320px;height:220px;background:#abcdef;
 <img aria-label="二维码" width="178" height="178" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='178' height='178'%3E%3Crect width='178' height='178' fill='black'/%3E%3C/svg%3E"></div>
 <div id="douyin_login_comp_mobile_code"><input id="normal-input" type="tel">
 <div id="douyin_login_comp_button_input_id"><input id="button-input" type="tel"><span onclick="send()">获取验证码</span></div>
-<div id="douyin_login_comp_btn_id" onclick="submit()">登录</div></div></article>
+<div id="douyin_login_comp_btn_id" onclick="submit()">登录</div></div><span>登录即代表同意</span></article>
 <script>
 window.sends=0; window.submissions=0;
 async function send() { await fetch('/passport/web/send_code/', {method:'POST',body:document.querySelector('#normal-input').value}); window.sends++; }

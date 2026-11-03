@@ -36,6 +36,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await browser.page.locator('#douyin_login_comp_scan_code').is_hidden())
             self.assertEqual(await browser.page.locator(PHONE_SELECTOR).input_value(), '')
             self.assertFalse(await browser.page.locator('#terms').is_checked())
+            await browser.page.locator('#terms').check()
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .2):
                 result = await browser.send(PHONE)
             self.assertEqual(result['outcome'], 'accepted')
@@ -85,6 +86,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_span_is_not_clicked(self):
         async with self.browser() as browser:
+            await browser.page.locator('#terms').check()
             await browser.page.evaluate("document.querySelector('#douyin_login_comp_button_input_id').setAttribute('aria-disabled','true')")
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
                 result = await browser.send(PHONE)
@@ -115,7 +117,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
                 result = await browser.send(PHONE)
             self.assertEqual(result['outcome'], 'unconfirmed')
-            self.assertIn('遮挡', result['description'])
+            self.assertIn('手机号输入或协议检查失败', result['description'])
             self.assertEqual(self.sends, 0)
             self.assertEqual(await browser.page.locator(PHONE_SELECTOR).input_value(), '')
 
@@ -128,6 +130,49 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('未进入手机号验证码登录视图', result['description'])
             self.assertEqual(await browser.page.locator(PHONE_SELECTOR).input_value(), '')
             self.assertEqual(self.sends, 0)
+
+    async def test_recorded_send_selector_targets_reconstructed_span(self):
+        evidence = (Path(__file__).parent / 'fixtures/send-before-redacted.html').read_text()
+        async with self.browser() as browser:
+            recorded = await browser.page.evaluate("""html => {
+              const doc = new DOMParser().parseFromString(html, 'text/html');
+              return [...doc.querySelectorAll('[data-selector]')]
+                .filter(e => e.textContent === '获取验证码' && e.dataset.selector === '#douyin_login_comp_button_input_id span')
+                .map(e => e.dataset.selector);
+            }""", evidence)
+            self.assertEqual(len(recorded), 1)
+            self.assertEqual(await browser.send_button().count(), 1)
+            self.assertEqual(await browser.page.locator(recorded[0]).count(), 1)
+
+    async def test_unchecked_agreement_stops_without_toggling(self):
+        async with self.browser() as browser:
+            result = await browser.send(PHONE)
+            self.assertIn('协议复选框未勾选', result['description'])
+            self.assertFalse(await browser.page.locator('#terms').is_checked())
+            self.assertEqual(self.sends, 0)
+
+    async def test_no_checkbox_requires_visible_notice(self):
+        async with self.browser() as browser:
+            await browser.page.locator('#terms').evaluate('(e) => e.parentElement.remove()')
+            await browser.page.get_by_text('登录即代表同意', exact=True).evaluate('(e) => e.remove()')
+            result = await browser.send(PHONE)
+            self.assertIn('协议提示不存在或不可见', result['description'])
+            self.assertEqual(self.sends, 0)
+
+    async def test_formatted_number_and_enabled_span(self):
+        async with self.browser() as browser:
+            await browser.page.locator('#terms').check()
+            await browser.page.evaluate(r"""() => {
+              const phone = document.querySelector('#normal-input');
+              phone.addEventListener('input', () => {
+                const d = phone.value.replace(/\D/g, '');
+                if (d.length === 11) phone.value = d.slice(0,3)+' '+d.slice(3,7)+' '+d.slice(7);
+              });
+            }""")
+            with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .2):
+                result = await browser.send(PHONE)
+            self.assertEqual(result['outcome'], 'accepted')
+            self.assertEqual(self.sends, 1)
 
     async def test_qr_fallback_does_not_switch_back_to_sms(self):
         async with self.browser() as browser:
@@ -169,6 +214,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_gap_during_send_uses_existing_solver_once(self):
         async with self.browser() as browser:
+            await browser.page.locator('#terms').check()
             original = browser.send_button
             button = original()
             async def click(**kwargs):
