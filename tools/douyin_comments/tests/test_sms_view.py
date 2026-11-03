@@ -53,7 +53,7 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
             await browser.page.evaluate('''([phone,code]) => {
                 document.body.insertAdjacentHTML('beforeend', '<button style="width:250px">'+phone+' '+code+'</button>');
                 document.querySelector('#button-input').value=code;
-            }''', [PHONE, CODE])
+            }''', [PHONE[:3] + ' ' + PHONE[3:7] + ' ' + PHONE[7:], CODE])
             first = await browser.diagnostic_snapshot()
             await browser.page.evaluate('''() => {
                 document.body.lastElementChild.textContent='XXXXXXXXXXX YYYYYY';
@@ -61,6 +61,39 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                 document.querySelector('#button-input').value='YYYYYY';
             }''')
             self.assertEqual(first, await browser.diagnostic_snapshot())
+
+    async def test_click_diagnostics_and_redacted_values(self):
+        async with self.browser() as browser:
+            await browser.page.locator('#terms').check()
+            await browser.page.evaluate("""([phone, code]) => {
+              document.body.insertAdjacentHTML('beforeend', '<div role="alert">未知提示 ' + phone + ' ' + code + '</div>');
+            }""", [PHONE[:3] + ' ' + PHONE[3:7] + ' ' + PHONE[7:], CODE])
+            with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .3):
+                result = await browser.send(PHONE)
+            diagnostic = result['diagnostic']
+            self.assertTrue(diagnostic['hit'])
+            self.assertTrue(diagnostic['panel_active'])
+            self.assertEqual(diagnostic['hint'], 'other')
+            for event in diagnostic['events'].values():
+                self.assertTrue(event['arrived'])
+                self.assertTrue(event['trusted'])
+            self.assertNotIn(PHONE, str(diagnostic))
+            self.assertNotIn(CODE, str(diagnostic))
+            metadata = browser.request_metadata('https://example.test/path/' + PHONE[:3] + '%20' + PHONE[3:] + '?code=' + CODE, 'POST')
+            self.assertNotIn(CODE, str(metadata))
+            self.assertNotIn(PHONE[:3], str(metadata))
+            self.assertEqual(self.sends, 1)
+
+    async def test_page_owned_events_are_reduced_to_booleans(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate("""([phone, code]) => {
+              window.__dycClickEvents = {click: {arrived: phone, trusted: code}, extra: phone};
+            }""", [PHONE, CODE])
+            result = await browser.send_diagnostic()
+            self.assertFalse(result['events']['click']['arrived'])
+            self.assertFalse(result['events']['click']['trusted'])
+            self.assertNotIn(PHONE, str(result))
+            self.assertNotIn(CODE, str(result))
 
     async def test_challenge_iframe_and_text_detected(self):
         async with self.browser() as browser:
@@ -231,12 +264,10 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_gap_during_send_stops_without_solving_or_resending(self):
         async with self.browser() as browser:
             await browser.page.locator('#terms').check()
-            original = browser.send_button
-            button = original()
-            async def click(**kwargs):
-                await button.click(**kwargs)
-                await browser.page.evaluate('challenge()')
-            browser.send_button = lambda: type('Button', (), {'count': button.count, 'click': staticmethod(click), 'wait_for': button.wait_for, 'evaluate': button.evaluate})()
+            await browser.page.evaluate("""() => {
+              document.querySelector('#douyin_login_comp_button_input_id span')
+                .addEventListener('click', () => challenge(), {once: true});
+            }""")
             browser.auto_step = AsyncMock(side_effect=lambda: None)
             with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .1):
                 with self.assertRaisesRegex(Stop, 'challenge_detected'):

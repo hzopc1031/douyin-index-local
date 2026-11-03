@@ -47,6 +47,13 @@
       $('status').textContent = data.send_result.description;
       $('details').textContent += `；HTTP ${data.send_result.http_status ?? '未捕获'}；业务码 ${data.send_result.business_code ?? '未捕获'}`;
     }
+    if (data.state === 'failed' && (data.send_result || data.failure?.step === 'send_sms')) {
+        const d = data.send_result?.diagnostic || data.failure?.send_diagnostic || {};
+        const yes = v => v === true ? '是' : v === false ? '否' : '未知';
+        const buttons = {countdown: '倒计时', other: '其他', '获取验证码': '获取验证码', '发送验证码': '发送验证码', '重新获取验证码': '重新获取验证码', '重新发送验证码': '重新发送验证码', '重新发送': '重新发送'};
+        const hints = {none: '无', frequent: '发送过于频繁', phone_format: '手机号格式', security: '安全验证', network: '网络错误', other: '其他'};
+        $('details').textContent += `；命中目标：${yes(d.hit)}；短信面板激活：${yes(d.panel_active)}；事件 pointerdown/mousedown/click：${['pointerdown', 'mousedown', 'click'].map(k => `${yes(d.events?.[k]?.arrived)}（可信：${yes(d.events?.[k]?.trusted)}）`).join('、')}；按钮：${buttons[d.button] || '其他'}；提示：${hints[d.hint] || '其他'}`;
+    }
     controls();
     if (terminal.has(data.state)) {
       clearInputs(); if (!data.failure_image) $('frame').removeAttribute('src'); frameId = '';

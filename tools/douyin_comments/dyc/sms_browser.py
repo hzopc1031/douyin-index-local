@@ -153,6 +153,7 @@ class SmsBrowser:
     def __init__(self, profile, *, backend=None, solver=None, startup_limits=False, state_dir=None):
         self.state_dir = private_dir(state_dir) if state_dir is not None else None
         self.diagnostic = None
+        self.send_click_diagnostic = None
         self.operation = 'initializing'
         self.last_read_error = None
         self.fatal_reason = ''
@@ -254,6 +255,8 @@ class SmsBrowser:
                     elapsed_seconds=round(time.monotonic()-self.stage_started, 3),
                     url='unavailable', title='unavailable', screenshot='',
                     screenshot_status='page_unavailable')
+        if self.stage == 'send_sms' and self.send_click_diagnostic is not None:
+            data['send_diagnostic'] = self.send_click_diagnostic
         self.diagnostic = data
         if self.page is not None:
             # Only known public landing paths survive; no query/hash/userinfo.
@@ -298,12 +301,19 @@ class SmsBrowser:
     async def diagnostic_snapshot(self):
         # Keep empty field borders visible, but hide all text, input values,
         # QR codes and media; no screenshot can contain a login credential.
+        target = self.page.locator('#douyin_login_comp_button_input_id')
+        text = (await target.first.text_content(timeout=1000) or '') if await target.count() else ''
+        text = text.strip()
+        if not (text == '重新发送' or SEND_TEXT.fullmatch(text) or re.fullmatch(r'[1-9][0-9]?\s*秒后(?:重试|重新发送|重新获取)?', text)):
+            text = ''
         style = REDACT_STYLE + """
-          input, textarea { visibility: visible !important; color: transparent !important;
-            -webkit-text-fill-color: transparent !important; }
+          input, textarea { visibility: hidden !important; }
           img, canvas, video, svg, iframe { visibility: hidden !important; }
           * { background-image: none !important; }
         """
+        if text:
+            style += ('#douyin_login_comp_button_input_id::after { content: ' + json.dumps(text, ensure_ascii=False) +
+                      ' !important; color: black !important; -webkit-text-fill-color: black !important; }')
         return await self.page.screenshot(type='png', style=style, animations='disabled', timeout=3000)
 
     def __repr__(self):
@@ -328,7 +338,7 @@ class SmsBrowser:
         def clean(value):
             if self.contains_private(value):
                 return '[redacted]'
-            return re.sub(r'[0-9]{6,}', '[redacted]', unquote(value))[:512]
+            return re.sub(r'[0-9]+', '[redacted]', unquote(value))[:512]
         return dict(method=method if re.fullmatch(r'[A-Z]{1,20}', method or '') else 'OTHER',
                     domain=clean(parsed.hostname or ''), path=clean(parsed.path))
 
@@ -539,7 +549,7 @@ class SmsBrowser:
 
     def send_button(self):
         panel = self.page.locator(MOBILE_PANEL).filter(visible=True).first
-        return panel.get_by_role('button', name=SEND_TEXT).or_(
+        return panel.locator('#douyin_login_comp_button_input_id').get_by_role('button', name=SEND_TEXT).or_(
             panel.locator('#douyin_login_comp_button_input_id span:not(:has(span)):not(button *):not([role=button] *), #douyin_login_comp_button_input_id div:not(:has(span, div)):not(button *):not([role=button] *)').filter(has_text=SEND_TEXT)).filter(visible=True)
 
     async def sms_ready(self):
@@ -582,7 +592,7 @@ class SmsBrowser:
             folder = private_dir(self.state_dir / 'send-evidence')
             stem = 'h7-' + secrets.token_hex(8) + '-' + phase
             # Rebuild only key controls with fixed labels/attributes, never serialize live HTML.
-            fragment = await self.page.evaluate("""({selectors, labels}) => {
+            fragment = await self.page.evaluate(r"""({selectors, labels}) => {
               const root = document.createElement('section');
               for (const selector of selectors) {
                 for (const e of document.querySelectorAll(selector)) {
@@ -590,11 +600,11 @@ class SmsBrowser:
                   node.dataset.selector = selector;
                   const r = e.getBoundingClientRect();
                   node.dataset.visible = String(Boolean(r.width && r.height && getComputedStyle(e).visibility !== 'hidden'));
-                  node.dataset.tag = e.tagName.toLowerCase();
+                  node.dataset.tag = ['div', 'span', 'input', 'button', 'article'].includes(e.tagName.toLowerCase()) ? e.tagName.toLowerCase() : 'other';
                   node.dataset.checked = String(e.checked === true || e.getAttribute('aria-checked') === 'true');
                   node.dataset.disabled = String(e.disabled === true || e.getAttribute('aria-disabled') === 'true');
                   const text = (e.getAttribute('aria-label') || e.textContent).trim();
-                  node.textContent = labels.includes(text) ? text : '[redacted]';
+                  node.textContent = labels.includes(text) || (selector === '#douyin_login_comp_button_input_id span' && /^[1-9][0-9]?\s*秒后(?:重试|重新发送|重新获取)?$/.test(text)) ? text : '[redacted]';
                   root.append(node);
                 }
               }
@@ -604,7 +614,7 @@ class SmsBrowser:
                 '[role="tab"]', 'button', '#login-panel-new span, #douyin_login_comp_flat_panel span',
                 'input[type="checkbox"]', '[role="checkbox"]'],
                 labels=[*SMS_TABS, '扫码登录', '获取验证码', '发送验证码', '获取短信验证码', '发送短信验证码',
-                        '重新获取验证码', '重新发送验证码']))
+                        '重新获取验证码', '重新发送验证码', '重新发送']))
             png = await self.diagnostic_snapshot()
             for suffix, data in (('.html', fragment.encode()), ('.png', png)):
                 with os.fdopen(private_open(folder / (stem + suffix), os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as stream:
@@ -653,8 +663,69 @@ class SmsBrowser:
             return Boolean(match);
         })''')
 
+    async def click_diagnostic(self, button):
+        await button.scroll_into_view_if_needed(timeout=1500)
+        box = await button.bounding_box(timeout=1500)
+        if not box or box['width'] <= 0 or box['height'] <= 0:
+            raise ValueError('发送按钮不可见')
+        x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+        data = await button.evaluate("""(target, point) => {
+          const hit = document.elementFromPoint(point.x, point.y);
+          const related = !!hit && (hit === target || hit.contains(target) || target.contains(hit));
+          const tags = ['span', 'div', 'button', 'input', 'label', 'body', 'html'];
+          const tag = hit && tags.includes(hit.tagName.toLowerCase()) ? hit.tagName.toLowerCase() : 'other';
+          const category = !hit ? 'none' : hit === target ? 'target' :
+            hit.contains(target) ? 'ancestor' : target.contains(hit) ? 'descendant' : 'other';
+          const selector = !hit ? 'none' : hit === target ? 'target' :
+            hit.matches('#douyin_login_comp_button_input_id') ? 'send_container' :
+            hit.matches('#douyin_login_comp_mobile_code') ? 'mobile_panel' :
+            hit.matches('#login-panel-new, #douyin_login_comp_flat_panel') ? 'login_panel' : 'other';
+          const events = {};
+          for (const type of ['pointerdown', 'mousedown', 'click']) {
+            events[type] = {arrived: false, trusted: false};
+            for (let node = target; node; node = node.parentElement) {
+              node.addEventListener(type, event => {
+                events[type].arrived = true;
+                events[type].trusted ||= event.isTrusted;
+              }, {once: true});
+            }
+          }
+          window.__dycClickEvents = events;
+          return {hit: related, hit_tag: tag, hit_category: category, hit_selector: selector};
+        }""", dict(x=x, y=y))
+        return x, y, data
+
+    async def send_diagnostic(self):
+        return await self.page.evaluate(r"""() => {
+          const panel = document.querySelector('#douyin_login_comp_mobile_code');
+          const visible = e => !!e && !!e.getClientRects().length && getComputedStyle(e).visibility === 'visible';
+          const container = panel?.querySelector('#douyin_login_comp_button_input_id');
+          const text = (container?.innerText || '').trim();
+          const countdown = text.match(/^(?:重新发送|重新获取)?\s*([1-9][0-9]?)\s*(?:秒|s)(?:后(?:重试|重新发送|重新获取)?)?$/i);
+          const button = /^(?:(?:重新)?(?:获取|发送)(?:短信)?验证码|重新发送)$/.test(text) ? text :
+            countdown ? 'countdown' : 'other';
+          let hint = 'none';
+          for (const e of document.querySelectorAll('[role=alert], [class*=toast], [class*=error], [class*=message]')) {
+            if (!visible(e)) continue;
+            const t = e.innerText || '';
+            hint = /频繁|频率|限频|限流/.test(t) ? 'frequent' :
+              /手机号格式|手机号码错误/.test(t) ? 'phone_format' :
+              /安全验证|完成验证|需要验证/.test(t) ? 'security' :
+              /网络错误|网络异常|网络连接/.test(t) ? 'network' : 'other';
+            break;
+          }
+          const source = window.__dycClickEvents;
+          const events = {};
+          for (const type of ['pointerdown', 'mousedown', 'click']) {
+            events[type] = {arrived: source?.[type]?.arrived === true, trusted: source?.[type]?.trusted === true};
+          }
+          const phone = panel?.querySelector('input#normal-input');
+          return {panel_active: visible(panel) && visible(phone) && !phone.disabled && !phone.readOnly, button, hint, events};
+        }""")
+
     async def send(self, phone):
         self.step('send_sms', 'official send-code response after one click', SMS_RESPONSE_SECONDS)
+        self.send_click_diagnostic = None
         self.require_origin()
         self.private_values.append(phone)
         if await self.challenge():
@@ -717,10 +788,12 @@ class SmsBrowser:
         countdown_seen = False
         challenge_seen = False
         click_failed = False
+        click_diagnostic = None
+        late_diagnostic = None
         click_reason = '发送按钮未启用或被弹窗遮挡'
 
         def requested(request):
-            if time.monotonic() < self.sms_deadline and request.method == 'POST':
+            if time.monotonic() < self.sms_deadline:
                 requests.add(request)
                 audit('send_post_start', session=self.audit_id, http_status=None,
                       **self.request_metadata(request.url, request.method))
@@ -743,6 +816,9 @@ class SmsBrowser:
             if time.monotonic() >= self.sms_deadline or 300 <= response.status < 400:
                 return
             request = response.request
+            if request in requests:
+                audit('send_request_response', session=self.audit_id, http_status=response.status,
+                      **self.request_metadata(request.url, request.method))
             while request is not None:
                 if request in requests and self.sms_request(request.url, request.method):
                     task = asyncio.create_task(read_response(response))
@@ -783,7 +859,22 @@ class SmsBrowser:
                 if await self.challenge():
                     raise Stop(3, 'challenge_detected')
                 self.sms_deadline = time.monotonic() + SMS_RESPONSE_SECONDS
-                await button.click(timeout=1500)
+                await button.click(trial=True, timeout=1500)
+                x, y, click_diagnostic = await self.click_diagnostic(button)
+                self.send_click_diagnostic = click_diagnostic.copy()
+                audit('send_click_hit', session=self.audit_id, **click_diagnostic)
+                if not click_diagnostic['hit']:
+                    raise ValueError('发送按钮中心被遮挡')
+                await self.page.mouse.move(x, y)
+                if not await button.evaluate('''(e, p) => {
+                  const r = e.getBoundingClientRect(), hit = document.elementFromPoint(p.x, p.y);
+                  return Math.abs(r.x + r.width / 2 - p.x) < 1 && Math.abs(r.y + r.height / 2 - p.y) < 1 &&
+                    !!hit && (hit === e || hit.contains(e) || e.contains(hit));
+                }''', dict(x=x, y=y)):
+                    raise ValueError('发送按钮位置或命中已变化')
+                self.sms_deadline = time.monotonic() + SMS_RESPONSE_SECONDS
+                await self.page.mouse.down()
+                await self.page.mouse.up()
             except Stop:
                 raise
             except Exception as error:
@@ -796,8 +887,28 @@ class SmsBrowser:
             else:
                 audit('send_click_complete', session=self.audit_id)
             await self.send_evidence('after')
+            if click_diagnostic is not None:
+                try:
+                    async with asyncio.timeout(min(1, max(.01, self.sms_deadline - time.monotonic()))):
+                        observation = await self.send_diagnostic()
+                    self.send_click_diagnostic.update(observation)
+                    audit('send_click_observation', session=self.audit_id, **observation)
+                except Exception:
+                    pass
             try:
                 while time.monotonic() < self.sms_deadline and not self.fatal:
+                    if late_diagnostic is None and time.monotonic() >= self.sms_deadline - min(3, SMS_RESPONSE_SECONDS / 5):
+                        late_diagnostic = {}
+                        try:
+                            async with asyncio.timeout(min(1, max(.01, self.sms_deadline - time.monotonic()))):
+                                late_diagnostic = await self.send_diagnostic()
+                        except Exception:
+                            pass
+                        try:
+                            async with asyncio.timeout(max(.01, self.sms_deadline - time.monotonic())):
+                                await self.send_evidence('late')
+                        except TimeoutError:
+                            pass
                     if await self.challenge():
                         challenge_seen = True
                         raise Stop(3, 'challenge_detected')
@@ -832,6 +943,15 @@ class SmsBrowser:
             result['description'] = ('未确认已发送：' + click_reason if click_failed else
                 '未确认已发送：15 秒内未捕获真实发码请求' if not any(self.sms_request(r.url, r.method) for r in requests) else
                 '未确认已发送：已捕获发码请求，但没有明确成功响应')
+        if click_diagnostic is not None:
+            if late_diagnostic is None:
+                try:
+                    async with asyncio.timeout(1):
+                        late_diagnostic = await self.send_diagnostic()
+                except Exception:
+                    late_diagnostic = {}
+            result['diagnostic'] = dict(click_diagnostic, **late_diagnostic)
+            audit('send_diagnostic', session=self.audit_id, **result['diagnostic'])
         audit('send_response', session=self.audit_id, http_status=result['http_status'],
               business_code=result['business_code'], outcome=result['outcome'])
         return result

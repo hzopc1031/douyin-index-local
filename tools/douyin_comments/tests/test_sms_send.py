@@ -52,7 +52,7 @@ class ResultTests(unittest.TestCase):
 
 
 class SendTests(unittest.IsolatedAsyncioTestCase):
-    async def run_send(self, responses, *, rejected_challenge=False, countdown=False):
+    async def run_send(self, responses, *, rejected_challenge=False, countdown=False, diagnostic_error=False):
         browser = SmsBrowser('/unused')
         browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock(), click=AsyncMock(),
             press=AsyncMock(), press_sequentially=AsyncMock(), input_value=AsyncMock(return_value=PHONE)))
@@ -64,7 +64,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         browser.context = Mock()
         browser.context.on.side_effect = lambda event, callback: listeners.update({event: callback})
         browser.context.remove_listener.side_effect = lambda event, callback: listeners.pop(event)
-        async def clicked(**_):
+        async def clicked(*_, **__):
             self.assertEqual(set(listeners), {'request', 'response'})
             for path, status, body in responses:
                 request = Mock(url='https://sso.amemv.com' + path + '?cookie=synthetic-secret', method='POST', redirected_from=None)
@@ -76,10 +76,13 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
         click = AsyncMock(side_effect=clicked)
         browser.page = Mock(url=browser.url)
+        browser.page.mouse = SimpleNamespace(move=AsyncMock(), down=AsyncMock(), up=click)
+        browser.click_diagnostic = AsyncMock(return_value=(1, 2, {'hit': True}))
+        browser.send_diagnostic = AsyncMock(side_effect=RuntimeError('private') if diagnostic_error else None, return_value={})
         panel = browser.page.locator.return_value.filter.return_value.first
         panel.get_by_role.return_value.count = AsyncMock(return_value=0)
         panel.get_by_text.return_value.filter.return_value.count = AsyncMock(return_value=1)
-        browser.send_button = Mock(return_value=SimpleNamespace(click=click, wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
+        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(), wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         logs = io.StringIO()
         with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
             result = await browser.send(PHONE)
@@ -99,6 +102,10 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(expected=expected, status=status):
                 result = await self.run_send([('/passport/web/send_code/', status, body)])
                 self.assertEqual(result['outcome'], expected)
+
+    async def test_diagnostic_error_does_not_discard_accepted_response(self):
+        result = await self.run_send([('/send_code', 200, {'code': 0})], diagnostic_error=True)
+        self.assertEqual(result['outcome'], 'accepted')
 
     async def test_qr_poll_zero_is_never_send_success(self):
         result = await self.run_send([('/passport/web/check_qrconnect/', 200, {'code': 0}),
@@ -157,7 +164,7 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.04)
             body_read.set()
             return {'code': 0}
-        async def clicked(**_):
+        async def clicked(*_, **__):
             old = Mock(url='https://sso.amemv.com/passport/old', method='POST', redirected_from=None)
             listeners['response'](SimpleNamespace(request=old, status=200,
                                                    json=old_body))
@@ -166,10 +173,13 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
             listeners['response'](SimpleNamespace(request=redirected, status=200, json=body))
         browser.page = Mock(url=browser.url)
+        browser.page.mouse = SimpleNamespace(move=AsyncMock(), down=AsyncMock(), up=AsyncMock(side_effect=clicked))
+        browser.click_diagnostic = AsyncMock(return_value=(1, 2, {'hit': True}))
+        browser.send_diagnostic = AsyncMock(return_value={})
         panel = browser.page.locator.return_value.filter.return_value.first
         panel.get_by_role.return_value.count = AsyncMock(return_value=0)
         panel.get_by_text.return_value.filter.return_value.count = AsyncMock(return_value=1)
-        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(side_effect=clicked), wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
+        browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(), wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
             result = await browser.send(PHONE)
         old_body.assert_not_awaited()
