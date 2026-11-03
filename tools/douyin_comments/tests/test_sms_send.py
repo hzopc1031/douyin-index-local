@@ -54,7 +54,8 @@ class ResultTests(unittest.TestCase):
 class SendTests(unittest.IsolatedAsyncioTestCase):
     async def run_send(self, responses, *, rejected_challenge=False, countdown=False):
         browser = SmsBrowser('/unused')
-        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock(), click=AsyncMock(),
+            press=AsyncMock(), press_sequentially=AsyncMock(), input_value=AsyncMock(return_value=PHONE)))
         browser.prepare_send = AsyncMock(return_value='')
         browser.countdown = AsyncMock(side_effect=[False] + [countdown] * 100)
         browser.challenge = AsyncMock(return_value=True if rejected_challenge else None)
@@ -75,6 +76,9 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
         click = AsyncMock(side_effect=clicked)
         browser.page = Mock(url=browser.url)
+        panel = browser.page.locator.return_value.filter.return_value.first
+        panel.get_by_role.return_value.count = AsyncMock(return_value=0)
+        panel.get_by_text.return_value.filter.return_value.count = AsyncMock(return_value=1)
         browser.send_button = Mock(return_value=SimpleNamespace(click=click, wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         logs = io.StringIO()
         with redirect_stderr(logs), patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .03):
@@ -138,7 +142,8 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_redirected_get_late_body_and_old_response(self):
         browser = SmsBrowser('/unused')
-        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock()))
+        browser.visible = Mock(return_value=SimpleNamespace(fill=AsyncMock(), click=AsyncMock(),
+            press=AsyncMock(), press_sequentially=AsyncMock(), input_value=AsyncMock(return_value=PHONE)))
         browser.prepare_send = AsyncMock(return_value='')
         browser.countdown = AsyncMock(return_value=False)
         browser.challenge = AsyncMock(return_value=None)
@@ -161,6 +166,9 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
             redirected = Mock(url='https://sso.amemv.com/result', method='GET', redirected_from=first)
             listeners['response'](SimpleNamespace(request=redirected, status=200, json=body))
         browser.page = Mock(url=browser.url)
+        panel = browser.page.locator.return_value.filter.return_value.first
+        panel.get_by_role.return_value.count = AsyncMock(return_value=0)
+        panel.get_by_text.return_value.filter.return_value.count = AsyncMock(return_value=1)
         browser.send_button = Mock(return_value=SimpleNamespace(click=AsyncMock(side_effect=clicked), wait_for=AsyncMock(), evaluate=AsyncMock(return_value=True)))
         with patch('dyc.sms_browser.SMS_RESPONSE_SECONDS', .02):
             result = await browser.send(PHONE)
