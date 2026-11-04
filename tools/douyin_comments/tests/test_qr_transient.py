@@ -2,12 +2,12 @@
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Error
 from dyc.errors import Stop
 from dyc.sms_browser import SmsBrowser
-from dyc.sms_state import LoginSession
+from dyc.sms_state import LoginError, LoginSession
 from dyc.sms_web import WebApp
 
 
@@ -30,6 +30,32 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await browser.observe(), 'pending')
         self.assertEqual(browser.challenge.await_count, 2)
         self.assertEqual(count.await_count, 4)
+
+    async def test_known_passport_navigation_waits_but_unknown_origin_fails(self):
+        browser = self.browser()
+        browser.context.cookies = AsyncMock(return_value=[])
+        browser._challenge = AsyncMock(return_value=None)
+        browser.page.url = 'https://sso.douyin.com/passport/'
+        self.assertEqual(await browser.observe(), 'pending')
+        with self.assertRaises(LoginError):
+            await browser.frame(False)
+        browser._challenge.return_value = object()
+        with self.assertRaises(Stop) as caught:
+            await browser.observe()
+        self.assertEqual(caught.exception.reason, 'verification_required')
+        browser.page.url = 'https://untrusted.invalid/'
+        with self.assertRaises(Stop):
+            await browser.observe()
+
+    async def test_confirmed_timeout_is_not_suppressed_on_blank_page(self):
+        browser = self.browser()
+        browser.page.url = 'about:blank'
+        browser.context.cookies = AsyncMock(return_value=[])
+        browser.qr_confirmed_at = 100
+        with patch('dyc.sms_browser.time.monotonic', return_value=121):
+            with self.assertRaises(Stop) as caught:
+                await browser.observe()
+        self.assertEqual(caught.exception.reason, 'qr_confirmed_no_fresh_session_cookie')
 
     async def test_new_page_success_persists_and_closes(self):
         browser = self.browser()

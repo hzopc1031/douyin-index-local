@@ -49,6 +49,8 @@ COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
 SESSION_COOKIE_SECONDS = 86400
 LOGIN_PANEL_SECONDS = 60
 SMS_RESPONSE_SECONDS = 15
+QR_COOKIE_SECONDS = 20
+LOGIN_SIGNAL_SECONDS = 10
 
 
 # All DOM text (including reflected codes), form fields and editable content
@@ -183,8 +185,10 @@ class SmsBrowser:
         self.frame_token = ''
         self.initial_sessions = {}
         self.qr_confirmed = False
+        self.qr_confirmed_at = None
         self.qr_generation = 0
         self.login_signals = {}
+        self.login_signals_at = 0
 
     def step(self, name, condition, timeout):
         self.stage = name
@@ -342,6 +346,12 @@ class SmsBrowser:
                 or parsed.username or parsed.password or self.fatal):
             raise Stop(4, self.fatal_reason or 'login_origin_or_access')
 
+    def login_redirect_page(self):
+        parsed = urlsplit(self.page.url)
+        return (parsed.scheme == 'https' and not parsed.username and not parsed.password and
+                parsed.port in (None, 443) and in_domains(parsed.hostname or '',
+                    ('douyin.com', 'iesdouyin.com', 'snssdk.com', 'amemv.com', 'bytedance.com')))
+
     def contains_private(self, value):
         decoded = unquote(value)
         return any(v in decoded or quote(v, safe='') in value or
@@ -394,7 +404,12 @@ class SmsBrowser:
         request = route.request
         reason = 'stopped' if self.fatal or self.cancel.is_set() else self.blocked_url(request.url)
         allowed = not reason
-        if not allowed or request.method != 'GET':
+        if allowed and request.method == 'GET' and request.resource_type == 'document':
+            host = urlsplit(request.url).hostname or ''
+            domain = host if host in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
+            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_document',
+                  method='GET', domain=domain, path='[redacted]')
+        elif not allowed or request.method != 'GET':
             audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason or 'allowed_login',
                   **self.request_metadata(request.url, request.method))
         if not allowed:
@@ -459,14 +474,19 @@ class SmsBrowser:
 
     def redirected_request(self, request):
         # Playwright routes only see the first URL in a redirect chain.
-        if request.redirected_from is not None and request.method != 'GET':
+        if request.redirected_from is not None and request.method == 'GET' and request.resource_type == 'document':
+            host = urlsplit(request.url).hostname or ''
+            domain = host if host in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
+            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_redirect',
+                  method='GET', domain=domain, path='[redacted]')
+        elif request.redirected_from is not None and request.method != 'GET':
             audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_redirect',
                   **self.request_metadata(request.url, request.method))
 
     def response(self, response):
         parsed = urlsplit(response.url)
         if (parsed.scheme == 'https' and parsed.hostname == 'login.douyin.com' and
-                parsed.path.rstrip('/') == '/passport/web/check_qrconnect' and response.status == 200):
+                parsed.path.rstrip('/') == '/passport/web/check_qrconnect'):
             task = asyncio.create_task(self.read_qr_response(response, self.qr_generation))
             self.guard_tasks.add(task)
             task.add_done_callback(self.guard_tasks.discard)
@@ -475,15 +495,26 @@ class SmsBrowser:
             self.fatal = True
 
     async def read_qr_response(self, response, generation):
+        status = None
+        redirect = False
         try:
             async with asyncio.timeout(2):
                 body = await response.json()
-            # shortcut: status 3 is uncalibrated for this endpoint; verify against a live response before expanding.
-            if (generation == self.qr_generation and type(body) is dict and
-                    type(body.get('data')) is dict and body['data'].get('status') == '3'):
+            if type(body) is dict:
+                data = body.get('data') if type(body.get('data')) is dict else {}
+                value = data.get('status')
+                if type(value) in (str, int) and str(value) in ('0', '1', '2', '3', '4', '5'):
+                    status = int(value)
+                redirect = any(bool(obj.get(key)) for obj in (body, data)
+                               for key in ('redirect_url', 'redirectUrl'))
+            if response.status == 200 and generation == self.qr_generation and status == 3:
                 self.qr_confirmed = True
+                if self.qr_confirmed_at is None:
+                    self.qr_confirmed_at = time.monotonic()
         except Exception:
             pass
+        audit('qrconnect_response', session=self.audit_id, http_status=response.status,
+              status=status, has_redirect=redirect)
 
     def guard_response(self, event, session=None):
         task = asyncio.create_task(self.check_response(event, session))
@@ -544,6 +575,7 @@ class SmsBrowser:
     async def reset(self, mode="qr"):
         self.qr_generation += 1
         self.qr_confirmed = False
+        self.qr_confirmed_at = None
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
@@ -693,7 +725,12 @@ class SmsBrowser:
                      urlsplit(page.url).netloc == urlsplit(self.url).netloc]
             if not pages:
                 if not self.page.is_closed() and self.page.url != 'about:blank':
-                    self.require_origin()
+                    if not self.login_redirect_page():
+                        self.require_origin()
+                    if await self._challenge(redirect=True):
+                        raise Stop(3, 'verification_required')
+                await self.cookie_signals(None, None)
+                await self.check_qr_cookie_timeout()
                 return 'pending'
             previous = self.page
             for page in pages:
@@ -705,6 +742,7 @@ class SmsBrowser:
                 if await self.login_confirmed():
                     return 'succeeded'
             self.page = previous if previous in pages else pages[-1]
+            await self.check_qr_cookie_timeout()
             if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
                     '验证码错误', exact=False).filter(visible=True).count()):
                 raise Stop(4, 'code_invalid')
@@ -712,7 +750,8 @@ class SmsBrowser:
         except Exception as error:
             if self.transient_read(error) or (not self.fatal and
                     ((type(error).__name__ == 'TargetClosedError' and self.page.is_closed()) or
-                     (isinstance(error, Stop) and (self.page.is_closed() or self.page.url == 'about:blank')))):
+                     (isinstance(error, Stop) and error.reason != 'qr_confirmed_no_fresh_session_cookie' and
+                      (self.page.is_closed() or self.page.url == 'about:blank')))):
                 return 'pending'
             raise
 
@@ -722,18 +761,35 @@ class SmsBrowser:
         selectors = site.SIGNALS['logged_in'] if self.backend else site.SIGNALS['logged_in'][:1]
         avatar = bool(await self.read_dom('account_signal',
             lambda: self.page.locator(', '.join(selectors)).filter(visible=True).count()))
+        valid = await self.cookie_signals(panel, avatar)
+        fresh = any(self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in valid)
+        return bool(valid) and ((not panel and avatar) or (fresh and self.qr_confirmed))
+
+    async def cookie_signals(self, panel, avatar):
+        all_cookies = await self.context.cookies()
         cookies = await self.context.cookies(self.url)
         names = ('sessionid', 'sessionid_ss', 'sid_tt')
         valid = [c for c in cookies if c['name'] in names and c.get('value') and
                  in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com'))]
-        fresh = any(self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in valid)
         signals = dict(panel_visible=panel, avatar_visible=avatar,
                        **{name: any(c['name'] == name for c in valid) for name in names},
-                       qr_confirmed=self.qr_confirmed)
-        if signals != self.login_signals:
+                       qr_confirmed=self.qr_confirmed,
+                       **{name + '_any_domain': any(c['name'] == name and bool(c.get('value'))
+                                                  for c in all_cookies) for name in names})
+        now = time.monotonic()
+        if signals != self.login_signals or now - self.login_signals_at >= LOGIN_SIGNAL_SECONDS:
             self.login_signals = signals
+            self.login_signals_at = now
             audit('login_signals', session=self.audit_id, **signals)
-        return bool(valid) and ((not panel and avatar) or (fresh and self.qr_confirmed))
+        return valid
+
+    async def check_qr_cookie_timeout(self):
+        if self.qr_confirmed_at is not None and time.monotonic() - self.qr_confirmed_at >= QR_COOKIE_SECONDS:
+            cookies = await self.context.cookies(self.url)
+            if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') and c.get('value') and
+                       in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com')) and
+                       self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in cookies):
+                raise Stop(4, 'qr_confirmed_no_fresh_session_cookie')
 
     def sms_request(self, url, method):
         parsed = urlsplit(url)
@@ -1063,8 +1119,9 @@ class SmsBrowser:
     async def challenge(self):
         return await self.read_dom('challenge_read', self._challenge)
 
-    async def _challenge(self):
-        self.require_origin()
+    async def _challenge(self, *, redirect=False):
+        if not redirect or self.fatal or not self.login_redirect_page():
+            self.require_origin()
         for frame in self.page.frames:
             candidates = frame.locator(CHALLENGE).filter(visible=True)
             self.operation = 'challenge_candidates_count'
@@ -1160,6 +1217,9 @@ class SmsBrowser:
 
     async def frame(self, verification):
         if self.page.is_closed() or self.page.url == 'about:blank':
+            reject('frame_unavailable')
+        if not self.fatal and self.page.url != self.url and self.login_redirect_page() and \
+                urlsplit(self.page.url).netloc != urlsplit(self.url).netloc:
             reject('frame_unavailable')
         self.require_origin()
         if verification:

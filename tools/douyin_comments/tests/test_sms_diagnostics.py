@@ -255,6 +255,7 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
         browser.page.locator.return_value.filter.return_value.count = AsyncMock(return_value=1)
         browser.initial_sessions = {('sessionid', '.douyin.com', '/'): 'synthetic'}
         response = MagicMock()
+        response.status = 200
         response.json = AsyncMock(return_value={'data': {'status': '3'}})
         await browser.read_qr_response(response, browser.qr_generation)
         self.assertFalse(await browser.login_confirmed())
@@ -269,6 +270,78 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
         await browser.read_qr_response(response, browser.qr_generation - 1)
         self.assertFalse(await browser.login_confirmed())
         self.assertEqual(set(browser.login_signals.values()), {True, False})
+
+    async def test_qr_status_diagnostics_and_numeric_confirmation(self):
+        browser = SmsBrowser('/unused')
+        response = Mock(status=200, json=AsyncMock(return_value={
+            'data': {'status': 3, 'redirect_url': 'https://example.invalid/?secret=private'}}))
+        log = io.StringIO()
+        with redirect_stderr(log):
+            await browser.read_qr_response(response, 0)
+        event = json.loads(log.getvalue())
+        self.assertEqual((event['status'], event['has_redirect']), (3, True))
+        self.assertTrue(browser.qr_confirmed)
+        self.assertNotIn('private', log.getvalue())
+        browser.qr_confirmed = False
+        response.status = 500
+        with redirect_stderr(io.StringIO()):
+            await browser.read_qr_response(response, 0)
+        self.assertFalse(browser.qr_confirmed)
+
+    async def test_all_domain_cookie_diagnostics_keep_success_scoped_to_main_site(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser.page.locator.return_value.filter.return_value.count = AsyncMock(return_value=1)
+        other = dict(name='sessionid', value='synthetic-secret', domain='sso.douyin.com', path='/')
+        browser.context = Mock(cookies=AsyncMock(side_effect=lambda *args: [] if args else [other]))
+        browser.qr_confirmed = True
+        log = io.StringIO()
+        with redirect_stderr(log):
+            self.assertFalse(await browser.login_confirmed())
+        event = json.loads(log.getvalue())
+        self.assertTrue(event['sessionid_any_domain'])
+        self.assertFalse(event['sessionid'])
+        self.assertNotIn('synthetic-secret', log.getvalue())
+
+    async def test_signals_repeat_and_confirmed_without_cookie_fails(self):
+        browser = SmsBrowser('/unused')
+        browser.context = Mock(cookies=AsyncMock(return_value=[]))
+        log = io.StringIO()
+        with redirect_stderr(log), patch('dyc.sms_browser.time.monotonic', side_effect=[100, 105, 110, 120]):
+            await browser.cookie_signals(None, None)
+            await browser.cookie_signals(None, None)
+            await browser.cookie_signals(None, None)
+            browser.qr_confirmed_at = 100
+            with self.assertRaises(Stop) as caught:
+                await browser.check_qr_cookie_timeout()
+        self.assertEqual(caught.exception.reason, 'qr_confirmed_no_fresh_session_cookie')
+        self.assertEqual(len(log.getvalue().splitlines()), 2)
+
+    async def test_document_navigation_logs_no_url_values(self):
+        browser = SmsBrowser('/unused')
+        request = Mock(url='https://sso.douyin.com/private-token?ticket=secret', method='GET',
+                       resource_type='document', redirected_from=object())
+        route = Mock(request=request, abort=AsyncMock(), continue_=AsyncMock())
+        log = io.StringIO()
+        with redirect_stderr(log):
+            await browser.route(route)
+            browser.redirected_request(request)
+        route.continue_.assert_awaited_once()
+        self.assertEqual(len(log.getvalue().splitlines()), 2)
+        self.assertNotIn('secret', log.getvalue())
+        self.assertNotIn('private-token', log.getvalue())
+
+    async def test_qr_timeout_requires_fresh_main_site_cookie(self):
+        browser = SmsBrowser('/unused')
+        cookie = dict(name='sessionid', value='synthetic-old', domain='.douyin.com', path='/')
+        browser.context = Mock(cookies=AsyncMock(return_value=[cookie]))
+        browser.initial_sessions = {('sessionid', '.douyin.com', '/'): 'synthetic-old'}
+        browser.qr_confirmed_at = 100
+        with patch('dyc.sms_browser.time.monotonic', return_value=121):
+            with self.assertRaises(Stop):
+                await browser.check_qr_cookie_timeout()
+            cookie['value'] = 'synthetic-new'
+            await browser.check_qr_cookie_timeout()
 
     async def test_transport_error_is_not_a_guard_rejection(self):
         from unittest.mock import AsyncMock
