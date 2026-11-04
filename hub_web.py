@@ -17,6 +17,7 @@ from hub_paths import state_dir
 
 from aiohttp import web
 import hub_bridge
+from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
@@ -472,6 +473,7 @@ def openapi():
         ('/api/v1/export.csv', 'get', '导出已存储趋势 CSV'),
         ('/api/v1/hot/latest', 'get', '读取最近一次完整热榜快照，不触发抓取'),
         ('/api/v1/hot/word', 'get', '读取一个话题的实际上榜记录，不触发抓取'),
+        ('/api/v1/hot/rising', 'get', '按本库热榜快照计算飙升指标，不触发抓取'),
     ]:
         operation = {'summary': summary, 'operationId': method + '_' + path.rsplit('/', 1)[-1].replace('.', '_').replace('{', '').replace('}', ''),
                      'responses': {'200': {'description': '成功'}, '400': error, '401': error, '403': error, '429': error}}
@@ -805,6 +807,14 @@ def mount(app, hub):
         history['live_request'] = False
         return reply(history)
 
+    async def hot_rising(request):
+        require(request)
+        if request.query:
+            raise HubError('invalid_parameters', '飙升结果不接受查询参数。')
+        report = rising_report(s)
+        report.update(live_request=False, note=RISING_NOTE)
+        return reply(report)
+
     async def hot_resume(request):
         require(request, admin=True)
         s.set('hot_paused', None)
@@ -838,6 +848,7 @@ def mount(app, hub):
     app.router.add_post('/api/v1/collection/resume', resume)
     app.router.add_get('/api/v1/hot/latest', hot_latest)
     app.router.add_get('/api/v1/hot/word', hot_word)
+    app.router.add_get('/api/v1/hot/rising', hot_rising)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)

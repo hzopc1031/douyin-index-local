@@ -15,8 +15,9 @@ import requests
 from aiohttp.test_utils import TestClient, TestServer
 
 from desktop_gateway import HUB_KEY, create_app
+from hot_rising import rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError, project_hot_list
-from hub_store import HubError, Store, TZ
+from hub_store import HubError, Store, TZ, encode
 from hub_web import HOT_DAILY_SUCCESS_LIMIT, Hub, hotlist_interval_seconds
 
 
@@ -355,3 +356,204 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status['hotlist']['enabled'])
         self.assertEqual(status['hotlist']['daily_success_limit'], 48)
         self.assertEqual(status['daily_online_attempts'], 0)
+
+    async def test_rising_read_does_not_spend_search_quota(self):
+        self.hub.store.set('daily', {'date': '2026-11-04', 'count': 7})
+        self.seed()
+        self.assertEqual((await self.client.get('/api/v1/hot/rising')).status, 401)
+        response = await self.client.get('/api/v1/hot/rising', headers=self.reader)
+        self.assertEqual(response.status, 200)
+        body = await response.json()
+        self.assertFalse(body['live_request'])
+        self.assertIn('不是搜索指数', body['note'])
+        self.assertIn('rank_rise', body['thresholds'])
+        self.assertEqual(body['thresholds']['rank_rise'], 10)
+        self.assertEqual(self.hub.store.get('daily'), {'date': '2026-11-04', 'count': 7})
+        self.assertEqual(self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 0)
+        schema = await (await self.client.get('/api/v1/openapi.json', headers=self.reader)).json()
+        self.assertIn('/api/v1/hot/rising', schema['paths'])
+        rejected = await self.client.get('/api/v1/hot/rising?word=合成话题甲', headers=self.reader)
+        self.assertEqual(rejected.status, 400)
+
+
+class RisingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(Path(self.temp.name) / 'hub.sqlite3')
+        self.addCleanup(self.store.close)
+        self.current = dt.datetime(2026, 11, 4, 12, tzinfo=TZ)
+        self.store.set('daily', {'date': '2026-11-04', 'count': 7})
+
+    def entry(self, word, position, hot, sentence_id='s1'):
+        if sentence_id:
+            key, kind = 'id:' + sentence_id, 'sentence_id'
+        else:
+            key, kind, sentence_id = 'word:' + word, 'word', None
+        return {'item_key': key, 'key_kind': kind, 'sentence_id': sentence_id, 'word': word,
+                'position': position, 'hot_value': hot, 'label': None, 'event_time': None,
+                'video_count': None, 'sentence_tag': None, 'word_type': None, 'group_id': None}
+
+    def put(self, seconds_before, items):
+        stamp = self.current - dt.timedelta(seconds=seconds_before)
+        self.store.save_hot_snapshot({'complete': True, 'board': 'word_list', 'source': HOT_LIST_URL,
+                                      'fetched_at': stamp.isoformat(), 'items': items})
+
+    def report(self):
+        return rising_report(self.store)
+
+    def by_word(self, word='合成话题甲'):
+        return next(item for item in self.report()['items'] if item['word'] == word)
+
+    def test_no_baseline_leaves_dependent_metrics_null_and_marks_new(self):
+        self.put(0, [self.entry('合成话题甲', 4, 1000)])
+        item = self.by_word()
+        self.assertIsNone(self.report()['baseline_fetched_at'])
+        self.assertTrue(item['new_entry'])
+        self.assertIsNone(item['rank_rise'])
+        self.assertIsNone(item['rank_rise_hit'])
+        self.assertIsNone(item['heat_pct'])
+        self.assertIsNone(item['heat_hit'])
+        self.assertIsNone(item['z_score'])
+        self.assertIsNone(item['search_index_ratio'])
+        self.assertNotEqual(item['baseline_position'], 50)
+        self.assertEqual(self.store.get('daily')['count'], 7)
+
+    def reset(self):
+        with self.store.db:
+            self.store.db.execute('DELETE FROM hot_snapshots')
+
+    def test_baseline_window_edges(self):
+        current = [self.entry('合成话题甲', 5, 2_000_000, 'edge')]
+        self.put(29 * 60, [self.entry('合成话题甲', 20, 1_000_000, 'edge')])
+        self.put(0, current)
+        self.assertIsNone(self.report()['baseline_fetched_at'])
+        self.assertIsNone(self.by_word()['rank_rise'])
+        self.assertFalse(self.by_word()['new_entry'])
+        self.reset()
+        self.put(30 * 60, [self.entry('合成话题甲', 20, 1_000_000, 'edge')])
+        self.put(0, current)
+        self.assertEqual(self.by_word()['rank_rise'], 15)
+        self.reset()
+        self.put(6 * 3600, [self.entry('合成话题甲', 8, 1_000_000, 'edge')])
+        self.put(0, current)
+        self.assertEqual(self.by_word()['baseline_position'], 8)
+        self.reset()
+        self.put(6 * 3600 + 1, [self.entry('合成话题甲', 8, 1_000_000, 'edge')])
+        self.put(0, current)
+        self.assertIsNone(self.report()['baseline_fetched_at'])
+        self.reset()
+        self.put(2 * 3600, [self.entry('合成话题甲', 11, 1_000_000, 'edge')])
+        self.put(5 * 3600, [self.entry('合成话题甲', 40, 1_000_000, 'edge')])
+        self.put(0, current)
+        self.assertEqual(self.by_word()['baseline_position'], 11)
+
+    def test_new_entry_uses_24_hour_identity(self):
+        self.put(23 * 3600, [self.entry('合成话题甲', 3, 10, 'old')])
+        self.put(0, [self.entry('合成话题甲', 3, 10, 'old'), self.entry('新话题', 9, 10, 'fresh')])
+        self.assertFalse(self.by_word()['new_entry'])
+        self.assertTrue(self.by_word('新话题')['new_entry'])
+        self.store.db.execute('DELETE FROM hot_snapshots')
+        self.store.db.commit()
+        self.put(25 * 3600, [self.entry('合成话题甲', 3, 10, 'old')])
+        self.put(0, [self.entry('合成话题甲', 3, 10, 'old')])
+        self.assertTrue(self.by_word()['new_entry'])
+        self.assertIsNone(self.by_word()['rank_rise'])
+
+    def test_rank_and_heat_thresholds_and_missing_previous(self):
+        self.put(3600, [
+            self.entry('刚好命中', 25, 1_000_000, 'hit'),
+            self.entry('名次不够', 26, 1_000_000, 'rank'),
+            self.entry('升幅不够', 19, 1_000_000, 'small'),
+            self.entry('热度比例不够', 2, 2_000_000, 'pct'),
+            self.entry('热度增量不够', 3, 100_000, 'delta'),
+            self.entry('热度缺失', 4, None, 'missing'),
+            self.entry('热度为零', 5, 0, 'zero'),
+        ])
+        self.put(0, [
+            self.entry('刚好命中', 15, 1_500_000, 'hit'),
+            self.entry('名次不够', 16, 1_500_000, 'rank'),
+            self.entry('升幅不够', 10, 1_500_000, 'small'),
+            self.entry('热度比例不够', 2, 2_900_000, 'pct'),
+            self.entry('热度增量不够', 3, 200_000, 'delta'),
+            self.entry('热度缺失', 4, 1_500_000, 'missing'),
+            self.entry('热度为零', 5, 1_500_000, 'zero'),
+            self.entry('基线没有', 6, 1_500_000, 'absent'),
+        ])
+        hit = self.by_word('刚好命中')
+        self.assertEqual(hit['rank_rise'], 10)
+        self.assertTrue(hit['rank_rise_hit'])
+        self.assertEqual(hit['heat_pct'], 0.5)
+        self.assertEqual(hit['heat_delta'], 500000)
+        self.assertTrue(hit['heat_hit'])
+        self.assertFalse(self.by_word('名次不够')['rank_rise_hit'])
+        self.assertEqual(self.by_word('升幅不够')['rank_rise'], 9)
+        self.assertFalse(self.by_word('升幅不够')['rank_rise_hit'])
+        self.assertFalse(self.by_word('热度比例不够')['heat_hit'])
+        self.assertFalse(self.by_word('热度增量不够')['heat_hit'])
+        self.assertIsNone(self.by_word('热度缺失')['heat_pct'])
+        self.assertIsNone(self.by_word('热度缺失')['heat_hit'])
+        self.assertIsNone(self.by_word('热度为零')['heat_pct'])
+        absent = self.by_word('基线没有')
+        self.assertIsNone(absent['rank_rise'])
+        self.assertIsNone(absent['baseline_position'])
+        self.assertNotEqual(absent['baseline_position'], 50)
+
+    def test_z_score_requires_eight_prior_values_and_nonzero_spread(self):
+        for index, heat in enumerate(range(1, 8), start=1):
+            self.put(index * 3600, [self.entry('合成话题甲', 1, heat)])
+        self.put(0, [self.entry('合成话题甲', 1, 100)])
+        self.assertIsNone(self.by_word()['z_score'])
+        self.assertIsNone(self.by_word()['z_hit'])
+        self.put(8 * 3600, [self.entry('合成话题甲', 1, 8)])
+        scored = self.by_word()
+        self.assertIsNotNone(scored['z_score'])
+        self.assertTrue(scored['z_hit'])
+        self.store.db.execute('DELETE FROM hot_snapshots')
+        self.store.db.commit()
+        for index in range(1, 9):
+            self.put(index * 3600, [self.entry('合成话题甲', 1, 5)])
+        self.put(0, [self.entry('合成话题甲', 1, 50)])
+        self.assertIsNone(self.by_word()['z_score'])
+        self.store.db.execute('DELETE FROM hot_snapshots')
+        self.store.db.commit()
+        for index in range(1, 9):
+            self.put(index * 3600, [self.entry('只有词', 1, index, sentence_id=None)])
+        self.put(0, [self.entry('只有词', 1, 100, sentence_id=None)])
+        self.assertIsNone(self.by_word('只有词')['z_score'])
+        self.assertEqual(self.by_word('只有词')['key_kind'], 'word')
+
+    def test_search_index_ratio_requires_both_calendar_days(self):
+        self.put(0, [self.entry('合成话题甲', 1, 10), self.entry('有环比', 2, 10, 'ratio')])
+        now = self.current.timestamp()
+        with self.store.db:
+            self.store.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                                  ('douyin', 'search_index', '全国', '合成话题甲', '2026-11-03',
+                                   encode(200), encode(999), now, 'gap'))
+            self.store.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                                  ('douyin', 'search_index', '全国', '合成话题甲', '2026-11-01',
+                                   encode(50), encode(None), now, 'older'))
+            self.store.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                                  ('douyin', 'search_index', '全国', '有环比', '2026-11-03',
+                                   encode(150), encode(999), now, 'latest'))
+            self.store.db.execute('INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                                  ('douyin', 'search_index', '全国', '有环比', '2026-11-02',
+                                   encode(100), encode(1), now, 'previous'))
+        missing = self.by_word()
+        self.assertEqual(missing['search_index_latest'], 200)
+        self.assertEqual(missing['search_index_previous_day'], '2026-11-02')
+        self.assertIsNone(missing['search_index_previous'])
+        self.assertIsNone(missing['search_index_ratio'])
+        paired = self.by_word('有环比')
+        self.assertEqual(paired['search_index_ratio'], 0.5)
+        self.assertNotEqual(paired['search_index_previous'], 1)
+
+    def test_thresholds_come_from_environment_then_settings(self):
+        self.put(3600, [self.entry('合成话题甲', 20, 1_000_000)])
+        self.put(0, [self.entry('合成话题甲', 10, 1_500_000)])
+        with patch.dict(os.environ, {'INDEX_HUB_RISING_RANK_RISE': '11'}):
+            self.assertFalse(self.by_word()['rank_rise_hit'])
+            self.store.set('hot_rising_thresholds', {'rank_rise': 10, 'heat_pct': 'nope'})
+            self.assertTrue(self.by_word()['rank_rise_hit'])
+            self.assertEqual(self.report()['thresholds']['heat_pct'], 0.5)
+            self.assertEqual(self.report()['thresholds']['rank_rise'], 10)

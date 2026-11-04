@@ -80,6 +80,15 @@ def run(output=None):
                                            dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
+                    elif path == 'hot/rising':
+                        data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
+                                    current_fetched_at='2026-11-04T12:00:00+08:00', baseline_fetched_at=None,
+                                    thresholds=dict(min_age_seconds=1800, max_age_seconds=21600, lookback_seconds=86400,
+                                                    rank_rise=10, rank_max=15, heat_pct=0.5, heat_delta=500000,
+                                                    z_min_samples=8, z_min=2),
+                                    items=[dict(word='合成话题甲', position=1, new_entry=True, rank_rise=None,
+                                                rank_rise_hit=None, heat_pct=None, heat_hit=None, z_score=None,
+                                                z_hit=None, search_index_ratio=None)])
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
@@ -300,6 +309,13 @@ def run(output=None):
                 page.locator('#hotSentence').fill('s1')
                 page.locator('#hotWordButton').click()
                 page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")
+                page.locator('#hotRisingButton').click()
+                page.wait_for_function("document.querySelector('#hotRisingRows').textContent.includes('合成话题甲')")
+                assert '本库热榜快照' in page.locator('#hotRisingNote').inner_text()
+                assert '不是搜索指数' in page.locator('#hotRisingNote').inner_text()
+                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
+                assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
+                assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()

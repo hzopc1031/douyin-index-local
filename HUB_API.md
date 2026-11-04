@@ -150,6 +150,20 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 `GET /status` 增加 `hotlist`：`enabled`、`paused`、`interval_seconds`、`daily_success_limit`、`daily_successes`。搜索指数的 `daily_online_attempts` 与此无关。
 
+## 飙升词（第二期）
+
+`GET /hot/rising` 只读取本库 `hot_snapshots` 和已保存的搜索指数，不抓热榜，不把官方 `trending_list` 当作飙升，也不创建搜索指数任务、不增加 `daily`。Bearer `read` 即可。响应含 `thresholds`、`current_fetched_at`、`baseline_fetched_at` 和每个当前上榜话题的各列。缺失为 null。页面「飙升」视图把 null 显示为 —。
+
+当前榜是最新一张完整快照。基线是早于它至少 `min_age_seconds`、至多 `max_age_seconds` 的最近一张；默认 1800 和 21600 秒。没有合格基线时，名次上升、热度变化及其命中为 null，不把缺失名次写成 50。
+
+- 新上榜：主键（有 `sentence_id` 用 `id:` 加该值，否则 `word:` 加精确词）在当前快照之前、回看 `lookback_seconds`（默认 86400）内没有出现。
+- 名次上升：`rise = 基线名次 - 当前名次`。默认命中为 `rise >= 10` 且当前名次 `<= 15`。
+- 热度变化：两边 `hot_value` 都为正时，`pct = (当前 - 基线) / 基线`。默认命中为 `pct >= 0.5` 且增量 `>= 500000`。0 或缺失不算正数。
+- z：只用同一 `sentence_id` 在当前快照之前的非空热度。少于 `z_min_samples`（默认 8）或样本标准差为 0 时 z 为 null。标准差用 n-1。默认 `z >= 2` 记为辅助命中。没有 `sentence_id` 的话题不计算 z。
+- 搜索指数环比：按话题原文精确匹配已存搜索指数，取最近一个非空日和它的前一个日历日。前一日缺失、为 null 或不大于 0 时环比为 null，不用更早的日期代替，也不读综合指数。
+
+阈值环境变量：`INDEX_HUB_RISING_MIN_AGE_SECONDS`、`INDEX_HUB_RISING_MAX_AGE_SECONDS`、`INDEX_HUB_RISING_LOOKBACK_SECONDS`、`INDEX_HUB_RISING_RANK_RISE`、`INDEX_HUB_RISING_RANK_MAX`、`INDEX_HUB_RISING_HEAT_PCT`、`INDEX_HUB_RISING_HEAT_DELTA`、`INDEX_HUB_RISING_Z_MIN_SAMPLES`、`INDEX_HUB_RISING_Z_MIN`。非法值回退默认。settings 键 `hot_rising_thresholds` 里字段合法时覆盖对应环境变量。若最小基线年龄大于最大年龄，这两个字段回退默认。接口和页面都返回实际生效的阈值。
+
 部署时不要在未确认前打开开关。开启步骤：只给 gateway 单元增加 `INDEX_HUB_HOTLIST_ENABLED=1`（间隔可选），然后重启 gateway。desktop 单元不用改，热榜不经过 Unix 桥。`hub.html` 由每次请求读盘，页面更新后刷新即可；调度和 API 随 gateway 进程生效。
 
 ## 扩展数据（试验接入）
