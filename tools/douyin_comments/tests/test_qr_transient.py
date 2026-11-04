@@ -93,7 +93,7 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_page_change_categories_are_transient(self):
         browser = self.browser()
-        for message in ('Execution context was destroyed', 'Cannot find context with specified id',
+        for message in ('Execution context was destroyed', 'Execution context changed', 'Cannot find context with specified id',
                         'Frame was detached', 'navigation interrupted', 'Element is not attached to the DOM'):
             browser.challenge.side_effect = Error(message)
             self.assertEqual(await browser.observe(), 'pending')

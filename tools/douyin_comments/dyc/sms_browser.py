@@ -205,6 +205,7 @@ class SmsBrowser:
         category = next((label for marker, label in (
             ('strict mode violation', 'strict_mode'),
             ('Execution context was destroyed', 'context_destroyed'),
+            ('Execution context changed', 'context_destroyed'),
             ('Cannot find context with specified id', 'context_destroyed'),
             ('Execution context is not available', 'context_destroyed'),
             ('navigation', 'navigation'),
