@@ -83,8 +83,8 @@ class Douyin:
 
 registry = Registry()
 registry.register(Douyin())
-registry.register(Placeholder({'id': 'baidu', 'name': '百度指数', 'available': False, 'metric': None,
-                               'description': '待接入，指标及授权方式尚未确定。'}))
+from baidu_adapter import BaiduAdapter
+registry.register(BaiduAdapter())
 registry.register(Placeholder({'id': 'google_trends', 'name': 'Google Trends', 'available': False, 'metric': None,
                                'description': '待接入；未来按其自身地区、时间窗和相对热度口径展示。'}))
 
