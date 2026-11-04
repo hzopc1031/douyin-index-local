@@ -274,3 +274,57 @@ class ViewTests(unittest.IsolatedAsyncioTestCase):
                     await browser.send(PHONE)
             browser.auto_step.assert_not_awaited()
             self.assertEqual(self.sends, 1)
+
+class ClickRoutingTests(unittest.IsolatedAsyncioTestCase):
+    asyncSetUp = fixture.SmsDomTests.asyncSetUp
+    browser = fixture.SmsDomTests.browser
+    backend = fixture.SmsDomTests.backend
+
+    async def test_iframe_coordinates_and_trusted_events(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate('''() => {
+              const f = document.createElement('iframe');
+              f.style.cssText = 'position:fixed;left:250px;top:250px;width:200px;height:100px';
+              f.srcdoc = '<button onclick="window.clicked=event.isTrusted">test</button>';
+              document.body.append(f);
+            }''')
+            button = browser.page.frame_locator('iframe').locator('button')
+            await button.wait_for()
+            box = await button.bounding_box()
+            x, y = box['x'] + box['width']/2, box['y'] + box['height']/2
+            self.assertFalse(await button.evaluate('''(e, p) => document.elementFromPoint(p.x, p.y) === e''', dict(x=x, y=y)))
+            await browser.page.mouse.click(x, y)
+            self.assertTrue(await button.evaluate('() => window.clicked === true'))
+
+    async def test_background_page_mouse_reaches_owned_page(self):
+        async with self.browser() as browser:
+            button = browser.send_button()
+            x, y, diagnostic = await browser.click_diagnostic(button)
+            self.assertTrue(diagnostic['hit'])
+            other = await browser.context.new_page()
+            await other.set_content('<button>other page</button>')
+            await browser.page.mouse.click(x, y)
+            observation = await browser.send_diagnostic()
+            for event in observation['events'].values():
+                self.assertTrue(event['arrived'] and event['trusted'])
+            self.assertEqual(self.sends, 1)
+
+    async def test_capture_listener_can_hide_real_events_from_diagnostic(self):
+        async with self.browser() as browser:
+            await browser.page.evaluate('''() => {
+              window.captureEvents = {};
+              for (const type of ['pointerdown', 'mousedown', 'click']) {
+                window.addEventListener(type, event => {
+                  window.captureEvents[type] = event.isTrusted;
+                  event.stopPropagation();
+                }, {capture:true});
+              }
+            }''')
+            x, y, diagnostic = await browser.click_diagnostic(browser.send_button())
+            self.assertTrue(diagnostic['hit'])
+            await browser.page.mouse.click(x, y)
+            self.assertEqual(await browser.page.evaluate('window.captureEvents'),
+                             dict(pointerdown=True, mousedown=True, click=True))
+            observation = await browser.send_diagnostic()
+            self.assertTrue(all(not event['arrived'] for event in observation['events'].values()))
+            self.assertEqual(self.sends, 0)
