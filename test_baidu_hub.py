@@ -228,6 +228,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('device,granularity,source,value_status', export)
             self.assertIn('baidu,search_index,全国', export)
             self.assertIn('all,day,index.baidu.com,available', export)
+            schema = await (await client.get('/api/v1/openapi.json')).json()
+            self.assertIn('/api/v1/login/baidu/open', schema['paths'])
             platforms = await (await client.get('/api/v1/platforms')).json()
             self.assertTrue(platforms['platforms'][1]['live_enabled'])
             state = await (await client.get('/api/v1/status')).json()

@@ -431,7 +431,7 @@ def openapi():
         if p['available'] and hasattr(platform, 'openapi_paths'):
             paths.update(platform.openapi_paths())
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
-             'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
+             'description': '自用平台聚合接口。抖音与百度搜索指数支持 1–5 词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
             'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'},
                                                'BasicAuth': {'type': 'http', 'scheme': 'basic'}},

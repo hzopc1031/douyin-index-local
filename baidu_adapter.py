@@ -387,6 +387,9 @@ class BaiduAdapter:
         import hub_baidu
         return hub_baidu.status_snapshot(store)
 
+    def openapi_paths(self):
+        return {'/api/v1/login/baidu/open': {'post': {'summary': '管理员打开百度登录窗口（需同源校验）', 'security': [{'BasicAuth': []}], 'responses': {'200': {'description': '窗口已打开'}, '403': {'description': '无管理员权限'}, '503': {'description': '浏览器不可用'}}}}}
+
     def mount_routes(self, app, hub, require, reply):
         import hub_baidu
         hub_baidu.mount_routes(app, hub, require, reply)
