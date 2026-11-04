@@ -18,6 +18,7 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
+from topic_board import topic_enabled, topic_view, validate_topic_query
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
@@ -521,6 +522,11 @@ def openapi():
         'get': {'summary': '用已保存数据计算工作台热度分，不触发采集',
                 'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
                 'responses': {'200': {'description': '成功'}, '401': error, '403': error, '404': error}}}
+    paths['/api/v1/topics'] = {
+        'get': {'summary': '读取已保存的热点宝话题。不抓取、不伪造；未启用或未登录时列表为空。',
+                'parameters': [{'in': 'query', 'name': name, 'required': False, 'schema': {'type': 'string'}}
+                               for name in ('category', 'rank', 'window')],
+                'responses': {'200': {'description': '成功；items 可为空'}, '400': error, '401': error, '403': error}}}
     for path, method in (('/api/v1/login/qr', 'get'), ('/api/v1/login/qr/image', 'get'),
                          ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
         paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
@@ -864,6 +870,13 @@ def mount(app, hub):
         require(request)
         return reply(group_score(s, s.get_group(group_id(request))))
 
+    async def topics(request):
+        require(request)
+        category, rank, window = validate_topic_query(request.query)
+        # Read stored rows only. Do not call the browser or start a collector.
+        return reply(topic_view(s.latest_topics(rank=rank, window=window, category=category),
+                                enabled=topic_enabled()))
+
     async def hot_resume(request):
         require(request, admin=True)
         s.set('hot_paused', None)
@@ -903,6 +916,7 @@ def mount(app, hub):
     app.router.add_put('/api/v1/groups/{id}', group_update)
     app.router.add_delete('/api/v1/groups/{id}', group_delete)
     app.router.add_get('/api/v1/groups/{id}/score', group_score_view)
+    app.router.add_get('/api/v1/topics', topics)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)

@@ -102,6 +102,13 @@ def run(output=None):
                                                       dict(keyword=words[-1], status='未上榜', ratio=None)],
                                              substring_hits=[dict(keyword=words[-1], word=words[-1] + '醋鱼')]),
                                     fusion=dict(score=None))
+                    elif path == 'topics':
+                        data = dict(status='disabled', status_label='未启用', window='1d', window_label='近1天',
+                                    rank=query.get('rank', ['total'])[0],
+                                    rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
+                                    category=query.get('category', ['全部'])[0],
+                                    categories=['全部', '美食', '旅行'], items=[], fetched_at=None,
+                                    live_request=False, note='热点宝话题不是搜索指数，待联调，不伪造话题。')
                     elif path == 'hot/rising':
                         data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
                                     current_fetched_at='2026-11-04T12:00:00+08:00', baseline_fetched_at=None,
@@ -338,7 +345,9 @@ def run(output=None):
                 assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
-                page.locator('[data-tab=groups]').click()
+                assert page.locator('[data-tab=groups]').count() == 0
+                assert '关键词组' not in page.locator('.nav').inner_text()
+                page.locator('[data-tab=overview]').click()
                 page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
                 assert '工作台热度分' in page.locator('#groupIntro').inner_text()
                 assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
@@ -368,6 +377,25 @@ def run(output=None):
                 assert page.locator('#groupWords').input_value() == ''
                 assert writes[group_writes] == ('groups/' + 'a' * 32, dict(name='合成组', keywords=['杭州', '灵隐寺']))
                 assert all(item[0] not in ('queries', 'insights/queries') for item in writes[group_writes:])
+                page.locator('[data-source=hot_search]').click()
+                page.wait_for_function("document.querySelector('#overviewHotRows').textContent.includes('合成话题甲')")
+                assert '—' in page.locator('#overviewHotRows').inner_text()
+                assert '不是搜索指数' in page.locator('#overviewHotIntro').inner_text()
+                assert page.locator('#keywordSelect').is_hidden()
+                assert page.locator('#resultTab-summary').is_hidden()
+                page.locator('[data-source=topic]').click()
+                page.wait_for_function("document.querySelector('#topicCategory').textContent.includes('美食')")
+                assert page.locator('#topicWindow').inner_text() == '近1天'
+                assert '未启用' in page.locator('#topicStatus').inner_text()
+                assert '不是搜索指数' in page.locator('#topicIntro').inner_text()
+                assert '待联调' in page.locator('#topicStatus').inner_text()
+                page.locator('#topicCategory').select_option('旅行')
+                page.locator('#topicRankRising').click()
+                page.wait_for_function("document.querySelector('#topicRankRising').getAttribute('aria-pressed')==='true'")
+                assert '合成话题' not in page.locator('#topicRows').inner_text()
+                assert '0' not in page.locator('#topicRows').inner_text()
+                page.locator('[data-platform=douyin]').click()
+                assert page.locator('#openQuery').is_visible()
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()

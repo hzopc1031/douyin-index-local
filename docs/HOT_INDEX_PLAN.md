@@ -34,6 +34,8 @@
 
 第二期飙升词已实现：`GET /api/v1/hot/rising` 与热榜页「飙升」视图只读 `hot_snapshots`。默认阈值是名次上升至少 10 且当前名次不超过 15、热度涨幅至少 0.5 且增量至少 50 万、z 至少 2（当前快照之前至少 8 个非空热度）。可用环境变量或 settings `hot_rising_thresholds` 覆盖，响应和页面展示生效值。搜索指数环比只在相邻两个日历日都有非空搜索指数时计算。不自动提交搜索指数任务。
 
+趋势总览的数据源保留抖音指数、百度指数、Google Trends，并增加只读「热搜榜」（复用 `/api/v1/hot/latest`，不另写抓取）。关键词组从侧栏移入趋势总览。热点宝话题只有表、`GET /api/v1/topics` 和筛选界面；`INDEX_HUB_TOPIC_ENABLED=1` 只把空状态改成未登录，不开始采集。真实抓取待服务器 Qt 浏览器登录后联调，空榜不补话题、热度缺失不补 0。
+
 ## 1. 现状
 
 仓库是单账号抖音搜索指数工具，外加腾讯云上的 Index Atlas 工作台。桌面入口是 `app.py` 与 `ui-batch.html`（pywebview）。云端由 `tencent-desktop.sh` 拉起 Xvfb、x11vnc 和 `app.py`（`PYWEBVIEW_GUI=qt`、`INDEX_HUB_ENABLED=1`）。`hub_bridge.py` 在本机 `0600` Unix socket 上收命令。`tencent-gateway.sh` 启动 `desktop_gateway.py`（aiohttp、TLS、Bearer / Basic）。仓库里没有 Dockerfile、cron 或 systemd timer。`deploy/systemd/` 是拆开的 desktop / gateway 模板，不自动安装。`tencent-enable-service.sh` 仍会写旧的合并单元 `douyin-index.service`，并且会把 `access.json` 打到标准输出。

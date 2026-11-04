@@ -8,6 +8,7 @@
 
 - `hot_snapshots`
 - `keyword_groups`
+- `topic_snapshots`（热点宝话题；空表，当前不抓取）
 
 已有的 `points`、`jobs`、`datasets`、`insights`、`keys`、`settings` 不改结构，搜索指数和综合指数仍分列。`points.composite` 不会被热榜或关键词组写入。
 

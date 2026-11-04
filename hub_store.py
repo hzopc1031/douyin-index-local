@@ -151,6 +151,13 @@ class Store:
             CREATE INDEX IF NOT EXISTS hot_snapshots_word ON hot_snapshots(word, fetched);
             CREATE TABLE IF NOT EXISTS keyword_groups(
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, keywords TEXT NOT NULL, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS topic_snapshots(
+                id TEXT NOT NULL, fetched REAL NOT NULL, rank TEXT NOT NULL,
+                window TEXT NOT NULL, category TEXT NOT NULL, item_key TEXT NOT NULL,
+                title TEXT NOT NULL, position INTEGER NOT NULL, hot_value TEXT,
+                source TEXT NOT NULL, PRIMARY KEY(id, item_key));
+            CREATE INDEX IF NOT EXISTS topic_snapshots_fetch
+                ON topic_snapshots(rank, window, category, fetched);
         ''')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
@@ -620,3 +627,68 @@ class Store:
         self.get_group(identifier)
         with self.db:
             self.db.execute('DELETE FROM keyword_groups WHERE id=?', (identifier,))
+
+    def save_topic_snapshot(self, snapshot):
+        """Store one complete topic board. Incomplete input is rejected.
+
+        No caller in the gateway fetches this yet. The Qt login integration
+        must pass only rows observed on the live page.
+        """
+        from topic_board import TOPIC_CATEGORIES, TOPIC_RANKS, TOPIC_WINDOW
+        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True:
+            raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+        rank, window, category = snapshot.get('rank'), snapshot.get('window'), snapshot.get('category')
+        items, source = snapshot.get('items'), snapshot.get('source')
+        if (rank not in TOPIC_RANKS or window != TOPIC_WINDOW or category not in TOPIC_CATEGORIES
+                or not isinstance(items, list) or not items
+                or not isinstance(source, str) or not source or len(source) > 200):
+            raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+        try:
+            stamp = dt.datetime.fromisoformat(snapshot['fetched_at'])
+            if stamp.tzinfo is None:
+                raise ValueError
+            fetched = stamp.timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise HubError('incomplete_snapshot', '话题采集时间无效，本次快照不入库。') from None
+        seen_titles, seen_positions = set(), set()
+        rows = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+            title, position = item.get('title'), item.get('position')
+            if (not isinstance(title, str) or not title or title in seen_titles
+                    or any(ord(char) < 32 or ord(char) == 127 for char in title)
+                    or type(position) is not int or position < 1 or position in seen_positions):
+                raise HubError('incomplete_snapshot', '话题或名次无法核验，本次快照不入库。')
+            heat = item.get('hot_value', None)
+            if heat is not None and (isinstance(heat, bool) or not isinstance(heat, (int, float))
+                                      or isinstance(heat, float) and not math.isfinite(heat) or heat < 0):
+                raise HubError('incomplete_snapshot', '话题热度无法核验，本次快照不入库。')
+            seen_titles.add(title)
+            seen_positions.add(position)
+            rows.append(('title:' + title, title, position, encode(heat)))
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.executemany(
+                'INSERT INTO topic_snapshots VALUES(?,?,?,?,?,?,?,?,?,?)',
+                [(identifier, fetched, rank, window, category, *row, source) for row in rows])
+        return identifier
+
+    def latest_topics(self, *, rank, window, category):
+        row = self.db.execute(
+            '''SELECT id FROM topic_snapshots
+               WHERE rank=? AND window=? AND category=?
+               ORDER BY fetched DESC, id DESC LIMIT 1''',
+            (rank, window, category)).fetchone()
+        if row is None:
+            return {'rank': rank, 'window': window, 'category': category,
+                    'fetched_at': None, 'source': None, 'items': []}
+        rows = self.db.execute(
+            'SELECT * FROM topic_snapshots WHERE id=? ORDER BY position', (row['id'],)).fetchall()
+        return {'rank': rank, 'window': window, 'category': category,
+                'source': rows[0]['source'],
+                'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
+                'items': [{'title': item['title'], 'position': item['position'],
+                           'hot_value': json.loads(item['hot_value']),
+                           'fetched_at': dt.datetime.fromtimestamp(item['fetched'], TZ).isoformat()}
+                          for item in rows]}

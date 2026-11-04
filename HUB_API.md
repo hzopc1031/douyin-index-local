@@ -186,6 +186,12 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 融合分：搜索分和热榜分都有值时为 `search_weight × 搜索分 + hot_weight × 热榜分`，否则 null。默认权重 0.7 和 0.3。环境变量 `INDEX_HUB_GROUP_SEARCH_WEIGHT`、`INDEX_HUB_GROUP_HOT_WEIGHT` 取 0 到 1 的有限数；settings 键 `group_score_weights` 的合法字段再覆盖。页面显示实际权重。文案固定为工作台热度分，不是搜索次数，也不是抖音综合指数。
 
+关键词组的新建、编辑、删除和查看分数在趋势总览里完成，侧栏不再单开一页。
+
+## 热点宝·话题（待联调）
+
+`GET /topics` 只读 `topic_snapshots`。默认 `window=1d`（近1天）、`rank=total`（总榜，另一值为 `rising` 飙升）、`category=全部`。垂类必须是响应里的 `categories` 之一。没有快照时 `items` 为空：`INDEX_HUB_TOPIC_ENABLED` 不是精确的 `1` 时 `status=disabled`（未启用）；设为 `1` 时 `status=not_logged_in`（未登录）。这个开关不会发起抓取。真实采集要等服务器 Qt 浏览器登录后联调，当前不调用浏览器、不自动重试，也不伪造话题。已存快照里的热度缺失仍是 null，不补 0。话题、热搜榜和搜索指数彼此分开。分类名称待与热点宝页面核对，见 `topic_board.py`。
+
 ## 扩展数据（试验接入）
 POST /api/v1/insights/queries：与 queries 相同的 Bearer/query 权限及 Idempotency-Key，增加 kind=related 或 audience，keywords 恰好一个；支持 start_date/end_date。每个模块独立任务、一次在线尝试，复用全局 50 次日限额、15 秒间隔与 24 小时缓存。结果通过 jobs/{id} 获取。
 GET /api/v1/insights?keyword=酵素&kind=related&start_date=2026-10-21&end_date=2026-10-27：仅历史读取；status=available 或 not_collected，result 含 data、metadata。关联词包含 content_related、search_related；画像包含 dimensions[].labels[].name/value/tgi。value 是接口原值，尚未核实百分比单位。无内容时不伪造数据。
