@@ -135,7 +135,7 @@ SQLite 由 `hub_web.py` 打开为 `{INDEX_HUB_STATE_DIR}/index-hub.sqlite3`（`h
 
 未上榜是否贡献 0、子串是否算命中、融合权重，见「待评审」。确认前，融合分先不对外标成单一结论，只并列展示已有的子分数。
 
-API：`POST/GET /api/v1/groups`、`GET /api/v1/groups/{id}/score`。查询搜索指数仍走现有 `POST /api/v1/queries`，由用户点击，1–5 词，占用原配额。热榜抓取不增加 `daily` 计数。
+API：`POST/GET /api/v1/groups`、`PUT /api/v1/groups/{id}`、`GET /api/v1/groups/{id}/score`。更新只改名称和关键词，不提交搜索指数任务。查询搜索指数仍走现有 `POST /api/v1/queries`，由用户点击，1–5 词，占用原配额。热榜抓取不增加 `daily` 计数。
 
 ## 5. 四个阶段
 

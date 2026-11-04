@@ -510,6 +510,10 @@ def openapi():
                  'requestBody': {'required': True, 'content': {'application/json': {'schema': {'type': 'object'}}}},
                  'responses': {'201': {'description': '已创建'}, '400': error, '401': error, '403': error}}}
     paths['/api/v1/groups/{id}'] = {
+        'put': {'summary': '更新关键词组的名称和关键词。不提交搜索指数任务。',
+                'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
+                'requestBody': {'required': True, 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                'responses': {'200': {'description': '已更新'}, '400': error, '401': error, '403': error, '404': error}},
         'delete': {'summary': '删除关键词组，不删除已保存的搜索指数',
                    'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
                    'responses': {'200': {'description': '已删除'}, '401': error, '403': error, '404': error}}}
@@ -845,6 +849,12 @@ def mount(app, hub):
         return reply({'group': s.create_group(name, keywords), 'live_request': False,
                       'note': '已保存关键词组，未提交搜索指数任务。'}, 201)
 
+    async def group_update(request):
+        require(request, 'query')
+        name, keywords = validate_group(await read_json(request))
+        return reply({'group': s.update_group(group_id(request), name, keywords), 'live_request': False,
+                      'note': '已更新关键词组，未提交搜索指数任务。'})
+
     async def group_delete(request):
         require(request, 'query')
         s.delete_group(group_id(request))
@@ -890,6 +900,7 @@ def mount(app, hub):
     app.router.add_get('/api/v1/hot/rising', hot_rising)
     app.router.add_get('/api/v1/groups', groups)
     app.router.add_post('/api/v1/groups', groups)
+    app.router.add_put('/api/v1/groups/{id}', group_update)
     app.router.add_delete('/api/v1/groups/{id}', group_delete)
     app.router.add_get('/api/v1/groups/{id}/score', group_score_view)
     app.router.add_post('/api/v1/hot/resume', hot_resume)

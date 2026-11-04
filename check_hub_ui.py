@@ -40,7 +40,8 @@ def run(output=None):
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
                 errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None}
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None,
+                           'groups': [dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])]}
 
                 def route(request_route):
                     request = request_route.request
@@ -58,6 +59,14 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif request.method == 'PUT' and path.startswith('groups/') and path.count('/') == 1:
+                            body = request.post_data_json or {}
+                            gid = path.split('/', 1)[1]
+                            updated = dict(id=gid, name=body.get('name'), keywords=list(body.get('keywords') or []))
+                            fixture['groups'] = [updated if item['id'] == gid else item for item in fixture['groups']]
+                            if not any(item['id'] == gid for item in fixture['groups']):
+                                fixture['groups'].insert(0, updated)
+                            data = dict(group=updated, live_request=False, note='已更新关键词组，未提交搜索指数任务。')
                     elif path == 'platforms': data = dict(platforms=PLATFORMS)
                     elif path == 'status':
                         status_reads.append(request.url)
@@ -81,16 +90,17 @@ def run(output=None):
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
                     elif path == 'groups' and request.method == 'GET':
-                        data = dict(groups=[dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])],
+                        data = dict(groups=fixture['groups'],
                                     note='工作台热度分，不是搜索次数，也不是抖音综合指数。')
                     elif path.startswith('groups/') and path.endswith('/score'):
+                        words = fixture['groups'][0]['keywords']
                         data = dict(note='工作台热度分，不是搜索次数，也不是抖音综合指数。',
                                     weights=dict(search=0.7, hot=0.3),
-                                    search=dict(score=None, missing=[dict(day='2026-11-03', keyword='西湖')]),
+                                    search=dict(score=None, missing=[dict(day='2026-11-03', keyword=words[-1])]),
                                     hot=dict(score=None, snapshot_status='available',
-                                             members=[dict(keyword='杭州', status='exact', ratio=1),
-                                                      dict(keyword='西湖', status='未上榜', ratio=None)],
-                                             substring_hits=[dict(keyword='西湖', word='西湖醋鱼')]),
+                                             members=[dict(keyword=words[0], status='exact', ratio=1),
+                                                      dict(keyword=words[-1], status='未上榜', ratio=None)],
+                                             substring_hits=[dict(keyword=words[-1], word=words[-1] + '醋鱼')]),
                                     fusion=dict(score=None))
                     elif path == 'hot/rising':
                         data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
@@ -332,19 +342,40 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
                 assert '工作台热度分' in page.locator('#groupIntro').inner_text()
                 assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
+                assert '名称只用于显示' in page.locator('#groupIntro').inner_text()
+                assert '不会触发搜索查询' in page.locator('#groupIntro').inner_text()
+                assert page.locator('#groupEdit').inner_text() == '编辑这组'
                 page.locator('#groupScoreButton').click()
                 page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('未上榜')")
                 assert '0.7' in page.locator('#groupWeights').inner_text()
                 assert page.locator('#groupFusionScore').inner_text() == '—'
                 assert '西湖醋鱼' in page.locator('#groupMembers').inner_text()
+                page.locator('#groupEdit').click()
+                assert page.locator('#groupName').input_value() == '合成组'
+                assert page.locator('#groupWords').input_value() == '杭州\n西湖'
+                assert page.locator('#groupCreate').inner_text() == '更新关键词组'
+                page.locator('#groupWords').fill('杭州\n灵隐寺')
+                group_writes = len(writes)
+                page.locator('#groupCreate').click()
+                page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('灵隐寺')")
+                assert '灵隐寺醋鱼' in page.locator('#groupMembers').inner_text()
+                assert '未上榜' in page.locator('#groupMembers').inner_text()
+                assert page.locator('#groupFusionScore').inner_text() == '—'
+                assert page.locator('#groupSearchScore').inner_text() == '—'
+                assert page.locator('#groupHotScore').inner_text() == '—'
+                assert '合成组' in page.locator('#groupSelect').inner_text()
+                assert page.locator('#groupCreate').inner_text() == '保存关键词组'
+                assert page.locator('#groupWords').input_value() == ''
+                assert writes[group_writes] == ('groups/' + 'a' * 32, dict(name='合成组', keywords=['杭州', '灵隐寺']))
+                assert all(item[0] not in ('queries', 'insights/queries') for item in writes[group_writes:])
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
                 page.locator('#submitButton').click()
                 page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
-                assert len(writes)==3
-                assert [path for path,_ in writes]==['queries','insights/queries','insights/queries']
-                assert writes[0][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
+                assert len(writes)==4
+                assert [path for path,_ in writes]==['groups/'+'a'*32,'queries','insights/queries','insights/queries']
+                assert writes[1][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
                 assert not page.locator('#queryDialog').is_visible()
                 page.wait_for_function('!refreshing')
                 fixture.update(login='expired', paused=dict(code='authentication_required'))
@@ -360,7 +391,7 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#historyRows').textContent.includes('暂无结果')")
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
-                assert len(writes)==3
+                assert len(writes)==4
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')

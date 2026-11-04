@@ -609,6 +609,13 @@ class Store:
             raise HubError('group_not_found', '关键词组不存在。', 404)
         return self._group(row)
 
+    def update_group(self, identifier, name, keywords):
+        self.get_group(identifier)
+        with self.db:
+            self.db.execute('UPDATE keyword_groups SET name=?, keywords=? WHERE id=?',
+                            (name, encode(keywords), identifier))
+        return self.get_group(identifier)
+
     def delete_group(self, identifier):
         self.get_group(identifier)
         with self.db:

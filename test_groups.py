@@ -17,7 +17,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from desktop_gateway import HUB_KEY, create_app
 from group_score import group_score
 from hotlist_client import HOT_LIST_URL
-from hub_store import Store, TZ, encode
+from hub_store import HubError, Store, TZ, encode
 
 
 def entry(word, position, hot, sentence_id=None):
@@ -120,6 +120,26 @@ class ScoreTests(unittest.TestCase):
             self.assertEqual(self.score()['fusion']['score'], 100)
             self.assertEqual(self.score()['weights']['hot'], 0)
 
+    def test_update_replaces_keywords_without_new_group_or_collection(self):
+        created = self.group['created']
+        updated = self.store.update_group(self.group['id'], '改名', ['甲', '丙'])
+        self.assertEqual(updated['id'], self.group['id'])
+        self.assertEqual(updated['created'], created)
+        self.assertEqual(updated['name'], '改名')
+        self.assertEqual(updated['keywords'], ['甲', '丙'])
+        self.assertEqual(len(self.store.list_groups()), 1)
+        self.point('甲', '2026-11-03', 30)
+        report = group_score(self.store, self.store.get_group(self.group['id']))
+        self.assertIsNone(report['search']['score'])
+        self.assertEqual(report['search']['missing'], [{'day': '2026-11-03', 'keyword': '丙'}])
+        self.assertIsNone(report['hot']['score'])
+        self.assertIsNone(report['fusion']['score'])
+        self.assertEqual(self.store.get('daily')['count'], 7)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 0)
+        with self.assertRaises(HubError) as caught:
+            self.store.update_group('c' * 32, '无', ['甲'])
+        self.assertEqual(caught.exception.status, 404)
+
     def test_existing_database_creates_group_table(self):
         path = Path(self.temp.name) / 'old.sqlite3'
         sqlite3.connect(path).close()
@@ -181,3 +201,55 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         schema = await (await self.client.get('/api/v1/openapi.json', headers=self.reader)).json()
         self.assertIn('/api/v1/groups', schema['paths'])
         self.assertIn('/api/v1/groups/{id}/score', schema['paths'])
+        self.assertIn('put', schema['paths']['/api/v1/groups/{id}'])
+        self.assertIn('delete', schema['paths']['/api/v1/groups/{id}'])
+
+    async def test_put_updates_keywords_and_score_without_collection(self):
+        self.hub.store.set('daily', {'date': '2026-11-04', 'count': 3})
+        created = await self.client.post(
+            '/api/v1/groups', headers=self.querier, json={'name': '合成组', 'keywords': ['甲', '乙']})
+        self.assertEqual(created.status, 201)
+        group = (await created.json())['group']
+        identifier = group['id']
+        now = time.time()
+        with self.hub.store.db:
+            for word, value in (('甲', 10), ('乙', 10), ('丙', 30)):
+                self.hub.store.db.execute(
+                    'INSERT INTO points VALUES(?,?,?,?,?,?,?,?,?)',
+                    ('douyin', 'search_index', '全国', word, '2026-11-03',
+                     encode(value), encode(None), now, 'synthetic'))
+        body = {'name': '合成组', 'keywords': ['甲', '丙']}
+        self.assertEqual((await self.client.put('/api/v1/groups/' + identifier, json=body)).status, 401)
+        self.assertEqual((await self.client.put(
+            '/api/v1/groups/' + identifier, headers=self.reader, json=body)).status, 403)
+        self.assertEqual((await self.client.put(
+            '/api/v1/groups/' + identifier,
+            headers={'Authorization': self.admin['Authorization']}, json=body)).status, 403)
+        updated = await self.client.put('/api/v1/groups/' + identifier, headers=self.querier, json=body)
+        self.assertEqual(updated.status, 200)
+        payload = await updated.json()
+        self.assertEqual(payload['group']['id'], identifier)
+        self.assertEqual(payload['group']['created'], group['created'])
+        self.assertEqual(payload['group']['keywords'], ['甲', '丙'])
+        self.assertFalse(payload['live_request'])
+        self.assertIn('未提交搜索指数任务', payload['note'])
+        listed = await (await self.client.get('/api/v1/groups', headers=self.reader)).json()
+        self.assertEqual([item['keywords'] for item in listed['groups']], [['甲', '丙']])
+        score = await (await self.client.get(
+            '/api/v1/groups/' + identifier + '/score', headers=self.reader)).json()
+        self.assertEqual(score['search']['raw'], 40)
+        self.assertEqual(score['search']['score'], 100)
+        self.assertIsNone(score['hot']['score'])
+        self.assertIsNone(score['fusion']['score'])
+        self.assertEqual(self.hub.store.get('daily')['count'], 3)
+        self.assertEqual(self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 0)
+        missing = await self.client.put('/api/v1/groups/' + ('b' * 32), headers=self.querier, json=body)
+        self.assertEqual(missing.status, 404)
+        rejected = await self.client.put(
+            '/api/v1/groups/' + identifier, headers=self.querier,
+            json={'name': '合成组', 'keywords': ['甲'], 'extra': 1})
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual((await self.client.delete(
+            '/api/v1/groups/' + identifier, headers=self.querier)).status, 200)
+        self.assertEqual((await self.client.get(
+            '/api/v1/groups/' + identifier + '/score', headers=self.reader)).status, 404)
