@@ -58,12 +58,21 @@ class BrowserPageTests(unittest.TestCase):
                 with patch('baidu_browser._page', return_value=page):
                     login_open(None)
                 self.assertEqual(page_status(page, origin=origin, allow_loopback=True)['state'], 'browser_ready')
-                query = dict(keywords=['a', 'b', 'c', 'd', 'e'], start_date='2026-10-01', end_date='2026-10-02')
+                import datetime
+                today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
+                query = dict(keywords=['a', 'b', 'c', 'd', 'e'], start_date='2026-10-01', end_date='2026-10-02', _budget_day=today)
                 rows = PageTransport(page, origin=origin, allow_loopback=True).query(query)
                 self.assertEqual(len(rows), 30)
                 self.assertEqual([r['search_index'] for r in rows[:2]], [1, 2])
                 self.assertNotIn('secret', repr(rows))
                 from baidu_adapter import BaiduError, collect_page
+                before = server.index_calls
+                page.evaluate("day => { window.realNow = Date.now; Date.now = () => Date.parse(day + 'T15:59:31Z'); }", today)
+                with self.assertRaises(BaiduError) as caught:
+                    PageTransport(page, origin=origin, allow_loopback=True).query(query)
+                self.assertEqual(caught.exception.code, 'baidu_daily_limit')
+                self.assertEqual(server.index_calls, before)
+                page.evaluate('Date.now = window.realNow')
                 server.mode = 'non_day'
                 with self.assertRaises(BaiduError) as caught:
                     PageTransport(page, origin=origin, allow_loopback=True).query(query)
@@ -149,7 +158,9 @@ class BridgeLeakTests(unittest.TestCase):
                 bridge = hub_bridge.start_bridge(Mock())
                 try:
                     query = dict(platform='baidu', keywords=['synthetic'], start_date='2026-10-01', end_date='2026-10-02')
-                    answer = hub_bridge.call_bridge('baidu_query', query)
+                    import datetime
+                    day = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
+                    answer = hub_bridge.call_bridge('baidu_query', {**query, '_budget_day':day})
                     self.assertTrue(answer['ok'])
                     store = Store(Path(tmp) / 'test.sqlite')
                     store.ingest(answer)

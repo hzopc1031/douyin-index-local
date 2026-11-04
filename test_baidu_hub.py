@@ -192,7 +192,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             try:
                 state = await asyncio.to_thread(hub_bridge.call_bridge, 'baidu_status')
                 self.assertEqual(state['state'], 'login_required')
-                answer = await asyncio.to_thread(hub_bridge.call_bridge, 'baidu_query', query())
+                answer = await asyncio.to_thread(hub_bridge.call_bridge, 'baidu_query', {**query(), '_budget_day': dt.datetime.now(b.TZ).date().isoformat()})
                 self.assertEqual(answer['code'], 'login_required')
                 rejected = await asyncio.to_thread(hub_bridge.call_bridge, 'query', query())
                 self.assertEqual(rejected['code'], 'invalid_query')
@@ -302,7 +302,7 @@ class SyntheticWorkerTests(unittest.IsolatedAsyncioTestCase):
         def bridge(command, payload=None, timeout=None):
             if command == 'baidu_status':
                 return {'ok': True, 'state': 'browser_ready', 'live_enabled': True}
-            return {'ok': True, **b.collect(payload, Transport(), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], sleep=waits.append)}
+            return {'ok': True, **b.collect({k:v for k,v in payload.items() if k != '_budget_day'}, Transport(), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], sleep=waits.append)}
         with tempfile.TemporaryDirectory() as directory:
             hub = Hub(directory, bridge)
             try:

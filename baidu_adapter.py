@@ -24,6 +24,7 @@ ERRORS = {
     'http_error': '百度 HTTP 请求失败，已停止。',
     'business_error': '百度业务请求失败，已停止。',
     'network_error': '百度浏览器取数失败，已停止。',
+    'baidu_daily_limit': '百度查询跨越预算日，已停止。',
 }
 
 
@@ -179,14 +180,15 @@ def page_absence(query, state):
     return make_result(q, rows)
 
 
-def collect_page(query, browser, *, chunk_interval=8, sleep=None):
+def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=None):
     import time
     q = validate_query(query)
+    budget_day = budget_day or dt.datetime.now(TZ).date().isoformat()
     rows = []
     for i, chunk in enumerate(chunks(q)):
         if i:
             (sleep or time.sleep)(chunk_interval)
-        rows.extend(browser.query(chunk))
+        rows.extend(browser.query({**chunk, '_budget_day': budget_day}))
     result = make_result(q, rows)
     public_result(result)
     return result
@@ -255,7 +257,17 @@ def bridge_command(command, payload=None):
         return result
     if command == 'baidu_login_open':
         return baidu_browser.browser().call(baidu_browser.login_open)
-    query = validate_query(payload)
+    if not isinstance(payload, dict):
+        raise BaiduError()
+    day = payload.get('_budget_day')
+    if not isinstance(day, str):
+        raise BaiduError('baidu_daily_limit')
+    try:
+        if dt.date.fromisoformat(day).isoformat() != day:
+            raise ValueError
+    except ValueError:
+        raise BaiduError('baidu_daily_limit') from None
+    query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
     instance = baidu_browser.browser()
     if not instance.started and instance.last_state != 'browser_ready':
         return {'ok': False, 'code': 'login_required'}
@@ -267,7 +279,7 @@ def bridge_command(command, payload=None):
             if state != 'browser_ready':
                 raise BaiduError(state)
             page = baidu_browser._page(context)
-            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'])
+            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:

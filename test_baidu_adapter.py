@@ -140,7 +140,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_live_bridge_needs_login(self):
         self.assertTrue(b.bridge_command('baidu_status')['live_enabled'])
-        self.assertEqual(b.bridge_command('baidu_query', query())['code'], 'login_required')
+        self.assertEqual(b.bridge_command('baidu_query', {**query(), '_budget_day': dt.datetime.now(b.TZ).date().isoformat()})['code'], 'login_required')
 
 
 if __name__ == '__main__':

@@ -38,6 +38,8 @@ async (query) => {
   };
   const deadline = promise => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error()), 25000))]);
   const get = async (path, headers = {}) => {
+    const now = new Date(Date.now() + 8 * 3600000);
+    if (now.toISOString().slice(0, 10) !== query._budget_day || (now.getUTCHours() === 23 && now.getUTCMinutes() === 59 && now.getUTCSeconds() >= 30)) return fail('baidu_daily_limit');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 25000);
     try {
