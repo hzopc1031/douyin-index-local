@@ -1,6 +1,6 @@
 # 平台接入
 
-`platforms.py` 的 `registry` 保存平台适配器，描述对象用于 `/api/v1/platforms`。占位平台保持 `available: false`，不能提交或读取。接入微信指数或小红书指数时，在各自模块实现适配器并在注册处替换对应占位或新增注册；重复 ID 会被拒绝。保留每个平台自己的指标名称、单位、地区、时区和来源，不把指数称为实际搜索次数。
+`platforms.py` 的 `registry` 保存平台适配器，描述对象用于 `/api/v1/platforms`。占位平台保持 `available: false`，不能提交或读取。接入平台时，在其模块实现适配器并在注册处替换对应占位或新增注册；重复 ID 会被拒绝。保留每个平台自己的指标名称、单位、地区、时区和来源，不把指数称为实际搜索次数。
 
 适配器需要实现：`description`；`initialize(store)`（如需私有表，在此自行创建，不修改已有表）；`validate_query`、`validate_insight`（不支持的模块应明确拒绝）；`project`（严格校验和投影，不把缺失补零）；`ingest`、`series`、`csv_rows`；`paused`、`status(store)`、异步 `resume(hub)`、异步 `run_one`；`bridge_command`、`collect`、`collect_insight`。目前桥接支持 `query` 和 `insight` 命令：桥接按已校验的 platform 查找适配器，适配器负责接入自己的登录浏览器并在执行结束后清理会话。不能把凭据传给网关、写日志或放进测试。
 

@@ -10,8 +10,8 @@ import test_hub
 QUERY = test_hub.QUERY
 
 
-class FakeWechat:
-    description = {'id': 'fake_wechat', 'name': '合成微信', 'available': True,
+class SyntheticPlatform:
+    description = {'id': 'synthetic', 'name': '合成平台', 'available': True,
                    'metric': 'fake', 'metric_name': '合成指数', 'unit': '分',
                    'region': '全国', 'description': '合成来源', 'modules': []}
 
@@ -20,7 +20,7 @@ class FakeWechat:
 
     def validate_query(self, body, *, historical=False):
         from hub_store import _validate_douyin_query
-        return {**_validate_douyin_query({**body, 'platform': 'douyin'}, historical=historical), 'platform': 'fake_wechat'}
+        return {**_validate_douyin_query({**body, 'platform': 'douyin'}, historical=historical), 'platform': 'synthetic'}
 
     def paused(self, store):
         return store.get('fake_paused')
@@ -55,7 +55,7 @@ class FakeWechat:
 
     def series(self, store, keyword, start=None, end=None):
         rows = store.db.execute('SELECT day,value FROM fake_points WHERE keyword=?', (keyword,))
-        return {'platform': 'fake_wechat', 'keyword': keyword,
+        return {'platform': 'synthetic', 'keyword': keyword,
                 'points': [{'date': row['day'], 'value': row['value']} for row in rows]}
 
     def csv_rows(self, data):
@@ -66,13 +66,13 @@ class FakeWechat:
 
 class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        registry.register(FakeWechat())
+        registry.register(SyntheticPlatform())
         try:
             await test_hub.ApiTests.asyncSetUp(self)
         except BaseException:
-            registry._platforms.pop('fake_wechat')
+            registry._platforms.pop('synthetic')
             raise
-        registry.get('fake_wechat').initialize(self.hub.store)
+        registry.get('synthetic').initialize(self.hub.store)
         import hub_bridge
         from unittest.mock import patch
         self.socket_patch = patch('hub_bridge._socket_path', return_value=self.root / 'synthetic.sock')
@@ -91,33 +91,33 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
         self.bridge_server.server_close()
         self.socket_patch.stop()
         await test_hub.ApiTests.asyncTearDown(self)
-        registry._platforms.pop('fake_wechat')
+        registry._platforms.pop('synthetic')
 
     async def test_submit_worker_storage_csv_status_and_resume(self):
         store = self.hub.store
         response = await self.client.get('/api/v1/platforms', headers=self.bearer)
-        self.assertIn('fake_wechat', [p['id'] for p in (await response.json())['platforms']])
+        self.assertIn('synthetic', [p['id'] for p in (await response.json())['platforms']])
         response = await self.client.get('/api/v1/openapi.json', headers=self.bearer)
-        self.assertIn('fake_wechat', json.dumps(await response.json()))
+        self.assertIn('synthetic', json.dumps(await response.json()))
         store.set('paused', {'code': 'rate_limited'})
         store.set('daily', {'date': '2099-01-01', 'count': 50})
         response = await self.client.post('/api/v1/queries', headers={**self.bearer, 'Idempotency-Key': 'fake'},
-                                          json={**QUERY, 'platform': 'fake_wechat'})
+                                          json={**QUERY, 'platform': 'synthetic'})
         self.assertEqual(response.status, 202)
         job = (await response.json())['job']
         self.assertTrue(await self.hub.run_one())
         self.assertEqual(store.job(job['id'])['status'], 'succeeded')
         self.assertEqual(self.commands[-1][0], 'query')
-        self.assertEqual(self.commands[-1][1]['platform'], 'fake_wechat')
-        args = {'platform': 'fake_wechat', 'keyword': QUERY['keywords'][0]}
+        self.assertEqual(self.commands[-1][1]['platform'], 'synthetic')
+        args = {'platform': 'synthetic', 'keyword': QUERY['keywords'][0]}
         response = await self.client.get('/api/v1/series', params=args, headers=self.bearer)
         self.assertEqual((await response.json())['points'][0]['value'], 42)
         response = await self.client.get('/api/v1/export.csv', params=args, headers=self.bearer)
         self.assertEqual(list(csv.reader(io.StringIO((await response.text()).lstrip('\ufeff'))))[1][1], '42')
         response = await self.client.get('/api/v1/status', headers=self.bearer)
-        self.assertEqual((await response.json())['platform_status']['fake_wechat']['attempts'], 1)
+        self.assertEqual((await response.json())['platform_status']['synthetic']['attempts'], 1)
         store.set('fake_paused', {'code': 'test'})
-        response = await self.client.post('/api/v1/collection/resume', headers=self.admin, json={'platform': 'fake_wechat'})
+        response = await self.client.post('/api/v1/collection/resume', headers=self.admin, json={'platform': 'synthetic'})
         self.assertEqual(response.status, 200)
         self.assertIsNone(store.get('fake_paused'))
         self.assertEqual(store.get('paused')['code'], 'rate_limited')
@@ -126,7 +126,7 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock, patch
         from hub_store import encode
         store = self.hub.store
-        for index, platform in enumerate(('fake_wechat', 'douyin')):
+        for index, platform in enumerate(('synthetic', 'douyin')):
             store.db.execute('INSERT INTO jobs(id,query,status,created) VALUES(?,?,?,?)',
                              (platform, encode({**QUERY, 'platform': platform}), 'queued', index))
         douyin = registry.get('douyin')
@@ -138,7 +138,7 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
                 store.set(key, None)
             store.set('fake_attempts', 1)
             self.assertTrue(await self.hub.run_one())
-            self.assertEqual(store.job('fake_wechat')['error']['code'], 'daily_limit')
+            self.assertEqual(store.job('synthetic')['error']['code'], 'daily_limit')
             self.assertTrue(await self.hub.run_one())
             self.assertEqual(run.await_args.args[1]['id'], 'douyin')
         self.assertIsNone(store.get('paused'))
