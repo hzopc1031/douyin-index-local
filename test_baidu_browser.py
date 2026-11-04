@@ -114,7 +114,12 @@ class BrowserLifetimeTests(unittest.TestCase):
             browser = BaiduBrowser(root=tmp, idle_seconds=1)
             try:
                 self.assertFalse(browser.started)
+                mask = os.umask(0o077)
+                os.umask(mask)
                 owner = browser.call(lambda ctx: (threading.get_ident(), len(ctx.pages)))
+                current = os.umask(0o077)
+                os.umask(current)
+                self.assertEqual(current, mask)
                 self.assertNotEqual(owner[0], threading.get_ident())
                 for _ in range(3):
                     self.assertEqual(owner[0], browser.call(lambda ctx: threading.get_ident(), touch=False))

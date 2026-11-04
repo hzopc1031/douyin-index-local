@@ -123,12 +123,15 @@ class BaiduBrowser:
                 self.busy = True
                 if context is None:
                     from playwright.sync_api import sync_playwright
-                    # Chromium inherits the desktop process mask for profile files.
-                    os.umask(0o077)
                     profile = prepare_profile(self.root)
                     lock = ProfileLock(profile).acquire()
-                    playwright = sync_playwright().start()
-                    context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+                    # Chromium inherits the mask; restore it for the desktop process.
+                    previous_mask = os.umask(0o077)
+                    try:
+                        playwright = sync_playwright().start()
+                        context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+                    finally:
+                        os.umask(previous_mask)
                     self.started = True
                 value = action(context)
                 if touch:
