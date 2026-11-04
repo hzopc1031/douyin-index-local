@@ -73,10 +73,11 @@ class BrowserPageTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 'baidu_daily_limit')
                 self.assertEqual(server.index_calls, before)
                 page.evaluate('Date.now = window.realNow')
-                server.mode = 'non_day'
-                with self.assertRaises(BaiduError) as caught:
-                    PageTransport(page, origin=origin, allow_loopback=True).query(query)
-                self.assertEqual(caught.exception.code, 'response_schema')
+                for mode in ('non_day', 'bad_type'):
+                    server.mode = mode
+                    with self.subTest(mode=mode), self.assertRaises(BaiduError) as caught:
+                        PageTransport(page, origin=origin, allow_loopback=True).query(query)
+                    self.assertEqual(caught.exception.code, 'response_schema')
                 server.mode = 'missing'
                 missing = PageTransport(page, origin=origin, allow_loopback=True).query(query)
                 self.assertTrue(all(r['search_index'] is None for r in missing))

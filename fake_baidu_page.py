@@ -20,7 +20,7 @@ class Handler(BaseHTTPRequestHandler):
         mode = getattr(self.server, 'mode', '')
         if path.path == '/api/SearchApi/index':
             self.server.index_calls = getattr(self.server, 'index_calls', 0) + 1
-        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'missing'):
+        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'bad_type', 'missing'):
             if mode == 'timeout':
                 import time
                 time.sleep(27)
@@ -42,7 +42,7 @@ class Handler(BaseHTTPRequestHandler):
             words = json.loads(params['word'][0])
             from datetime import date
             days = (date.fromisoformat(params['endDate'][0]) - date.fromisoformat(params['startDate'][0])).days + 1
-            series = {'startDate': params['startDate'][0], 'endDate': params['endDate'][0], 'type': 'week' if mode == 'non_day' else 'day', 'data':'ab' * (days - 1) + 'c'}
+            series = {'startDate': params['startDate'][0], 'endDate': params['endDate'][0], 'type': 'week' if mode == 'non_day' else 0 if mode == 'bad_type' else 'day', 'data':'ab' * (days - 1) + 'c'}
             data = {'status': 0, 'data': {'uniqid':'synthetic', 'userIndexes': [] if mode == 'missing' else [{'word':w, 'all':series, 'pc':series, 'wise':series} for w in words]}}
         elif path.path == '/Interface/api/ptbk':
             data = {'status': 0, 'data': 'abc1,2'}

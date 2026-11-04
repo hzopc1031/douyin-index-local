@@ -102,7 +102,7 @@ async (query) => {
       let tokens = Array(days).fill('');
       if (byWord.has(word)) {
         const series = byWord.get(word)[device];
-        if (!series || series.startDate !== query.start_date || series.endDate !== query.end_date || (series.type || 'day') !== 'day' || typeof series.data !== 'string' || series.data.length > 6200) return fail('response_schema');
+        if (!series || series.startDate !== query.start_date || series.endDate !== query.end_date || (series.type === undefined ? 'day' : series.type) !== 'day' || typeof series.data !== 'string' || series.data.length > 6200) return fail('response_schema');
         let plain = '';
         for (const char of series.data) { const n = left.indexOf(char); if (n < 0) return fail('response_schema'); plain += right[n]; }
         tokens = plain.split(',');
