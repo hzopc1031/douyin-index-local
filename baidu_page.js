@@ -3,6 +3,7 @@ async (query) => {
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
     let i = 0;
+    const primitive = /(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/y;
     const ws = () => { while (/\s/.test(text[i] || '') && i < text.length) i++; };
     const string = () => {
       const start = i++;
@@ -30,8 +31,9 @@ async (query) => {
         i++; ws(); if (text[i] === ']') { i++; return; }
         while (true) { value(depth + 1); ws(); const next = text[i++]; if (next === ']') return; if (next !== ',') throw Error(); }
       }
-      const match = /^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(i));
-      if (!match) throw Error(); i += match[0].length;
+      primitive.lastIndex = i;
+      const match = primitive.exec(text);
+      if (!match) throw Error(); i = primitive.lastIndex;
     };
     value(0); ws(); if (i !== text.length) throw Error();
     return JSON.parse(text);
