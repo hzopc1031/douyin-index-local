@@ -396,7 +396,8 @@ class BaiduAdapter:
 
     async def async_status(self, hub):
         import hub_baidu
-        return {**hub_baidu.status_snapshot(hub.store), 'browser': await hub_baidu.browser_status(hub)}
+        state = await hub_baidu.browser_status(hub)
+        return {**hub_baidu.status_snapshot(hub.store), 'browser': state, 'login_state': state}
 
     async def resume(self, hub):
         import hub_baidu
