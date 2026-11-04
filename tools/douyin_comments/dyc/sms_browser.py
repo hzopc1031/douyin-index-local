@@ -10,6 +10,7 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -205,9 +206,18 @@ class SmsBrowser:
             ('strict mode violation', 'strict_mode'),
             ('Execution context was destroyed', 'context_destroyed'),
             ('Cannot find context with specified id', 'context_destroyed'),
+            ('Execution context is not available', 'context_destroyed'),
+            ('navigation', 'navigation'),
             ('Frame was detached', 'frame_detached'),
-            ('not attached to the DOM', 'element_detached')) if marker in message), 'other')
+            ('not attached to the DOM', 'element_detached'),
+            ('Element is not attached', 'element_detached')) if marker in message), 'other')
         return dict(exception_type=kind, category=category)
+
+    @classmethod
+    def transient_read(cls, error):
+        info = cls.exception_info(error)
+        return info['exception_type'] == 'Error' and info['category'] in (
+            'context_destroyed', 'navigation', 'frame_detached', 'element_detached')
 
     async def read_dom(self, operation, read):
         # Only repeat reads, never navigation, input or clicks. A transient
@@ -223,13 +233,15 @@ class SmsBrowser:
             except Exception as error:
                 info = self.exception_info(error)
                 self.last_read_error = dict(operation=self.operation, **info)
-                transient = (info['exception_type'] == 'Error' and info['category'] in
-                             ('context_destroyed', 'frame_detached', 'element_detached'))
+                transient = self.transient_read(error)
                 transient |= operation in ('phone_editable', 'challenge_read') and info['exception_type'] == 'TimeoutError'
                 if not transient or attempt == 2:
                     raise
-                print(json.dumps(dict(event='browser_read_retry', attempt=attempt + 1,
-                                      **self.last_read_error)), file=sys.stderr, flush=True)
+                event = dict(event='browser_read_retry', attempt=attempt + 1, **self.last_read_error)
+                if operation == 'challenge_read' and info['exception_type'] == 'TimeoutError':
+                    logging.getLogger(__name__).debug('%s', json.dumps(event))
+                else:
+                    print(json.dumps(event), file=sys.stderr, flush=True)
                 await asyncio.sleep(.1)
 
     def visible(self, selector):
@@ -669,15 +681,39 @@ class SmsBrowser:
 
     async def observe(self):
         self.step('observe_login', 'no challenge/access denial; confirmed account signal', 15)
-        self.require_origin()
-        if await self.challenge():
-            return 'verification'
-        if await self.login_confirmed():
-            return 'succeeded'
-        if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
-                '验证码错误', exact=False).filter(visible=True).count()):
-            raise Stop(4, 'code_invalid')
-        return 'pending'
+        try:
+            if self.fatal:
+                self.require_origin()
+            pages = self.context.pages
+            if not isinstance(pages, list):
+                pages = [self.page]
+            pages = [page for page in pages if not page.is_closed() and
+                     urlsplit(page.url).scheme == 'https' and
+                     urlsplit(page.url).netloc == urlsplit(self.url).netloc]
+            if not pages:
+                if not self.page.is_closed() and self.page.url != 'about:blank':
+                    self.require_origin()
+                return 'pending'
+            previous = self.page
+            for page in pages:
+                self.page = page
+                if await self.challenge():
+                    return 'verification'
+            for page in reversed(pages):
+                self.page = page
+                if await self.login_confirmed():
+                    return 'succeeded'
+            self.page = previous if previous in pages else pages[-1]
+            if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
+                    '验证码错误', exact=False).filter(visible=True).count()):
+                raise Stop(4, 'code_invalid')
+            return 'pending'
+        except Exception as error:
+            if self.transient_read(error) or (not self.fatal and
+                    ((type(error).__name__ == 'TargetClosedError' and self.page.is_closed()) or
+                     (isinstance(error, Stop) and (self.page.is_closed() or self.page.url == 'about:blank')))):
+                return 'pending'
+            raise
 
     async def login_confirmed(self):
         panel = bool(await self.read_dom('login_panel_count',
@@ -1122,6 +1158,8 @@ class SmsBrowser:
         return hashlib.sha256(capture.png).digest(), capture.metadata, capture.prompt
 
     async def frame(self, verification):
+        if self.page.is_closed() or self.page.url == 'about:blank':
+            reject('frame_unavailable')
         self.require_origin()
         if verification:
             challenge = await self.challenge()
@@ -1215,8 +1253,16 @@ class SmsBrowser:
 
     async def persist(self):
         self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)
-        self.require_origin()
-        if not await self.login_confirmed():
+        try:
+            self.require_origin()
+            confirmed = await self.login_confirmed()
+        except Exception as error:
+            if self.transient_read(error) or (not self.fatal and
+                    ((type(error).__name__ == 'TargetClosedError' and self.page.is_closed()) or
+                     (isinstance(error, Stop) and (self.page.is_closed() or self.page.url == 'about:blank')))):
+                return False
+            raise
+        if not confirmed:
             raise Stop(4, 'login_unconfirmed')
         cookies = await self.context.cookies(self.url)
         safe = [cookie for cookie in cookies if cookie['name'] in COOKIE_NAMES and

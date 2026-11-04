@@ -5,7 +5,7 @@
   const terminal = new Set(['succeeded', 'failed', 'expired', 'cancelled']);
   const messages = {ready: '请用抖音 App 扫码登录。', code_sent: '平台已接受发码请求，请查看短信并输入验证码。',
     submitting: '已提交，正在等待官方登录确认。', verification: '请完成下方安全验证。',
-    succeeded: '登录成功，dyc 登录态已保存。', failed: '登录已停止，可能遇到验证或访问限制。请联系管理员查看状态。',
+    succeeded: '登录成功，dyc 登录态已保存。', failed: '登录已停止，请重新获取二维码。',
     expired: '会话已到期并释放。', cancelled: '会话已结束并释放。'};
   const errors = {send_interval: '发码间隔至少 60 秒。', send_hour_limit: '已达到每小时 3 次发码上限。',
     send_day_limit: '已达到北京时间当日 6 次发码上限。', stale_frame: '验证页面已变化，请刷新截图后重试。',
@@ -15,7 +15,8 @@
     wrong_state: '当前不能执行此操作；可切换登录方式或结束会话。',
     quota_unavailable: '发码配额检查失败，请联系管理员。', invalid_request: '请求格式不正确。'};
   const reasons = {challenge_detected: 'challenge_detected：检测到安全验证，已停止。',
-    login_step_timeout: '操作超时，已停止。', browser_operation_failed: '页面操作失败，已停止。',
+    login_step_timeout: '页面操作超时，可重新获取二维码重试。', browser_operation_failed: '页面操作出错，可重新获取二维码重试。',
+    http_401: '登录访问被拒绝，已停止。', http_403: '访问受限，已停止。', http_429: '访问频率受限，已停止。', verification_required: '需要安全验证，已停止。',
     login_failed: '登录准备或操作失败。', code_invalid: '验证码错误。', sms_unconfirmed: '发码前置检查或发送结果未确认。'};
   const steps = {profile_lock: '登录资源锁定', display_start: '启动登录环境',
     playwright_start: '启动浏览器', browser_launch: '启动浏览器', isolated_context: '准备登录页面',
@@ -31,12 +32,14 @@
   function render(data) {
     state = data; nonce = data.nonce;
     $('status').textContent = data.preparation_failed ? '手机登录准备失败。可手动重新开始。' : messages[data.state] || '正在准备。';
+    if (data.state === 'failed' && ['challenge_detected', 'verification_required', 'http_401', 'http_403', 'http_429'].includes(data.failure?.reason))
+      $('status').textContent = '检测到验证或访问限制，登录已停止。请确认情况后再决定是否重新获取二维码。';
     $('retry').hidden = !data.retryable;
     $('picture').hidden = !data.failure_image && (!(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state));
     if (data.failure_image) { $('frame').src = 'data:image/png;base64,' + data.failure_image; $('hint').textContent = '检测到安全验证，已停止；截图已脱敏。'; $('refresh').hidden = true; } else $('refresh').hidden = false;
     $('details').textContent = terminal.has(data.state) ? '' : `${data.phone || ''} 剩余 ${data.expires_in} 秒`;
     if (data.state === 'code_sent') $('details').textContent += `；发码冷却 ${data.resend_in} 秒`;
-    if (data.failure) $('details').textContent = `失败步骤：${steps[data.failure.step] || (data.preparation_failed ? '准备' : '登录操作')}；原因：${reasons[data.failure.reason] || '页面检查失败或访问受限。'}`;
+    if (data.failure) $('details').textContent = `失败步骤：${steps[data.failure.step] || (data.preparation_failed ? '准备' : '登录操作')}；原因：${reasons[data.failure.reason] || '登录操作未完成，请重新获取二维码重试。'}`;
     if (data.send_result && (data.state === 'code_sent' ||
         (data.state === 'failed' && data.send_result.outcome !== 'accepted'))) {
       $('status').textContent = data.send_result.description;

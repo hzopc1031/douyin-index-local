@@ -180,7 +180,8 @@ class LoginSession:
             return
         status = await self.browser.observe()
         if status == "succeeded":
-            await self.browser.persist()
+            if await self.browser.persist() is False:
+                return
             await self.finish("succeeded")
         elif status == "verification":
             if self.stop_on_verification:
@@ -276,6 +277,10 @@ class LoginSession:
                 await self.finish("cancelled")
                 raise
             except Exception as error:
+                if action == 'frame' and hasattr(self.browser, 'transient_read') and (
+                        self.browser.transient_read(error) or
+                        (type(error).__name__ == 'TargetClosedError' and self.browser.page.is_closed())):
+                    reject('frame_unavailable')
                 await self.fail(error)
                 reject("login_failed")
             finally:
