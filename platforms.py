@@ -41,6 +41,10 @@ class Douyin:
         from hub_store import _validate_douyin_query
         return _validate_douyin_query(body, historical=historical)
 
+    def validate_insight(self, body, *, historical=False, latest_related_date=None):
+        from hub_insights import _validate_douyin_insight
+        return _validate_douyin_insight(body, historical=historical, latest_related_date=latest_related_date)
+
     def project(self, result, *, verification='pending'):
         from hub_store import public_result
         return public_result(result, verification=verification)
@@ -61,6 +65,10 @@ class Douyin:
 
     def bridge_command(self, query):
         return 'insight' if query.get('kind') else 'query'
+
+    def collect_insight(self, api, query):
+        from hub_insights import collect
+        return collect(api, query)
 
     def collect(self, api, query):
         answer = api.fetch_batch('\n'.join(query['keywords']), query['end_date'], cloud=True, start_date=query['start_date'])

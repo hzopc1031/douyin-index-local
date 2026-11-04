@@ -146,8 +146,10 @@ def start_bridge(api):
                 elif message.get('command') == 'status':
                     answer = browser_status(api)
                 elif message.get('command') == 'insight':
-                    from hub_insights import collect
-                    answer = collect(api, message.get('payload'))
+                    from hub_insights import validate_insight
+                    from platforms import require_platform
+                    query = validate_insight(message.get('payload'))
+                    answer = require_platform(query['platform']).collect_insight(api, message.get('payload'))
                 elif message.get('command') == 'query':
                     from hub_store import validate_query
                     query = validate_query(message.get('payload'))

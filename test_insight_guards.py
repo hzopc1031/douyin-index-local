@@ -180,6 +180,11 @@ class SkipTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(changes=changes):
                 query = {**self.q, **changes, 'kind': 'audience'}
                 self.assertIsNone(self.hub.store.trend_no_data(query))
+                if changes.get('platform') == 'other':
+                    with self.assertRaises(HubError) as error:
+                        self.hub.store.submit(query, 'fixture', str(time.time_ns()))
+                    self.assertEqual(error.exception.code, 'platform_unavailable')
+                    continue
                 job, _ = self.hub.store.submit(query, 'fixture', str(time.time_ns()))
                 self.assertFalse(await self.hub.run_one())
                 self.assertEqual(self.hub.store.job(job['id'])['status'], 'queued')

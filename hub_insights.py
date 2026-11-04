@@ -4,6 +4,7 @@ import os
 import logging
 import math
 from hub_store import HubError, TZ, exc_summary, validate_query
+from platforms import require_platform
 
 KINDS = {'related', 'audience'}
 
@@ -18,10 +19,15 @@ def related_end_lag_days():
 def validate_insight(body, *, historical=False, latest_related_date=None):
     if type(body) is not dict:
         raise HubError('invalid_query', '请求须为 JSON 对象。')
-    body = dict(body)
-    kind = body.pop('kind', None)
-    if kind not in KINDS:
+    if body.get('kind') not in KINDS:
         raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
+    return require_platform(body.get('platform', 'douyin')).validate_insight(
+        body, historical=historical, latest_related_date=latest_related_date)
+
+
+def _validate_douyin_insight(body, *, historical=False, latest_related_date=None):
+    body = dict(body)
+    kind = body.pop('kind')
     requested_end = body.pop('requested_end_date', None)
     query = validate_query(body, historical=historical)
     if kind == 'related' and not historical:
