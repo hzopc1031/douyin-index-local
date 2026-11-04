@@ -202,8 +202,12 @@ def browser():
 
 
 def _page(context):
-    page = context.pages[0] if context.pages else context.new_page()
     from urllib.parse import urlsplit
+    pages = context.pages
+    page = next((p for p in pages if (urlsplit(p.url).scheme, urlsplit(p.url).netloc) ==
+                 ('https', 'index.baidu.com')), None)
+    if page is None:
+        page = pages[0] if pages else context.new_page()
     url = urlsplit(page.url)
     if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
         page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)

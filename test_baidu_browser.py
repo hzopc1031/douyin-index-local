@@ -215,6 +215,15 @@ class BridgeLeakTests(unittest.TestCase):
 
 
 class ReadOnlyStatusTests(unittest.TestCase):
+    def test_query_prefers_existing_index_page(self):
+        from unittest.mock import Mock
+        from baidu_browser import _page
+        passport = Mock(url='https://passport.baidu.com/verify')
+        index = Mock(url='https://index.baidu.com/')
+        self.assertIs(_page(Mock(pages=[passport, index])), index)
+        passport.goto.assert_not_called()
+        index.goto.assert_not_called()
+
     def test_pages_cookie_and_signature(self):
         from unittest.mock import Mock
         from baidu_browser import status
