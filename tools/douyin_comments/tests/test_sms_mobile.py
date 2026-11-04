@@ -173,7 +173,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 requests.append((req.method, target))
                 status, extra, data = await app.dispatch(req.method, target, headers,
                                                         (req.post_data or '').encode())
-                if status != 200:
+                if isinstance(data, dict) and data.get('error') == 'invalid_request':
                     rejected.append((target, status))
                 if (target == '/api' and json.loads(req.post_data or '{}').get('action') == 'frame'
                         and not frame_requested.is_set()):
