@@ -34,6 +34,9 @@ class FakeWechat:
     def bridge_command(self, query):
         return 'query'
 
+    def collect(self, api, query):
+        return {'ok': True, 'value': 42}
+
     async def run_one(self, hub, row):
         store = hub.store
         if store.get('fake_cooldown'):
@@ -70,20 +73,32 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
             registry._platforms.pop('fake_wechat')
             raise
         registry.get('fake_wechat').initialize(self.hub.store)
+        import hub_bridge
+        from unittest.mock import patch
+        self.socket_patch = patch('hub_bridge._socket_path', return_value=self.root / 'synthetic.sock')
+        self.socket_patch.start()
+        self.bridge_server = hub_bridge.start_bridge(object())
         self.commands = []
         def bridge(command, payload, timeout):
             self.commands.append((command, payload))
             if command == 'status':
                 return {'ok': True, 'state': 'browser_ready'}
-            return {'ok': True, 'value': 42}
+            return hub_bridge.call_bridge(command, payload, timeout)
         self.hub.bridge = bridge
 
     async def asyncTearDown(self):
+        self.bridge_server.shutdown()
+        self.bridge_server.server_close()
+        self.socket_patch.stop()
         await test_hub.ApiTests.asyncTearDown(self)
         registry._platforms.pop('fake_wechat')
 
     async def test_submit_worker_storage_csv_status_and_resume(self):
         store = self.hub.store
+        response = await self.client.get('/api/v1/platforms', headers=self.bearer)
+        self.assertIn('fake_wechat', [p['id'] for p in (await response.json())['platforms']])
+        response = await self.client.get('/api/v1/openapi.json', headers=self.bearer)
+        self.assertIn('fake_wechat', json.dumps(await response.json()))
         store.set('paused', {'code': 'rate_limited'})
         store.set('daily', {'date': '2099-01-01', 'count': 50})
         response = await self.client.post('/api/v1/queries', headers={**self.bearer, 'Idempotency-Key': 'fake'},
