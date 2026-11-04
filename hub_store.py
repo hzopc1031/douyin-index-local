@@ -217,6 +217,10 @@ class Store:
                 if result['metadata'].get('verification') == 'user_reported_match':
                     self.db.execute('UPDATE datasets SET result=? WHERE id=?', (encode(result), keep))
                 self.db.execute('UPDATE points SET dataset=? WHERE dataset=?', (keep, row['id']))
+                for description in registry.descriptions():
+                    adapter = registry.get(description['id'])
+                    if description['available'] and hasattr(adapter, 'repoint_dataset'):
+                        adapter.repoint_dataset(self, keep, row['id'])
                 self.db.execute('DELETE FROM datasets WHERE id=?', (row['id'],))
 
     def ingest(self, result, dataset_id=None):
@@ -440,6 +444,10 @@ class Store:
 
     def interrupt_pending(self):
         with self.db:
+            for row in self.db.execute("SELECT DISTINCT json_extract(query,'$.platform') AS platform FROM jobs WHERE status='running'").fetchall():
+                adapter = registry.get(row['platform'])
+                if adapter and hasattr(adapter, 'interrupted'):
+                    adapter.interrupted(self)
             requeued = self.db.execute("SELECT count(*) FROM jobs WHERE status='queued'").fetchone()[0]
             interrupted = self.db.execute("UPDATE jobs SET status='failed',updated=?,error=? WHERE status='running'",
                 (time.time(), encode({'code': 'service_restarted', 'message': '服务重启时任务正在执行，可能已向平台发出请求；未自动重试，请确认后重新提交。', 'recoverable': True}))).rowcount

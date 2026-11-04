@@ -21,7 +21,7 @@ def _socket_path():
     return state_dir(ROOT) / 'browser.sock' if 'INDEX_HUB_STATE_DIR' in os.environ else SOCKET
 
 
-MAX = 2 * 1024 * 1024
+MAX = 8 * 1024 * 1024
 BRIDGE_TIMEOUT = 75
 SMS_COMMANDS = frozenset('sms_' + action for action in
                         ('start', 'status', 'frame', 'code', 'resend', 'pointer', 'text', 'cancel'))
@@ -131,6 +131,7 @@ def start_bridge(api):
         def handle(self):
             self.request.settimeout(BRIDGE_TIMEOUT)
             command = 'unknown'
+            platform_adapter = None
             try:
                 raw = self.rfile.readline(16385)
                 if len(raw) > 16384:
@@ -139,7 +140,13 @@ def start_bridge(api):
                 requested = message.get('command')
                 command = requested if isinstance(requested, str) and (requested in SMS_COMMANDS or requested in
                     ('status', 'insight', 'query', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel')) else 'unknown'
-                if command in SMS_COMMANDS:
+                from platforms import registry
+                platform_adapter = next((registry.get(p['id']) for p in registry.descriptions()
+                                         if p['available'] and requested in getattr(registry.get(p['id']), 'bridge_commands', ())), None)
+                if platform_adapter:
+                    command = requested
+                    answer = platform_adapter.dispatch_bridge(requested, message.get('payload'))
+                elif command in SMS_COMMANDS:
                     answer = sms_command(api, command, message.get('payload'))
                 elif command.startswith('qr_'):
                     answer = qr_command(api, command)
@@ -154,7 +161,10 @@ def start_bridge(api):
                     from hub_store import validate_query
                     query = validate_query(message.get('payload'))
                     from platforms import require_platform
-                    answer = require_platform(query['platform']).collect(api, query)
+                    adapter = require_platform(query['platform'])
+                    if adapter.bridge_command(query) != command:
+                        raise HubError('invalid_query', '平台与内部桥接命令不一致。')
+                    answer = adapter.collect(api, query)
                 else:
                     answer = {'ok': False, 'code': 'invalid_command', 'message': '不支持的内部操作。'}
             except HubError as exc:
@@ -168,7 +178,7 @@ def start_bridge(api):
                 # SMS exceptions can contain an unlabelled short code; even
                 # redaction cannot make arbitrary exception messages safe.
                 logging.getLogger('index_hub.bridge').warning('command=%s %s', command,
-                    type(exc).__name__ if command in SMS_COMMANDS else exc_summary(exc))
+                    type(exc).__name__ if command in SMS_COMMANDS or platform_adapter else exc_summary(exc))
                 answer = {'ok': False, 'code': 'browser_unavailable', 'message': '浏览器未就绪，请检查远程桌面。'}
             try:
                 self.wfile.write(json.dumps(answer, ensure_ascii=False, allow_nan=False).encode() + b'\n')

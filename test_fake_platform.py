@@ -15,6 +15,32 @@ class SyntheticPlatform:
                    'metric': 'fake', 'metric_name': '合成指数', 'unit': '分',
                    'region': '全国', 'description': '合成来源', 'modules': []}
 
+    bridge_commands = ('synthetic_status',)
+
+    def dispatch_bridge(self, command, payload):
+        return {'ok': True, 'value': payload}
+
+    def status_counts(self, store):
+        return {'synthetic-word'}, 2
+
+    async def async_status(self, hub):
+        return self.status(hub.store)
+
+    def interrupted(self, store):
+        store.set('synthetic_interrupted', True)
+
+    def repoint_dataset(self, store, keep, old):
+        store.set('synthetic_repoint', [keep, old])
+
+    def openapi_paths(self):
+        return {'/api/v1/synthetic': {'get': {'responses': {'200': {'description': 'synthetic'}}}}}
+
+    def mount_routes(self, app, hub, require, reply):
+        async def synthetic(request):
+            require(request, admin=True)
+            return reply({'synthetic': True})
+        app.router.add_get('/api/v1/synthetic', synthetic)
+
     def initialize(self, store):
         store.db.execute('CREATE TABLE IF NOT EXISTS fake_points(keyword TEXT, day TEXT, value INTEGER)')
 
@@ -98,7 +124,16 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get('/api/v1/platforms', headers=self.bearer)
         self.assertIn('synthetic', [p['id'] for p in (await response.json())['platforms']])
         response = await self.client.get('/api/v1/openapi.json', headers=self.bearer)
-        self.assertIn('synthetic', json.dumps(await response.json()))
+        self.assertIn('/api/v1/synthetic', (await response.json())['paths'])
+        response = await self.client.get('/api/v1/synthetic', headers=self.admin)
+        self.assertEqual((await response.json())['synthetic'], True)
+        import hub_bridge
+        answer = await asyncio.to_thread(hub_bridge.call_bridge, 'synthetic_status', {'sample': 42}, 5)
+        self.assertEqual(answer['value'], {'sample': 42})
+        from unittest.mock import patch
+        with patch.object(registry.get('synthetic'), 'bridge_command', return_value='other'):
+            answer = await asyncio.to_thread(hub_bridge.call_bridge, 'query', {**QUERY, 'platform': 'synthetic'}, 5)
+        self.assertEqual(answer['code'], 'invalid_query')
         store.set('paused', {'code': 'rate_limited'})
         store.set('daily', {'date': '2099-01-01', 'count': 50})
         response = await self.client.post('/api/v1/queries', headers={**self.bearer, 'Idempotency-Key': 'fake'},
@@ -115,12 +150,28 @@ class FakePlatformApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get('/api/v1/export.csv', params=args, headers=self.bearer)
         self.assertEqual(list(csv.reader(io.StringIO((await response.text()).lstrip('\ufeff'))))[1][1], '42')
         response = await self.client.get('/api/v1/status', headers=self.bearer)
-        self.assertEqual((await response.json())['platform_status']['synthetic']['attempts'], 1)
+        state = await response.json()
+        self.assertEqual(state['platform_status']['synthetic']['attempts'], 1)
+        self.assertEqual(state['counts']['points'], 2)
+        self.assertEqual(state['counts']['keywords'], 1)
         store.set('fake_paused', {'code': 'test'})
         response = await self.client.post('/api/v1/collection/resume', headers=self.admin, json={'platform': 'synthetic'})
         self.assertEqual(response.status, 200)
         self.assertIsNone(store.get('fake_paused'))
         self.assertEqual(store.get('paused')['code'], 'rate_limited')
+
+    async def test_interruption_and_dataset_repoint_hooks(self):
+        from hub_store import encode
+        store = self.hub.store
+        store.db.execute('INSERT INTO jobs(id,query,status,created) VALUES(?,?,?,?)',
+                         ('running', encode({**QUERY, 'platform': 'synthetic'}), 'running', 1))
+        store.interrupt_pending()
+        self.assertTrue(store.get('synthetic_interrupted'))
+        result = encode({'metadata': {}, 'rows': []})
+        store.db.execute('INSERT INTO datasets(id,result,created) VALUES(?,?,?)', ('a', result, 1))
+        store.db.execute('INSERT INTO datasets(id,result,created) VALUES(?,?,?)', ('b', result, 2))
+        store.deduplicate()
+        self.assertEqual(store.get('synthetic_repoint'), ['a', 'b'])
 
     async def test_fake_cooldown_pause_and_budget_do_not_block_douyin(self):
         from unittest.mock import AsyncMock, patch

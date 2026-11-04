@@ -119,6 +119,7 @@ class Hub:
             bridge = call_bridge
         self._qr_last_start = None
         self._sms_lock = asyncio.Lock()
+        self._platform_locks = {}
         self.bridge = bridge
         self.worker_task = None
 
@@ -319,7 +320,10 @@ class Hub:
     async def worker(self):
         while True:
             try:
-                await self.sync_sms_pause()
+                try:
+                    await self.sync_sms_pause()
+                except HubError:
+                    pass
                 await self.run_one()
             except asyncio.CancelledError:
                 raise
@@ -422,6 +426,10 @@ def openapi():
             'security': [{'BasicAuth': []}],
             'responses': {'200': {'description': '状态快照或 PNG；no-store'},
                           **{str(code): error for code in (400, 401, 403, 409, 429, 503)}}}}
+    for p in registry.descriptions():
+        platform = registry.get(p['id'])
+        if p['available'] and hasattr(platform, 'openapi_paths'):
+            paths.update(platform.openapi_paths())
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
              'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
@@ -530,9 +538,23 @@ def mount(app, hub):
         browser = await hub.browser_status(details=True)
         next_attempt = s.get('last_attempt_at', 0) + 15
         remaining = max(0, math.ceil(next_attempt - time.time()))
+        words = {r[0] for r in s.db.execute('SELECT DISTINCT keyword FROM points')}
+        point_count = s.db.execute('SELECT count(*) FROM points').fetchone()[0]
+        for p in registry.descriptions():
+            adapter = registry.get(p['id'])
+            if p['available'] and hasattr(adapter, 'status_counts'):
+                extra_words, extra_points = adapter.status_counts(s)
+                words.update(extra_words)
+                point_count += extra_points
+        platform_status = {}
+        for p in registry.descriptions():
+            platform = registry.get(p['id'])
+            if p['available']:
+                async_status = getattr(platform, 'async_status', None)
+                platform_status[p['id']] = await async_status(hub) if async_status else platform.status(s)
         return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser['state'],
                       'login_state': browser['login_state'], 'paused': s.get('paused'),
-                      'platform_status': {p['id']: registry.get(p['id']).status(s) for p in registry.descriptions() if p['available']},
+                      'platform_status': platform_status,
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,
@@ -542,8 +564,7 @@ def mount(app, hub):
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
                       'counts': {'datasets': s.db.execute('SELECT count(*) FROM datasets').fetchone()[0],
-                                 'keywords': s.db.execute('SELECT count(DISTINCT keyword) FROM points').fetchone()[0],
-                                 'points': s.db.execute('SELECT count(*) FROM points').fetchone()[0]}})
+                                 'keywords': len(words), 'points': point_count}})
 
     def job_view(value, request):
         result = dict(value)
@@ -703,6 +724,11 @@ def mount(app, hub):
     app.router.add_get('/api/v1/login/qr', qr_login)
     app.router.add_get('/api/v1/login/qr/{action:image}', qr_login)
     app.router.add_post('/api/v1/login/qr/{action:start|cancel}', qr_login)
+    for p in registry.descriptions():
+        adapter = registry.get(p['id'])
+        mount_routes = getattr(adapter, 'mount_routes', None)
+        if p['available'] and mount_routes:
+            mount_routes(app, hub, require, reply)
     app.router.add_get('/api/v1/platforms', platforms)
     app.router.add_get('/api/v1/status', status)
     app.router.add_post('/api/v1/queries', submit)
