@@ -382,12 +382,14 @@ class SmsBrowser:
             self.step('browser_launch', 'persistent Chromium login profile', 35)
             self.persistent = await self.playwright.chromium.launch_persistent_context(
                 str(self.profile.path), headless=False,
+                ignore_default_args=['--enable-automation'],
                 env={**os.environ, **self.display.environment()},
                 handle_sigint=False, handle_sigterm=False, handle_sighup=False,
                 viewport=dict(width=1000, height=800), device_scale_factor=1, accept_downloads=False,
                 args=['--disable-background-networking', '--disable-component-update',
                       '--disable-sync', '--no-first-run', '--disable-crash-reporter',
-                      '--disable-breakpad', '--disable-extensions'])
+                      '--disable-breakpad', '--disable-extensions',
+                      '--disable-blink-features=AutomationControlled'])
             self.context = self.persistent
             if self.backend:
                 await self.context.route('**/*', self.backend)
@@ -423,7 +425,7 @@ class SmsBrowser:
         self.operation = 'page_goto'
         await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
         self.require_origin()
-        self.step('login_entry', 'visible header button 登录 or ' + PHONE + ' editable or account signal', LOGIN_PANEL_SECONDS)
+        self.step('login_entry', 'visible header button 登录 or login view or account signal', LOGIN_PANEL_SECONDS)
         deadline = time.monotonic() + LOGIN_PANEL_SECONDS
         clicked = False
         switched = set()
@@ -441,7 +443,8 @@ class SmsBrowser:
             if not clicked and not panel_visible:
                 login = self.page.get_by_role('button', name='登录', exact=True).filter(visible=True).first
                 if await self.read_dom('login_button_visible', login.is_visible):
-                    self.step('phone_input_ready', PHONE + ' visible and editable after header 登录 click',
+                    self.step('qr_ready' if mode == 'qr' else 'phone_input_ready',
+                              'loaded QR after header 登录 click' if mode == 'qr' else PHONE + ' visible and editable after header 登录 click',
                               round(max(0, deadline-time.monotonic()), 3))
                     self.require_origin()
                     self.operation = 'login_button_click'
@@ -455,7 +458,7 @@ class SmsBrowser:
                     await tab.click(timeout=1500)
                     switched.add("qr")
             await asyncio.sleep(.2)
-        raise Stop(5, 'phone_input_missing' if clicked else 'login_panel_missing')
+        raise Stop(5, ('login_qr_missing' if mode == 'qr' else 'phone_input_missing') if clicked else 'login_panel_missing')
 
     async def phone_ready(self):
         if not await self.read_dom('phone_visible', lambda: self.visible(PHONE).is_visible()):

@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from dyc import site
 from dyc.errors import Stop
@@ -79,6 +79,18 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
             yield browser
         finally:
             await browser.close()
+
+    async def test_qr_timeout_never_checks_sms_readiness(self):
+        async with self.browser() as browser:
+            with patch('dyc.sms_browser.LOGIN_PANEL_SECONDS', 1), \
+                 patch('dyc.sms_browser.ready_qr', new_callable=AsyncMock, return_value=None), \
+                 patch.object(browser, 'sms_ready', new_callable=AsyncMock) as sms_ready:
+                with self.assertRaises(Stop) as caught:
+                    await browser.reset(mode='qr')
+            self.assertEqual(caught.exception.reason, 'login_qr_missing')
+            self.assertEqual(browser.stage, 'qr_ready')
+            sms_ready.assert_not_awaited()
+            self.assertEqual((self.sends, self.submits), (0, 0))
 
     async def test_start_waits_for_delayed_editable_phone_not_just_panel(self):
         original = self.backend

@@ -21,7 +21,7 @@
   const steps = {profile_lock: '登录资源锁定', display_start: '启动登录环境',
     playwright_start: '启动浏览器', browser_launch: '启动浏览器', isolated_context: '准备登录页面',
     redirect_guard: '准备登录保护', navigate: '打开登录页面', login_entry: '准备登录页面',
-    phone_input_ready: '准备手机号输入', observe_login: '登录状态检查', send_sms: '发码检查'};
+    phone_input_ready: '准备手机号输入', qr_ready: '准备二维码', observe_login: '登录状态检查', send_sms: '发码检查'};
   function clearInputs() { for (const id of ['token']) $(id).value = ''; }
   function controls() {
     for (const id of ['unlock', 'refresh', 'cancel'])
