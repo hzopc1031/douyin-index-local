@@ -189,6 +189,19 @@ class SmsBrowser:
         self.qr_generation = 0
         self.login_signals = {}
         self.login_signals_at = 0
+        self.request_counts = {}
+
+    def count_request(self, url, outcome):
+        host = (urlsplit(url).hostname or '').lower()
+        domain = next((name for name in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com')
+                       if host == name), 'other')
+        key = (outcome, domain)
+        self.request_counts[key] = self.request_counts.get(key, 0) + 1
+        audit('request_count', session=self.audit_id, outcome=outcome, domain=domain,
+              count=self.request_counts[key])
+
+    def request_failed(self, request):
+        self.count_request(request.url, 'failed')
 
     def step(self, name, condition, timeout):
         self.stage = name
@@ -413,6 +426,7 @@ class SmsBrowser:
             audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason or 'allowed_login',
                   **self.request_metadata(request.url, request.method))
         if not allowed:
+            self.count_request(request.url, 'blocked')
             await route.abort()
         elif self.backend:
             await self.backend(route)
@@ -455,6 +469,7 @@ class SmsBrowser:
                                      if c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt')}
             await self.context.add_cookies(initial)
             self.context.on('request', self.redirected_request)
+            self.context.on('requestfailed', self.request_failed)
             self.context.on('response', self.response)
             self.page = await self.context.new_page()
             self.page.set_default_timeout(3000)
@@ -516,6 +531,22 @@ class SmsBrowser:
         audit('qrconnect_response', session=self.audit_id, http_status=response.status,
               status=status, has_redirect=redirect)
 
+    async def read_cdp_qr_body(self, session, request_id):
+        try:
+            result = await session.send('Network.getResponseBody', dict(requestId=request_id))
+            raw = result.get('body', '')
+            if result.get('base64Encoded'):
+                raw = base64.b64decode(raw, validate=True)
+            body = json.loads(raw)
+            data = body.get('data', {}) if isinstance(body, dict) else {}
+            value = data.get('status') if isinstance(data, dict) else None
+            status = int(value) if type(value) in (str, int) and str(value) in ('0', '1', '2', '3', '4', '5') else None
+            redirect = any(bool(obj.get(key)) for obj in (body, data) if isinstance(obj, dict)
+                           for key in ('redirect_url', 'redirectUrl'))
+            audit('qrconnect_cdp_body', session=self.audit_id, status=status, has_redirect=redirect)
+        except Exception:
+            audit('qrconnect_cdp_body', session=self.audit_id, status=None, has_redirect=None)
+
     def guard_response(self, event, session=None):
         task = asyncio.create_task(self.check_response(event, session))
         self.guard_tasks.add(task)
@@ -528,6 +559,13 @@ class SmsBrowser:
         try:
             status = event.get('responseStatusCode', 0)
             request = event.get('request', {})
+            parsed = urlsplit(request.get('url', ''))
+            if parsed.path.rstrip('/').endswith('/check_qrconnect'):
+                headers = event.get('responseHeaders', [])
+                audit('qrconnect_cdp_response', session=self.audit_id, http_status=status or None,
+                      domain=parsed.hostname if parsed.hostname in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other',
+                      has_location=any(h.get('name', '').lower() == 'location' for h in headers),
+                      transport_error=bool(event.get('responseErrorReason')))
             if time.monotonic() < self.sms_deadline and request.get('method') == 'POST':
                 audit('send_post_response', session=self.audit_id, http_status=status or None,
                       **self.request_metadata(request.get('url', ''), request.get('method')))
@@ -550,6 +588,7 @@ class SmsBrowser:
                 # H6: login dependencies may redirect any method; retain the two URL exclusions.
                 denied = denied or bool(self.blocked_url(target.geturl()))
                 if denied:
+                    self.count_request(target.geturl(), 'blocked')
                     audit('request_guard', session=self.audit_id, allowed=False,
                           reason=self.blocked_url(target.geturl()) or self.fatal_reason or 'response_transport_error',
                           **self.request_metadata(target.geturl(), request.get('method')))

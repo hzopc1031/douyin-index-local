@@ -10,6 +10,21 @@ from dyc.sms_cdp import Target
 
 
 class TargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qr_network_body_is_read_only_after_loading_finishes(self):
+        calls = []
+        class Browser:
+            async def read_cdp_qr_body(self, session, request_id):
+                calls.append((session, request_id))
+        tasks = []
+        owner = SimpleNamespace(browser=Browser(), spawn=lambda coro: tasks.append(asyncio.create_task(coro)))
+        target = Target(owner, None, 'child', {})
+        target.event('Network.responseReceived', {'requestId': '1', 'response': {
+            'url': 'https://sso.douyin.com/passport/web/check_qrconnect/?private'}})
+        self.assertFalse(tasks)
+        target.event('Network.loadingFinished', {'requestId': '1'})
+        await asyncio.gather(*tasks)
+        self.assertEqual(calls, [(target, '1')])
+
     async def check_initialization(self, errors=None, kind="iframe", fatal=False):
         errors = errors or {}
         methods = []
@@ -35,7 +50,7 @@ class TargetTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ready.done())
         if fatal:
             self.assertIsNotNone(ready.exception())
-            command = {'Fetch.enable': 'fetch_enable', 'Target.setAutoAttach': 'auto_attach',
+            command = {'Fetch.enable': 'fetch_enable', 'Network.enable': 'network_enable', 'Target.setAutoAttach': 'auto_attach',
                        'Runtime.runIfWaitingForDebugger': 'resume_target'}[methods[-1]]
             self.assertEqual(owner.browser.fatal_context, dict(target_type=kind,
                 command=command, protocol_error_code=errors[methods[-1]] if type(errors[methods[-1]]) is int else None))
@@ -45,7 +60,7 @@ class TargetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_guard_and_recursive_pause_before_resume(self):
         self.assertEqual(await self.check_initialization(),
-                         ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+                         ['Fetch.enable', 'Network.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
     async def test_unexpected_guard_error_never_resumes_child(self):
         for code in (-32000, -32602, None, '-32601', True):
@@ -54,18 +69,18 @@ class TargetTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_uses_owner_fetch_agent_and_keeps_recursive_attach(self):
         self.assertEqual(await self.check_initialization(kind='worker'),
-                         ['Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+                         ['Network.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
     async def test_unsupported_fetch_resumes_all_child_types(self):
         for kind in ('worklet', 'service_worker', 'shared_worker', 'iframe', 'unknown', 'future_target'):
             with self.subTest(kind=kind):
                 self.assertEqual(await self.check_initialization(errors={'Fetch.enable': -32601}, kind=kind),
-                    ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+                    ['Fetch.enable', 'Network.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
     async def test_unsupported_recursive_attach_still_resumes_worklet(self):
         self.assertEqual(await self.check_initialization(kind='worklet', errors={
             'Fetch.enable': -32601, 'Target.setAutoAttach': -32601}),
-            ['Fetch.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
+            ['Fetch.enable', 'Network.enable', 'Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'])
 
     async def test_unexpected_attach_or_resume_error_remains_fatal(self):
         for method in ('Target.setAutoAttach', 'Runtime.runIfWaitingForDebugger'):

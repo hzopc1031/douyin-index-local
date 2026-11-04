@@ -32,6 +32,7 @@ class Target:
         self.sequence = 0
         self.closed = False
         self.protocol_error_code = None
+        self.qr_requests = set()
 
     async def send(self, method, params=None):
         if self.closed:
@@ -82,6 +83,16 @@ class Target:
             child = self.children.pop(params['sessionId'], None)
             if child:
                 child.stop()
+        elif method == 'Network.responseReceived':
+            from urllib.parse import urlsplit
+            if urlsplit(params.get('response', {}).get('url', '')).path.rstrip('/').endswith('/check_qrconnect'):
+                self.qr_requests.add(params['requestId'])
+        elif method in ('Network.loadingFinished', 'Network.loadingFailed'):
+            request_id = params['requestId']
+            if request_id in self.qr_requests:
+                self.qr_requests.discard(request_id)
+                if method == 'Network.loadingFinished':
+                    self.owner.spawn(self.owner.browser.read_cdp_qr_body(self, request_id))
         elif method == 'Fetch.requestPaused':
             self.owner.browser.guard_response(params, self)
 
@@ -108,6 +119,8 @@ class Target:
                 await self.optional_domain('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
             # Recursion is necessary: a page's child iframe/worker may itself
             # create another target. Install supported guards before resuming.
+            method = 'network_enable'
+            await self.optional_domain('Network.enable', {})
             method = 'auto_attach'
             await self.optional_domain('Target.setAutoAttach', dict(autoAttach=True, waitForDebuggerOnStart=True, flatten=False))
             method = 'resume_target'
@@ -161,8 +174,10 @@ class TargetGuard(Target):
         # its new iframe/worker targets before their first script executes.
         self.session = main_session
         for method in ('Target.attachedToTarget', 'Target.receivedMessageFromTarget',
-                       'Target.detachedFromTarget', 'Fetch.requestPaused'):
+                       'Target.detachedFromTarget', 'Fetch.requestPaused', 'Network.responseReceived',
+                       'Network.loadingFinished', 'Network.loadingFailed'):
             self.session.on(method, lambda params, method=method: self.event(method, params))
+        await self.send('Network.enable')
         await self.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Response')]))
         await self.send('Target.setAutoAttach', dict(autoAttach=True, waitForDebuggerOnStart=True, flatten=False))
 

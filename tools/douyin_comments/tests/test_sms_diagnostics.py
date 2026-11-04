@@ -17,6 +17,29 @@ from dyc.sms_state import LoginSession, SmsQuota
 
 
 class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qr_cdp_diagnostics_include_body_and_transport_failure_without_secrets(self):
+        browser = SmsBrowser('/unused')
+        session = Mock(send=AsyncMock(return_value={'body': json.dumps({'data': {'status': '3',
+            'redirect_url': 'https://private.invalid/secret'}})}))
+        log = io.StringIO()
+        with redirect_stderr(log):
+            await browser.check_response(dict(requestId='x', responseStatusCode=200,
+                request=dict(method='POST', url='https://sso.douyin.com/passport/web/check_qrconnect/?secret=private'),
+                responseHeaders=[]), session)
+            await browser.read_cdp_qr_body(session, 'x')
+            session.send = AsyncMock(return_value={})
+            await browser.check_response(dict(requestId='x', responseErrorReason='Aborted',
+                request=dict(method='POST', url='https://sso.douyin.com/passport/web/check_qrconnect/')), session)
+            browser.request_failed(Mock(url='https://unknown.invalid/private'))
+        events = [json.loads(line) for line in log.getvalue().splitlines()]
+        self.assertEqual([(e['http_status'], e['transport_error']) for e in events
+                          if e['event'] == 'qrconnect_cdp_response'], [(200, False), (None, True)])
+        body = next(e for e in events if e['event'] == 'qrconnect_cdp_body')
+        self.assertEqual((body['status'], body['has_redirect']), (3, True))
+        self.assertTrue(any(e['event'] == 'request_count' and e['domain'] == 'other' and
+                            e['outcome'] == 'failed' and e['count'] == 1 for e in events))
+        self.assertNotIn('private', log.getvalue())
+
     async def test_phone_can_become_editable_after_old_twenty_second_deadline(self):
         browser = SmsBrowser('/unused')
         now = 0
@@ -120,8 +143,8 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 route.abort.assert_awaited_once()
                 route.continue_.assert_not_awaited()
         events = [json.loads(line) for line in logs.getvalue().splitlines()]
-        self.assertTrue(all(set(('method', 'domain', 'path')) <= event.keys() for event in events))
-        self.assertTrue(any(e['allowed'] and e['method'] == 'PUT' for e in events))
+        self.assertTrue(all(set(('method', 'domain', 'path')) <= event.keys() for event in events if event['event'] == 'request_guard'))
+        self.assertTrue(any(e.get('allowed') and e['method'] == 'PUT' for e in events))
         for secret in ('13900000000', '975318', '%39', '?', 'synthetic-secret'):
             self.assertNotIn(secret, logs.getvalue())
 
