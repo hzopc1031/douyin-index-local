@@ -36,6 +36,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 with patch('dyc.sms_browser.audit') as audit:
                     await page.evaluate("fetch('https://www.douyin.com/check_qrconnect/')")
                     await frame.evaluate("fetch('https://sso.douyin.com/check_qrconnect/')")
+                    await page.evaluate("fetch('https://untrusted.invalid/check_qrconnect/')")
                     await asyncio.gather(*browser.response_tasks)
                 events = [c for c in audit.call_args_list if c.args[0] == 'qrconnect_response']
                 self.assertEqual(len(events), 2)

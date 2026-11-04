@@ -199,6 +199,7 @@ class SmsBrowser:
     def request_started(self, request):
         parsed = urlsplit(request.url)
         if (parsed.scheme == 'https' and
+                in_domains(parsed.hostname or '', ('douyin.com', 'iesdouyin.com', 'snssdk.com', 'amemv.com', 'bytedance.com')) and
                 parsed.path.rstrip('/').endswith('/check_qrconnect')):
             self.qr_requests[request] = self.qr_generation
 
@@ -430,6 +431,7 @@ class SmsBrowser:
     def response(self, response):
         parsed = urlsplit(response.url)
         if (parsed.scheme == 'https' and
+                in_domains(parsed.hostname or '', ('douyin.com', 'iesdouyin.com', 'snssdk.com', 'amemv.com', 'bytedance.com')) and
                 parsed.path.rstrip('/').endswith('/check_qrconnect')):
             task = asyncio.create_task(self.qr_response(response, self.qr_requests.pop(response.request, -1)))
             self.response_tasks.add(task)
