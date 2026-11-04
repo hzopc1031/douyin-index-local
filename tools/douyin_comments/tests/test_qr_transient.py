@@ -47,15 +47,18 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Stop):
             await browser.observe()
 
-    async def test_confirmed_timeout_is_not_suppressed_on_blank_page(self):
+    async def test_blank_page_waits_for_session_deadline_then_releases(self):
         browser = self.browser()
         browser.page.url = 'about:blank'
         browser.context.cookies = AsyncMock(return_value=[])
-        browser.qr_confirmed_at = 100
-        with patch('dyc.sms_browser.time.monotonic', return_value=121):
-            with self.assertRaises(Stop) as caught:
-                await browser.observe()
-        self.assertEqual(caught.exception.reason, 'qr_confirmed_no_fresh_session_cookie')
+        browser.close = AsyncMock()
+        self.assertEqual(await browser.observe(), 'pending')
+        now = [100]
+        session = LoginSession(browser, None, clock=lambda: now[0], seconds=10)
+        now[0] = 110
+        await session.poll()
+        self.assertEqual(session.state, 'expired')
+        browser.close.assert_awaited_once()
 
     async def test_new_page_success_persists_and_closes(self):
         browser = self.browser()

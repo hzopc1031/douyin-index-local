@@ -1,10 +1,4 @@
-"""Isolated Playwright login; credentials live only in an incognito context.
-
-The persistent dyc profile stays at about:blank. Only allowlisted login cookies
-are copied back after a positive dyc login signal. No traces, HARs, downloads,
-page storage or credential-bearing browser errors are written. Failure screenshots
-are redacted before rasterization and stored only in the private state directory.
-"""
+"""QR login in the dedicated persistent dyc browser profile."""
 import asyncio
 import base64
 from dataclasses import dataclass
@@ -27,7 +21,6 @@ from .errors import Stop
 from .login_ui import ready_qr
 from .runtime import Display, Profile, browser_defaults, check_memory, private_dir, private_open, atomic_text
 from .sms_state import audit, reject
-from .sms_cdp import TargetGuard
 
 # Fixed copy/adaptation of the 2026-10-31 login-B selectors; see SMS_LOGIN.md.
 PHONE = '#douyin_login_comp_mobile_code input#normal-input'
@@ -43,13 +36,8 @@ CHALLENGE = ('#captcha_container, .captcha_verify_container, #rc-verifycenter, '
 RECTS = dict(slider_handle='.secsdk-captcha-drag-icon',
              slider_track='.secsdk-captcha-drag-wrapper',
              slider_image='#captcha-verify-image', slider_piece='.captcha_verify_img_slide')
-COOKIE_NAMES = {'sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt', 'uid_tt_ss',
-                'sid_guard', 'sid_ucp_v1', 'ssid_ucp_v1', 'passport_csrf_token',
-                'passport_csrf_token_default', 'ttwid'}
-SESSION_COOKIE_SECONDS = 86400
 LOGIN_PANEL_SECONDS = 60
 SMS_RESPONSE_SECONDS = 15
-QR_COOKIE_SECONDS = 20
 LOGIN_SIGNAL_SECONDS = 10
 
 
@@ -170,9 +158,7 @@ class SmsBrowser:
         self.solver = solver
         self.playwright = self.persistent = self.context = self.page = None
         self.driver_pid = None
-        self.response_session = None
-        self.guard_tasks = set()
-        self.target_guard = None
+        self.abort_task = None
         self.private_values = []
         self.fatal = False
         self.audit_id = ''
@@ -184,9 +170,6 @@ class SmsBrowser:
         self.last_frame = None
         self.frame_token = ''
         self.initial_sessions = {}
-        self.qr_confirmed = False
-        self.qr_confirmed_at = None
-        self.qr_generation = 0
         self.login_signals = {}
         self.login_signals_at = 0
         self.request_counts = {}
@@ -382,57 +365,6 @@ class SmsBrowser:
         return dict(method=method if re.fullmatch(r'[A-Z]{1,20}', method or '') else 'OTHER',
                     domain=clean(parsed.hostname or ''), path=clean(parsed.path))
 
-    def blocked_url(self, url):
-        if self.contains_private(url):
-            return 'private_value_in_url'
-        if site.request_kind(unquote(url)):
-            return 'comments_forbidden'
-        return ''
-
-    async def websocket(self, socket):
-        reason = 'stopped' if self.fatal or self.cancel.is_set() else self.blocked_url(socket.url)
-        if reason:
-            audit('request_guard', session=self.audit_id, allowed=False, reason=reason,
-                  **self.request_metadata(socket.url, 'GET'))
-            await socket.close()
-        else:
-            socket.connect_to_server()
-
-    async def route(self, route):
-        try:
-            await self._route(route)
-        except Exception:
-            # Never let Playwright log an unhandled route exception containing
-            # a URL or input. Missing guard coverage fails closed.
-            audit('request_guard_rejected', session=self.audit_id, reason='request_guard_failed',
-                  **self.request_metadata(route.request.url, route.request.method))
-            self.fatal_reason = self.fatal_reason or 'request_guard_failed'
-            self.fatal = True
-            try:
-                await route.abort()
-            except Exception:
-                pass
-
-    async def _route(self, route):
-        request = route.request
-        reason = 'stopped' if self.fatal or self.cancel.is_set() else self.blocked_url(request.url)
-        allowed = not reason
-        if allowed and request.method == 'GET' and request.resource_type == 'document':
-            host = urlsplit(request.url).hostname or ''
-            domain = host if host in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
-            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_document',
-                  method='GET', domain=domain, path='[redacted]')
-        elif not allowed or request.method != 'GET':
-            audit('request_guard', session=self.audit_id, allowed=allowed, reason=reason or 'allowed_login',
-                  **self.request_metadata(request.url, request.method))
-        if not allowed:
-            self.count_request(request.url, 'blocked')
-            await route.abort()
-        elif self.backend:
-            await self.backend(route)
-        else:
-            await route.continue_()
-
     async def start(self):
         if self.startup_limits:
             check_memory()
@@ -447,36 +379,25 @@ class SmsBrowser:
             self.step('playwright_start', 'Playwright driver ready', 35)
             self.playwright = await async_playwright().start()
             self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
-            self.step('browser_launch', 'persistent Chromium about:blank', 35)
+            self.step('browser_launch', 'persistent Chromium login profile', 35)
             self.persistent = await self.playwright.chromium.launch_persistent_context(
                 str(self.profile.path), headless=False,
                 env={**os.environ, **self.display.environment()},
                 handle_sigint=False, handle_sigterm=False, handle_sighup=False,
-                service_workers='block', accept_downloads=False,
+                viewport=dict(width=1000, height=800), device_scale_factor=1, accept_downloads=False,
                 args=['--disable-background-networking', '--disable-component-update',
                       '--disable-sync', '--no-first-run', '--disable-crash-reporter',
                       '--disable-breakpad', '--disable-extensions'])
-            await self.persistent.route('**/*', lambda route: route.abort())
-            await self.persistent.route_web_socket('**/*', lambda socket: socket.close())
-            self.step('isolated_context', 'isolated login page and network guards', 35)
-            self.context = await self.persistent.browser.new_context(
-                viewport=dict(width=1000, height=800), device_scale_factor=1,
-                service_workers='block', accept_downloads=False)
-            await self.context.route('**/*', self.route)
-            await self.context.route_web_socket('**/*', self.websocket)
-            initial = await self.persistent.cookies(self.url)
+            self.context = self.persistent
+            if self.backend:
+                await self.context.route('**/*', self.backend)
+            initial = await self.context.cookies(self.url)
             self.initial_sessions = {(c['name'], c['domain'], c['path']): c['value'] for c in initial
                                      if c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt')}
-            await self.context.add_cookies(initial)
-            self.context.on('request', self.redirected_request)
             self.context.on('requestfailed', self.request_failed)
             self.context.on('response', self.response)
-            self.page = await self.context.new_page()
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             self.page.set_default_timeout(3000)
-            self.response_session = await self.context.new_cdp_session(self.page)
-            self.target_guard = TargetGuard(self)
-            self.step('redirect_guard', 'CDP Fetch/Target interception ready', 5)
-            await self.target_guard.start(self.response_session)
             await self.reset()
         except BaseException as error:
             try:
@@ -487,134 +408,14 @@ class SmsBrowser:
                 await self.close()
             raise
 
-    def redirected_request(self, request):
-        # Playwright routes only see the first URL in a redirect chain.
-        if request.redirected_from is not None and request.method == 'GET' and request.resource_type == 'document':
-            host = urlsplit(request.url).hostname or ''
-            domain = host if host in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
-            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_redirect',
-                  method='GET', domain=domain, path='[redacted]')
-        elif request.redirected_from is not None and request.method != 'GET':
-            audit('request_guard', session=self.audit_id, allowed=True, reason='allowed_login_redirect',
-                  **self.request_metadata(request.url, request.method))
-
     def response(self, response):
-        parsed = urlsplit(response.url)
-        if (parsed.scheme == 'https' and parsed.hostname == 'login.douyin.com' and
-                parsed.path.rstrip('/') == '/passport/web/check_qrconnect'):
-            task = asyncio.create_task(self.read_qr_response(response, self.qr_generation))
-            self.guard_tasks.add(task)
-            task.add_done_callback(self.guard_tasks.discard)
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
             self.fatal_reason = 'http_' + str(response.status)
             self.fatal = True
-
-    async def read_qr_response(self, response, generation):
-        status = None
-        redirect = False
-        try:
-            async with asyncio.timeout(2):
-                body = await response.json()
-            if type(body) is dict:
-                data = body.get('data') if type(body.get('data')) is dict else {}
-                value = data.get('status')
-                if type(value) in (str, int) and str(value) in ('0', '1', '2', '3', '4', '5'):
-                    status = int(value)
-                redirect = any(bool(obj.get(key)) for obj in (body, data)
-                               for key in ('redirect_url', 'redirectUrl'))
-            if response.status == 200 and generation == self.qr_generation and status == 3:
-                self.qr_confirmed = True
-                if self.qr_confirmed_at is None:
-                    self.qr_confirmed_at = time.monotonic()
-        except Exception:
-            pass
-        audit('qrconnect_response', session=self.audit_id, http_status=response.status,
-              status=status, has_redirect=redirect)
-
-    async def read_cdp_qr_body(self, session, request_id):
-        try:
-            result = await session.send('Network.getResponseBody', dict(requestId=request_id))
-            raw = result.get('body', '')
-            if result.get('base64Encoded'):
-                raw = base64.b64decode(raw, validate=True)
-            body = json.loads(raw)
-            data = body.get('data', {}) if isinstance(body, dict) else {}
-            value = data.get('status') if isinstance(data, dict) else None
-            status = int(value) if type(value) in (str, int) and str(value) in ('0', '1', '2', '3', '4', '5') else None
-            redirect = any(bool(obj.get(key)) for obj in (body, data) if isinstance(obj, dict)
-                           for key in ('redirect_url', 'redirectUrl'))
-            audit('qrconnect_cdp_body', session=self.audit_id, status=status, has_redirect=redirect)
-        except Exception:
-            audit('qrconnect_cdp_body', session=self.audit_id, status=None, has_redirect=None)
-
-    def guard_response(self, event, session=None):
-        task = asyncio.create_task(self.check_response(event, session))
-        self.guard_tasks.add(task)
-        task.add_done_callback(self.guard_tasks.discard)
-
-    async def check_response(self, event, session=None):
-        """Chromium pauses before redirects, which Playwright routes may skip."""
-        session = session or self.response_session
-        request_id = event['requestId']
-        try:
-            status = event.get('responseStatusCode', 0)
-            request = event.get('request', {})
-            parsed = urlsplit(request.get('url', ''))
-            if parsed.path.rstrip('/').endswith('/check_qrconnect'):
-                headers = event.get('responseHeaders', [])
-                audit('qrconnect_cdp_response', session=self.audit_id, http_status=status or None,
-                      domain=parsed.hostname if parsed.hostname in ('www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other',
-                      has_location=any(h.get('name', '').lower() == 'location' for h in headers),
-                      transport_error=bool(event.get('responseErrorReason')))
-            if time.monotonic() < self.sms_deadline and request.get('method') == 'POST':
-                audit('send_post_response', session=self.audit_id, http_status=status or None,
-                      **self.request_metadata(request.get('url', ''), request.get('method')))
-            if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
-                self.fatal_reason = 'http_' + str(status)
-                self.fatal = True
-            if event.get('responseErrorReason') and not self.fatal:
-                try:
-                    await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason=event['responseErrorReason']))
-                except Exception:
-                    pass
-                return
-            denied = self.fatal
-            if 300 <= status < 400:
-                request = event['request']
-                location = next((h['value'] for h in event.get('responseHeaders', [])
-                                 if h['name'].lower() == 'location'), '')
-                from urllib.parse import urljoin
-                target = urlsplit(urljoin(request['url'], location))
-                # H6: login dependencies may redirect any method; retain the two URL exclusions.
-                denied = denied or bool(self.blocked_url(target.geturl()))
-                if denied:
-                    self.count_request(target.geturl(), 'blocked')
-                    audit('request_guard', session=self.audit_id, allowed=False,
-                          reason=self.blocked_url(target.geturl()) or self.fatal_reason or 'response_transport_error',
-                          **self.request_metadata(target.geturl(), request.get('method')))
-                    kind = event.get('resourceType', '')
-                    kind = kind.lower() if kind in ('Document', 'XHR', 'Fetch', 'Script', 'Image', 'Other') else 'resource'
-                    self.fatal_reason = self.fatal_reason or 'redirect_denied_' + kind
-                    self.fatal = True
-            if denied:
-                audit('response_guard_rejected', session=self.audit_id, http_status=status,
-                      reason=self.fatal_reason or 'response_transport_error',
-                      **self.request_metadata(request.get('url', ''), request.get('method')))
-                await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
-            else:
-                await session.send('Fetch.continueRequest', dict(requestId=request_id))
-        except Exception:
-            self.fatal_reason = self.fatal_reason or 'response_guard_failed'
-            self.fatal = True
-            try:
-                await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason='BlockedByClient'))
-            except Exception:
-                pass
+            if self.abort_task is None:
+                self.abort_task = asyncio.create_task(self.context.close())
 
     async def reset(self, mode="qr"):
-        self.qr_generation += 1
-        self.qr_confirmed = False
-        self.qr_confirmed_at = None
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
@@ -769,7 +570,6 @@ class SmsBrowser:
                     if await self._challenge(redirect=True):
                         raise Stop(3, 'verification_required')
                 await self.cookie_signals(None, None)
-                await self.check_qr_cookie_timeout()
                 return 'pending'
             previous = self.page
             for page in pages:
@@ -781,7 +581,6 @@ class SmsBrowser:
                 if await self.login_confirmed():
                     return 'succeeded'
             self.page = previous if previous in pages else pages[-1]
-            await self.check_qr_cookie_timeout()
             if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
                     '验证码错误', exact=False).filter(visible=True).count()):
                 raise Stop(4, 'code_invalid')
@@ -789,7 +588,7 @@ class SmsBrowser:
         except Exception as error:
             if self.transient_read(error) or (not self.fatal and
                     ((type(error).__name__ == 'TargetClosedError' and self.page.is_closed()) or
-                     (isinstance(error, Stop) and error.reason != 'qr_confirmed_no_fresh_session_cookie' and
+                     (isinstance(error, Stop) and
                       (self.page.is_closed() or self.page.url == 'about:blank')))):
                 return 'pending'
             raise
@@ -802,7 +601,7 @@ class SmsBrowser:
             lambda: self.page.locator(', '.join(selectors)).filter(visible=True).count()))
         valid = await self.cookie_signals(panel, avatar)
         fresh = any(self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in valid)
-        return bool(valid) and ((not panel and avatar) or (fresh and self.qr_confirmed))
+        return fresh and not panel and avatar
 
     async def cookie_signals(self, panel, avatar):
         all_cookies = await self.context.cookies()
@@ -810,9 +609,8 @@ class SmsBrowser:
         names = ('sessionid', 'sessionid_ss', 'sid_tt')
         valid = [c for c in cookies if c['name'] in names and c.get('value') and
                  in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com'))]
-        signals = dict(panel_visible=panel, avatar_visible=avatar,
+        signals = dict(panel_visible=bool(panel), avatar_visible=bool(avatar),
                        **{name: any(c['name'] == name for c in valid) for name in names},
-                       qr_confirmed=self.qr_confirmed,
                        **{name + '_any_domain': any(c['name'] == name and bool(c.get('value'))
                                                   for c in all_cookies) for name in names})
         now = time.monotonic()
@@ -821,14 +619,6 @@ class SmsBrowser:
             self.login_signals_at = now
             audit('login_signals', session=self.audit_id, **signals)
         return valid
-
-    async def check_qr_cookie_timeout(self):
-        if self.qr_confirmed_at is not None and time.monotonic() - self.qr_confirmed_at >= QR_COOKIE_SECONDS:
-            cookies = await self.context.cookies(self.url)
-            if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') and c.get('value') and
-                       in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com')) and
-                       self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in cookies):
-                raise Stop(4, 'qr_confirmed_no_fresh_session_cookie')
 
     def sms_request(self, url, method):
         parsed = urlsplit(url)
@@ -1352,7 +1142,7 @@ class SmsBrowser:
             pass
 
     async def persist(self):
-        self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)
+        self.step('persist_login', 'confirmed account and fresh session cookie', 3)
         try:
             self.require_origin()
             confirmed = await self.login_confirmed()
@@ -1364,28 +1154,6 @@ class SmsBrowser:
             raise
         if not confirmed:
             raise Stop(4, 'login_unconfirmed')
-        cookies = await self.context.cookies(self.url)
-        safe = [cookie for cookie in cookies if cookie['name'] in COOKIE_NAMES and
-                in_domains(cookie['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com')) and
-                not self.contains_private(json.dumps(cookie))]
-        if not any(c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt') for c in safe):
-            raise Stop(4, 'login_cookie_missing')
-        for cookie in safe:
-            if cookie['name'] == 'sessionid':
-                domain = cookie.get('domain', '')
-                audit('sessionid_attributes', session=self.audit_id,
-                      domain=domain if domain in ('.douyin.com', 'douyin.com', 'www.douyin.com') else 'other',
-                      path=cookie.get('path') if cookie.get('path') == '/' else 'other',
-                      expires=cookie.get('expires') if type(cookie.get('expires')) in (int, float) and math.isfinite(cookie['expires']) else None)
-        # Chromium discards session-only cookies on a clean restart. Give only
-        # these allowlisted login cookies a conservative local 24-hour horizon;
-        # this never extends the platform's server-side session validity. Keep
-        # every explicit official Expires value unchanged. Restoring whole tabs
-        # would navigate before our network guards and is deliberately avoided.
-        for cookie in safe:
-            if cookie.get('expires', -1) < 0:
-                cookie['expires'] = time.time() + SESSION_COOKIE_SECONDS
-        await self.persistent.add_cookies(safe)
         recorded = False
         if self.state_dir is not None:
             try:
@@ -1403,13 +1171,11 @@ class SmsBrowser:
         self.last_frame = None
         self.frame_token = ''
         records = _processes(self.driver_pid) if self.driver_pid else {}
-        if self.target_guard:
-            self.target_guard.closing = True
         try:
             async with asyncio.timeout(5):
-                if self.context:
-                    await self.context.close()
-                if self.persistent:
+                if self.abort_task:
+                    await asyncio.gather(self.abort_task, return_exceptions=True)
+                elif self.persistent:
                     await self.persistent.close()
                 if self.playwright:
                     await self.playwright.stop()
@@ -1417,16 +1183,14 @@ class SmsBrowser:
             _kill_owned(records)
         finally:
             self.context = self.persistent = self.playwright = self.page = None
-            for task in self.guard_tasks:
-                task.cancel()
-            await asyncio.gather(*self.guard_tasks, return_exceptions=True)
-            self.guard_tasks.clear()
-            if self.target_guard:
-                await self.target_guard.close()
-            if self.solver:
-                await self.solver.close()
-            await self.display.close()
-            held = self.profile.fd is not None
-            self.profile.__exit__(None, None, None)
-            if held:
-                audit('profile_lock_released', session=self.audit_id, stage=self.stage)
+            try:
+                if self.solver:
+                    await self.solver.close()
+            finally:
+                try:
+                    await self.display.close()
+                finally:
+                    held = self.profile.fd is not None
+                    self.profile.__exit__(None, None, None)
+                    if held:
+                        audit('profile_lock_released', session=self.audit_id, stage=self.stage)

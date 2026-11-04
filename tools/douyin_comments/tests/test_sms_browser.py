@@ -156,41 +156,21 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(browser.page)
         self.assertEqual(self.sends, 0)
 
-    async def test_calibrated_phone_code_flow_persists_only_login_cookies(self):
+    async def test_qr_login_persists_profile_and_releases_lock(self):
         async with self.browser() as browser:
+            self.assertIs(browser.context, browser.persistent)
             self.assertEqual(await browser.observe(), 'pending')
-            self.assertNotEqual(browser.context, browser.persistent)
-            self.assertTrue(all(p.url == 'about:blank' for p in browser.persistent.pages))
             with self.assertRaises(Stop):
                 with Profile(self.profile):
-                    self.fail('profile lock bypassed')
-            await browser.send(PHONE)
-            await browser.page.wait_for_function('window.sends === 1')
-            await browser.submit(CODE)
-            await browser.page.wait_for_function('window.submissions === 1')
-            self.assertTrue(self.correct_phone and self.correct_code)
-            self.assertEqual(await browser.page.locator('#button-input').input_value(), '')
-            await browser.page.evaluate('''([phone,code]) => {
-              localStorage.setItem('phone', phone); localStorage.setItem('code',code);
-              document.cookie='phone='+phone+'; Secure; Path=/';
-              success(); }''', [PHONE, CODE])
+                    pass
+            await browser.page.evaluate("localStorage.setItem('synthetic', 'saved'); success()")
             self.assertEqual(await browser.observe(), 'succeeded')
             await browser.persist()
-            cookies = await browser.persistent.cookies(site.FAKE_ORIGIN)
-            self.assertEqual({c['name'] for c in cookies}, {'sessionid'})
-        self.assertEqual(self.foreign, 0)
-        for path in self.profile.rglob('*'):
-            if path.is_file() and not path.is_symlink():
-                data = path.read_bytes()
-                for value in (PHONE, CODE):
-                    self.assertNotIn(value.encode(), data, path.name)
-                    self.assertNotIn(value.encode('utf-16-le'), data, path.name)
+            self.assertEqual((self.sends, self.submits, self.foreign), (0, 0, 0))
         with Profile(self.profile):
             pass
         async with self.browser() as reopened:
-            restored = await reopened.context.cookies(site.FAKE_ORIGIN)
-            self.assertEqual({c['name'] for c in restored}, {'sessionid'})
-            self.assertGreater(restored[0]['expires'], 0)
+            self.assertEqual(await reopened.page.evaluate("localStorage.getItem('synthetic')"), 'saved')
 
     async def test_official_cookie_expiration_preserved(self):
         import time
@@ -294,128 +274,8 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(PHONE, str(data))
                 self.assertNotIn(CODE, str(data))
 
-    async def test_cross_origin_gap_stays_manual_and_redirect_cannot_escape(self):
-        solver = type('Solver', (), {'solve': AsyncMock(return_value=[[.1,.9,0],[.5,.9,10]]),
-                                      'close': AsyncMock()})()
-        original_backend = self.backend
-        async def frames(route):
-            url = route.request.url
-            if url == 'https://frame.invalid/flow':
-                await route.fulfill(content_type='text/html; charset=utf-8', body=HTML + '''
-                <script>document.querySelector('#login-panel-new').remove();
-                document.querySelector('#header').remove();challenge();</script>''')
-            elif url == 'https://frame.invalid/post':
-                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/aweme/v1/web/comment/list/'})
-            else:
-                await original_backend(route)
-        self.backend = frames
-        async with self.browser(solver) as browser:
-            await browser.page.evaluate('''() => { const f=document.createElement('iframe');
-              f.src='https://frame.invalid/flow'; f.style='position:fixed;left:10px;top:10px;width:400px;height:350px';
-              document.body.append(f); }''')
-            for _ in range(50):
-                frame = next((f for f in browser.page.frames if f.url == 'https://frame.invalid/flow'), None)
-                if frame and await frame.locator('#captcha_container').count():
-                    break
-                await asyncio.sleep(.05)
-            self.assertIsNotNone(frame)
-            await browser.auto_step()
-            solver.solve.assert_not_awaited()
-            self.assertEqual(browser.auto_attempts, 0)
-            self.assertTrue((await browser.frame(True))['image'])
-            # Independent request-stage sink: even if the production response
-            # guard regresses, NO redirected request can reach any real network.
-            sink = await browser.context.new_cdp_session(frame)
-            hops, tasks = [], set()
-            async def paused(event):
-                rid = event['requestId']
-                if event['request']['url'] != 'https://frame.invalid/post':
-                    hops.append('redirected')
-                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
-                else:
-                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
-            def launch(event):
-                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
-            sink.on('Fetch.requestPaused', launch)
-            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
-            try:
-                await frame.evaluate("() => fetch('/post', {method:'POST',body:'synthetic-credentials'}).catch(()=>{})")
-                self.assertEqual(hops, [])
-                self.assertTrue(browser.fatal)
-            finally:
-                await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_worker_first_post_redirect_is_guarded_by_owner_page(self):
-        original = self.backend
-        async def workers(route):
-            path = route.request.url.removeprefix(site.FAKE_ORIGIN.rstrip('/'))
-            if path == '/worker.js':
-                await route.fulfill(content_type='application/javascript', body="fetch('/worker-post', {method:'POST',body:'synthetic'}).catch(()=>{})")
-            elif path == '/worker-post':
-                await route.fulfill(status=307, headers={'Location': 'https://leak.invalid/aweme/v1/web/comment/list/'})
-            else:
-                await original(route)
-        self.backend = workers
-        async with self.browser() as browser:
-            sink = await browser.context.new_cdp_session(browser.page)
-            escaped, tasks = [], set()
-            async def paused(event):
-                rid = event['requestId']
-                allowed = [site.FAKE_ORIGIN.rstrip('/') + path for path in ('/worker.js', '/worker-post')]
-                if event['request']['url'] not in allowed:
-                    escaped.append('unexpected_request')
-                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
-                else:
-                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
-            def launch(event):
-                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
-            sink.on('Fetch.requestPaused', launch)
-            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
-            try:
-                await browser.page.evaluate("() => {window.worker = new Worker('/worker.js')}")
-                async with asyncio.timeout(5):
-                    while not browser.fatal:
-                        await asyncio.sleep(.02)
-                self.assertEqual(browser.fatal_reason, 'redirect_denied_xhr')
-                self.assertEqual(escaped, [])
-            finally:
-                await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def test_worker_post_redirect_to_login_dependency_is_allowed(self):
-        original = self.backend
-        async def workers(route):
-            path = route.request.url.removeprefix(site.FAKE_ORIGIN.rstrip('/'))
-            if path == '/worker.js':
-                await route.fulfill(content_type='application/javascript', body="fetch('/worker-post', {method:'POST',body:'synthetic'}).catch(()=>{})")
-            elif path == '/worker-post':
-                await route.fulfill(status=307, headers={'Location': 'https://sdk.amemv.com/device/register'})
-            else:
-                await original(route)
-        self.backend = workers
-        async with self.browser() as browser:
-            sink = await browser.context.new_cdp_session(browser.page)
-            escaped, tasks = [], set()
-            async def paused(event):
-                rid = event['requestId']
-                allowed = [site.FAKE_ORIGIN.rstrip('/') + path for path in ('/worker.js', '/worker-post')]
-                if event['request']['url'] not in allowed:
-                    escaped.append('unexpected_request')
-                    await sink.send('Fetch.failRequest', dict(requestId=rid, errorReason='BlockedByClient'))
-                else:
-                    await sink.send('Fetch.continueRequest', dict(requestId=rid))
-            def launch(event):
-                task = asyncio.create_task(paused(event)); tasks.add(task); task.add_done_callback(tasks.discard)
-            sink.on('Fetch.requestPaused', launch)
-            await sink.send('Fetch.enable', dict(patterns=[dict(urlPattern='*', requestStage='Request')]))
-            try:
-                await browser.page.evaluate("() => {window.worker = new Worker('/worker.js')}")
-                async with asyncio.timeout(5):
-                    while not escaped:
-                        await asyncio.sleep(.02)
-                self.assertFalse(browser.fatal)
-                self.assertEqual(escaped, ['unexpected_request'])
-            finally:
-                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_audio_worklet_runs_and_phone_stays_editable(self):
         async with self.browser() as browser:
@@ -476,34 +336,3 @@ class PointTests(unittest.TestCase):
                        [[.5,.5,0],[.5,.5,5001]], [[True,.5,0]]):
             with self.assertRaises(LoginError):
                 points_checked(values)
-
-
-class RedirectTests(unittest.IsolatedAsyncioTestCase):
-    async def test_fatal_response_blocks_page_retry_before_next_poll(self):
-        from types import SimpleNamespace
-        for status in (401, 403, 429):
-            browser = SmsBrowser('/unused', backend=AsyncMock())
-            browser.response(SimpleNamespace(url='https://www.douyin.com/', status=status, request=SimpleNamespace(resource_type='xhr')))
-            route = SimpleNamespace(request=SimpleNamespace(url='https://www.douyin.com/retry', method='POST'), abort=AsyncMock(), continue_=AsyncMock())
-            await browser.route(route)
-            route.abort.assert_awaited_once()
-            route.continue_.assert_not_awaited()
-            browser.backend.assert_not_awaited()
-
-    async def test_private_and_comment_redirects_stopped_before_follow(self):
-        browser = SmsBrowser('/unused')
-        browser.response_session = type('CDP', (), {'send': AsyncMock()})()
-        browser.private_values = [PHONE, CODE]
-        for method, target in (('POST', '/aweme/v1/web/comment/list/'), ('GET', '/aweme/v1/web/comment/list/reply/'),
-                               ('GET', '/path?phone=' + PHONE)):
-            await browser.check_response(dict(requestId='synthetic', responseStatusCode=307,
-                request=dict(method=method, url='https://www.douyin.com/passport/'),
-                responseHeaders=[dict(name='Location', value=target)]))
-            self.assertEqual(browser.response_session.send.call_args.args[0], 'Fetch.failRequest')
-            self.assertTrue(browser.fatal)
-        browser.fatal = False
-        await browser.check_response(dict(requestId='synthetic', responseStatusCode=302,
-            request=dict(method='GET', url='https://www.douyin.com/'),
-            responseHeaders=[dict(name='Location', value='/jingxuan')]))
-        self.assertEqual(browser.response_session.send.call_args.args[0], 'Fetch.continueRequest')
-        self.assertFalse(browser.fatal)
