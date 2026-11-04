@@ -63,7 +63,7 @@ def run():
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
-                assert '未登录 / 待登录' in page.locator('#baiduQueryNote').inner_text()
+                assert '远程桌面扫码登录' in page.locator('#baiduQueryNote').inner_text()
                 page.locator('#queryWords').fill(q['keywords'][0])
                 page.locator('#queryRange').evaluate('(node)=>node.open=true')
                 page.locator('#queryStart').fill(q['start_date'])

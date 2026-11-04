@@ -52,8 +52,8 @@ def daily(store):
 async def browser_status(hub):
     try:
         result = await asyncio.to_thread(hub.bridge, 'baidu_status', None, 2)
-        if result.get('ok') is True and result.get('state') == 'browser_ready' and result.get('live_enabled') is True:
-            return 'browser_ready'
+        if result.get('ok') is True and result.get('live_enabled') is True and result.get('state') in ('browser_ready', 'login_required', 'signature_unavailable'):
+            return result['state']
     except Exception:
         pass
     return 'login_required'
@@ -105,8 +105,9 @@ async def run_one(hub, row, query):
         if counter['attempts'] >= config['logical_daily'] or counter['http_reserved'] + http_reserved > config['http_daily']:
             fail(store, row['id'], 'baidu_daily_limit')
             return True
-        if await browser_status(hub) != 'browser_ready':
-            fail(store, row['id'], 'login_required')
+        state = await browser_status(hub)
+        if state != 'browser_ready':
+            fail(store, row['id'], state)
             return True
         # Reserve both steps before dispatch; timeout/restart never refunds uncertain traffic.
         counter = daily(store)
@@ -119,7 +120,7 @@ async def run_one(hub, row, query):
                 store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, encode(value)))
             store.db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), row['id']))
         try:
-            response = await asyncio.to_thread(hub.bridge, 'baidu_query', query, 75 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
+            response = await asyncio.to_thread(hub.bridge, 'baidu_query', query, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
             if response.get('ok') is not True:
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')
@@ -137,3 +138,16 @@ async def run_one(hub, row, query):
             # Do not log browser exceptions, response bodies, or arbitrary messages.
             fail(store, row['id'], 'request_failed')
         return True
+
+
+def mount_routes(app, hub, require, reply):
+    async def login_open(request):
+        require(request, admin=True)
+        try:
+            result = await asyncio.to_thread(hub.bridge, 'baidu_login_open', None, 35)
+        except Exception:
+            raise HubError('browser_unavailable', '百度浏览器未就绪，请检查远程桌面。', 503) from None
+        if not result.get('ok'):
+            raise HubError('browser_unavailable', '百度浏览器未就绪，请检查远程桌面。', 503)
+        return reply(result)
+    app.router.add_post('/api/v1/login/baidu/open', login_open)

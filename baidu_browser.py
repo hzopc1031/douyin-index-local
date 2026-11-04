@@ -4,8 +4,9 @@ from pathlib import Path
 import queue
 import stat
 import threading
+import time
 
-from browser_profile import ProfileError, ProfileLock
+from browser_profile import ProfileError, ProfileLock, profile_root
 
 ROOT = Path(__file__).resolve().parent
 
@@ -17,7 +18,8 @@ def prepare_profile(root=ROOT):
         raise ProfileError('Unsafe Baidu profile path')
     path = configured.absolute()
     forbidden = [root / name for name in ('.cloud-state', '.runtime', 'results')]
-    if any(path == p or p in path.parents for p in forbidden):
+    forbidden.append(profile_root(root).absolute())
+    if any(path == p or p in path.parents or path in p.parents for p in forbidden):
         raise ProfileError('Unsafe Baidu profile location')
     # Check each existing ancestor before creating anything, including symlinks.
     for part in reversed((path, *path.parents)):
@@ -26,6 +28,8 @@ def prepare_profile(root=ROOT):
             if not stat.S_ISDIR(info.st_mode):
                 raise ProfileError('Unsafe Baidu profile path')
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.lstat().st_uid != os.geteuid():
+        raise ProfileError('Baidu profile parent must be owned')
     if path == root / '.cloud-home' / 'baidu-profile':
         parent = path.parent.lstat()
         if parent.st_uid != os.geteuid():
@@ -40,7 +44,9 @@ def prepare_profile(root=ROOT):
             entry = Path(directory) / name
             info = entry.lstat()
             if stat.S_ISLNK(info.st_mode):
-                continue  # Chromium creates singleton symlinks.
+                if entry.parent == path and name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                    continue  # Chromium creates singleton symlinks.
+                raise ProfileError('Unsafe Baidu profile contents')
             if info.st_uid != os.geteuid() or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 raise ProfileError('Unsafe Baidu profile contents')
             os.chmod(entry, 0o700 if stat.S_ISDIR(info.st_mode) else 0o600)
@@ -60,12 +66,14 @@ class BaiduBrowser:
         self.idle_seconds = idle_seconds
         self._queue = queue.Queue()
         self.started = False
+        self.busy = False
+        self.last_state = 'login_required'
         self._thread = threading.Thread(target=self._run, name='baidu-browser', daemon=True)
         self._thread.start()
 
-    def call(self, action):
+    def call(self, action, *, touch=True):
         result = queue.Queue(maxsize=1)
-        self._queue.put((action, result))
+        self._queue.put((action, result, touch))
         ok, value = result.get()
         if not ok:
             raise value
@@ -77,6 +85,7 @@ class BaiduBrowser:
 
     def _run(self):
         context = playwright = lock = None
+        last_activity = time.monotonic()
 
         def stop():
             nonlocal context, playwright, lock
@@ -95,7 +104,8 @@ class BaiduBrowser:
 
         while True:
             try:
-                action, result = self._queue.get(timeout=self.idle_seconds if context else None)
+                timeout = max(0, self.idle_seconds - (time.monotonic() - last_activity)) if context else None
+                action, result, touch = self._queue.get(timeout=timeout)
             except queue.Empty:
                 try:
                     stop()
@@ -110,6 +120,7 @@ class BaiduBrowser:
                     result.put((False, exc))
                 return
             try:
+                self.busy = True
                 if context is None:
                     from playwright.sync_api import sync_playwright
                     # Chromium inherits the desktop process mask for profile files.
@@ -119,11 +130,19 @@ class BaiduBrowser:
                     playwright = sync_playwright().start()
                     context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
                     self.started = True
-                result.put((True, action(context)))
+                value = action(context)
+                if touch:
+                    last_activity = time.monotonic()
+                result.put((True, value))
             except Exception as exc:
                 if context is None:
-                    stop()
+                    try:
+                        stop()
+                    except Exception:
+                        pass
                 result.put((False, exc))
+            finally:
+                self.busy = False
 
 
 class PageTransport:
@@ -164,8 +183,13 @@ def browser():
 
 def _page(context):
     page = context.pages[0] if context.pages else context.new_page()
-    if not page.url.startswith('https://index.baidu.com/'):
+    from urllib.parse import urlsplit
+    url = urlsplit(page.url)
+    if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
         page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
+    url = urlsplit(page.url)
+    if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
+        raise ProfileError('Unsafe Baidu page origin')
     return page
 
 
@@ -178,12 +202,16 @@ def login_open(context):
     return {'ok': True, 'state': 'login_required'}
 
 
-def status(context):
-    page = _page(context)
-    state = page.evaluate('''() => {
-      if (location.origin !== 'https://index.baidu.com') return 'login_required';
+def page_status(page, *, origin='https://index.baidu.com', allow_loopback=False):
+    PageTransport(page, origin=origin, allow_loopback=allow_loopback)
+    state = page.evaluate('''origin => {
+      if (location.origin !== origin) return 'login_required';
       if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return 'signature_unavailable';
       const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
       return [...document.querySelectorAll('a,button,span,div')].some(e => visible(e) && e.textContent.trim() === '退出登录') ? 'browser_ready' : 'login_required';
-    }''')
+    }''', origin)
     return {'ok': True, 'state': state, 'live_enabled': True}
+
+
+def status(context):
+    return page_status(_page(context))

@@ -138,8 +138,8 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(webview.settings['IGNORE_SSL_ERRORS'])
         self.assertNotIn('js_api', webview.create_window.call_args.kwargs)
 
-    def test_live_bridge_is_disabled(self):
-        self.assertFalse(b.bridge_command('baidu_status')['live_enabled'])
+    def test_live_bridge_needs_login(self):
+        self.assertTrue(b.bridge_command('baidu_status')['live_enabled'])
         self.assertEqual(b.bridge_command('baidu_query', query())['code'], 'login_required')
 
 

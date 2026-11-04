@@ -1,8 +1,4 @@
-"""Baidu P0 protocol, independent implementation from the research's Qdata facts.
-
-No network implementation: BrowserTransport stays inside an off-record browser
-process. It owns cookies and official-script headers; neither crosses the bridge.
-"""
+"""Baidu protocol, validation and browser bridge adapter."""
 import datetime as dt
 import json
 import re
@@ -252,19 +248,28 @@ def bridge_command(command, payload=None):
     import baidu_browser
     if command == 'baidu_status':
         instance = baidu_browser.browser()
-        if not instance.started:
-            return {'ok': True, 'state': 'login_required', 'live_enabled': True}
-        return instance.call(baidu_browser.status)
+        if not instance.started or instance.busy:
+            return {'ok': True, 'state': instance.last_state, 'live_enabled': True}
+        result = instance.call(baidu_browser.status, touch=False)
+        instance.last_state = result['state']
+        return result
     if command == 'baidu_login_open':
         return baidu_browser.browser().call(baidu_browser.login_open)
     query = validate_query(payload)
+    instance = baidu_browser.browser()
+    if not instance.started and instance.last_state != 'browser_ready':
+        return {'ok': False, 'code': 'login_required'}
     import hub_baidu
     try:
         def run(context):
+            state = baidu_browser.status(context)['state']
+            instance.last_state = state
+            if state != 'browser_ready':
+                raise BaiduError(state)
             page = baidu_browser._page(context)
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'])
             return {'ok': True, **result}
-        return baidu_browser.browser().call(run)
+        return instance.call(run)
     except BaiduError as exc:
         return {'ok': False, 'code': exc.code}
 
@@ -369,6 +374,14 @@ class BaiduAdapter:
     def status(self, store):
         import hub_baidu
         return hub_baidu.status_snapshot(store)
+
+    def mount_routes(self, app, hub, require, reply):
+        import hub_baidu
+        hub_baidu.mount_routes(app, hub, require, reply)
+
+    async def async_status(self, hub):
+        import hub_baidu
+        return {**hub_baidu.status_snapshot(hub.store), 'browser': await hub_baidu.browser_status(hub)}
 
     async def resume(self, hub):
         import hub_baidu

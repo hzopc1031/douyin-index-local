@@ -216,6 +216,10 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         app.on_cleanup.clear()
         async with TestClient(TestServer(app)) as client:
             headers = {'X-Hub-Request': '1', 'Idempotency-Key': 'synthetic-job'}
+            login = await client.post('/api/v1/login/baidu/open', headers=headers, json={})
+            self.assertEqual(login.status, 200)
+            self.assertIn('baidu_login_open', self.calls)
+            self.calls.clear()
             response = await client.post('/api/v1/queries', headers=headers, json=query())
             self.assertEqual(response.status, 202)
             await self.hub.run_one()
@@ -225,7 +229,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('baidu,search_index,全国', export)
             self.assertIn('all,day,index.baidu.com,available', export)
             platforms = await (await client.get('/api/v1/platforms')).json()
-            self.assertFalse(platforms['platforms'][1]['live_enabled'])
+            self.assertTrue(platforms['platforms'][1]['live_enabled'])
             state = await (await client.get('/api/v1/status')).json()
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
             self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 21))

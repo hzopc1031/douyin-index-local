@@ -525,16 +525,6 @@ def mount(app, hub):
             result = {**result, 'browser': await hub.browser_status()}
         return reply({**result, 'login_mode': login_mode()})
 
-    async def baidu_login(request):
-        require(request, admin=True)
-        try:
-            result = await asyncio.to_thread(hub.bridge, 'baidu_login_open', None, 35)
-        except Exception:
-            raise HubError('browser_unavailable', '百度浏览器未就绪，请检查远程桌面。', 503) from None
-        if not result.get('ok'):
-            raise HubError('browser_unavailable', '百度浏览器未就绪，请检查远程桌面。', 503)
-        return reply(result)
-
     async def platforms(request):
         require(request)
         return reply({'platforms': registry.descriptions()})
@@ -739,7 +729,6 @@ def mount(app, hub):
         mount_routes = getattr(adapter, 'mount_routes', None)
         if p['available'] and mount_routes:
             mount_routes(app, hub, require, reply)
-    app.router.add_post('/api/v1/login/baidu/open', baidu_login)
     app.router.add_get('/api/v1/platforms', platforms)
     app.router.add_get('/api/v1/status', status)
     app.router.add_post('/api/v1/queries', submit)
