@@ -11,6 +11,7 @@ bash ./tencent-vnc-check.sh "$STATE_DIR"
 export HOME="$PWD/.cloud-home"
 export XDG_RUNTIME_DIR="$HOME/run"
 export DISPLAY=:107
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}"
 export PYWEBVIEW_GUI=qt
 export INDEX_HUB_ENABLED=1
 export INDEX_HUB_LOGIN_MODE="${INDEX_HUB_LOGIN_MODE:-sms}"

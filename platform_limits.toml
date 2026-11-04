@@ -1,0 +1,7 @@
+[baidu]
+interval_seconds = 20
+jitter_seconds = 10
+chunk_interval_seconds = 8
+logical_daily = 120
+http_daily = 400
+rate_limit_cooldown_seconds = 3600

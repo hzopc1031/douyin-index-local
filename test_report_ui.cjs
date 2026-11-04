@@ -6,6 +6,7 @@ const nodes={};const $=id=>nodes[id]??={value:'',hidden:false,textContent:'',inn
 let calls=[],fail=true;const ctx=vm.createContext({$,chosenPlatform:'douyin',sessionStorage:{getItem(){return null},setItem(){}},esc:s=>String(s),readingInfo:()=>false,infoTip:(status,detail)=>status+' '+detail,statusName:s=>s,toast(){},api:async(path,options)=>{calls.push({path,key:options?.headers?.['Idempotency-Key'],body:options?.body});if(path==='insights/queries'&&fail){fail=false;throw Error('simulated disconnect')}return {job:{id:'job-'+calls.length,status:'queued',cache_hit:false}}}});
 vm.runInContext('let relatedLatestDate=null;'+html.slice(html.indexOf('function insightDates('),html.indexOf('function renderInsight(')),ctx);
 vm.runInContext(code,ctx);
+ctx.platformModules=id=>id==='douyin'?['related','audience']:[];
 const query={platform:'douyin',keywords:['酵素','消化酶'],start_date:'2026-10-21',end_date:'2026-10-27'};
 ctx.query=query;
 (async()=>{
@@ -27,6 +28,42 @@ ctx.query=query;
  $('#insightEnd').value='2026-10-24';assert(vm.runInContext("moduleState('related')",ctx).includes('未采集'));
  $('#insightEnd').value=query.end_date;vm.runInContext("chosenPlatform='baidu'",ctx);
  assert(vm.runInContext("moduleState('related')",ctx).includes('未采集'));
+ ctx.api=async()=>{throw Object.assign(Error('invalid Baidu query'),{status:400,code:'invalid_query'})};
+ vm.runInContext("reportBatch=makeReportBatch({...query,platform:'baidu',keywords:['合成词']},'invalid')",ctx);
+ await vm.runInContext('submitReportBatch()',ctx);
+ assert(vm.runInContext('reportBatch.entries[0].rejected',ctx));assert.equal(vm.runInContext('reportBatch.entries[0].status',ctx),'failed');
+ assert(!vm.runInContext('reportBatch.entries.some(e=>!e.jobId&&!e.rejected)',ctx));assert($('#retryBundle').hidden);
+ await vm.runInContext('submitReportBatch()',ctx);
+ for(const [status,code] of [[409,'collection_paused'],[429,'queue_full']]){
+  ctx.api=async()=>{throw Object.assign(Error(code),{status,code})};
+  vm.runInContext("reportBatch=makeReportBatch({...query,platform:'baidu',keywords:['合成词']},'rejected')",ctx);
+  await vm.runInContext('submitReportBatch()',ctx);
+  assert(vm.runInContext('reportBatch.entries[0].rejected',ctx));
+  assert(!vm.runInContext('reportBatch.entries.some(e=>!e.jobId&&!e.rejected)',ctx));
+ }
+ for(const [status,code] of [[401,'unauthorized'],[429,'authentication_throttled'],[429,'api_rate_limited']]){
+  const keys=[];
+  vm.runInContext("reportBatch=makeReportBatch({...query,platform:'baidu',keywords:['合成词']},'uncertain')",ctx);
+  ctx.api=async(path,options)=>{keys.push(options.headers['Idempotency-Key']);throw Error('response lost after acceptance')};
+  await vm.runInContext('submitReportBatch()',ctx);
+  ctx.api=async(path,options)=>{keys.push(options.headers['Idempotency-Key']);throw Object.assign(Error(code),{status,code})};
+  await vm.runInContext('submitReportBatch()',ctx);
+  assert(!vm.runInContext('reportBatch.entries[0].rejected',ctx));assert(!$('#retryBundle').hidden);
+  ctx.api=async(path,options)=>{keys.push(options.headers['Idempotency-Key']);return {job:{id:'original-job',status:'failed'}}};
+  await vm.runInContext('submitReportBatch()',ctx);
+  assert.equal(new Set(keys).size,1);assert.equal(vm.runInContext('reportBatch.entries[0].jobId',ctx),'original-job');
+ }
+ ctx.api=async()=>{throw Object.assign(Error('collection_paused'),{status:409,code:'collection_paused'})};
+ vm.runInContext("reportBatch=makeReportBatch({...query,platform:'baidu',keywords:['合成词']},'before-douyin')",ctx);
+ await vm.runInContext('submitReportBatch()',ctx);assert(vm.runInContext('reportBatch.entries[0].rejected',ctx));
+ const afterReject=[];
+ Object.assign(ctx,{dateHint(){},updateRange:()=>true,drawPlatforms(){},renderHistory(){},refresh:async()=>{},crypto:{randomUUID:()=> 'after-rejection'}});
+ ctx.api=async(path,options)=>{afterReject.push(options.body);return {job:{id:'accepted-'+afterReject.length,status:'queued',cache_hit:false}}};
+ vm.runInContext(html.slice(html.indexOf("$('#queryForm').onsubmit=async"),html.indexOf('(async()=>{try{platforms=')),ctx);
+ $('#queryPlatform').value='douyin';$('#queryWords').value='酵素';$('#queryStart').value=query.start_date;$('#queryEnd').value=query.end_date;
+ $('#queryDialog').open=true;$('#queryDialog').close=()=>{$('#queryDialog').open=false};
+ await $('#queryForm').onsubmit({preventDefault(){}});
+ assert.equal(afterReject.length,3);assert(afterReject.every(q=>q.platform==='douyin'));assert(!$('#queryDialog').open);
  console.log('report grouping, independent endpoints, partial submission recovery, idempotency, read-only refresh and shared-context checks passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
 

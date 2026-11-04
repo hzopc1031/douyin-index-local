@@ -87,7 +87,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(validate_query({'keywords': ['酵素'], 'end_date': END}), QUERY)
         for body in ({'keywords': ['x', 'x'], 'end_date': END},
                      {'keywords': ['x'], 'end_date': END, 'start_date': '2025-01-08'},
-                     {'platform': 'baidu', 'keywords': ['x'], 'end_date': END},
+                     {'platform': 'google_trends', 'keywords': ['x'], 'end_date': END},
                      {'keywords': ['x\n'], 'end_date': END},
                      {'keywords': ['x'], 'end_date': END, 'cookies': SECRET},
                      {'keywords': ['x'], 'end_date': '9999-01-01'}):
@@ -443,7 +443,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 409)
         response = await self.client.post('/api/v1/queries', headers=self.bearer, json=QUERY)
         self.assertEqual(response.status, 400)
-        response = await self.client.get('/api/v1/series?keyword=x&platform=baidu', headers=self.bearer)
+        response = await self.client.get('/api/v1/series?keyword=x&platform=google_trends', headers=self.bearer)
         self.assertEqual(response.status, 422)
 
     async def test_openapi_and_pause_resume_requires_admin(self):

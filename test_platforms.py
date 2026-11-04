@@ -17,7 +17,7 @@ class PlatformTests(unittest.TestCase):
     def test_placeholders_and_unknown(self):
         self.assertEqual([p['id'] for p in PLATFORMS], ['douyin', 'baidu', 'google_trends'])
         self.assertEqual(PLATFORMS, registry.descriptions())
-        for identifier in ('baidu', 'google_trends', 'unknown'):
+        for identifier in ('google_trends', 'unknown'):
             with self.subTest(identifier=identifier), self.assertRaises(HubError) as error:
                 require_platform(identifier)
             self.assertEqual((error.exception.code, error.exception.status), ('platform_unavailable', 422))
