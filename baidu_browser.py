@@ -121,3 +121,27 @@ class BaiduBrowser:
                 if context is None:
                     stop()
                 result.put((False, exc))
+
+
+class PageTransport:
+    def __init__(self, page, *, origin='https://index.baidu.com', allow_loopback=False):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(origin)
+        if origin != 'https://index.baidu.com' and not (allow_loopback and parsed.scheme == 'http' and parsed.hostname == '127.0.0.1' and parsed.port and not parsed.path and not parsed.query and not parsed.fragment and not parsed.username):
+            raise ValueError('Invalid Baidu origin')
+        self.page = page
+        self.origin = origin
+
+    def query(self, query):
+        from urllib.parse import urlsplit
+        import baidu_adapter
+        current = urlsplit(self.page.url)
+        expected = urlsplit(self.origin)
+        if (current.scheme, current.netloc) != (expected.scheme, expected.netloc):
+            raise baidu_adapter.BaiduError('network_error')
+        script = Path(__file__).with_name('baidu_page.js').read_text(encoding='utf-8')
+        result = self.page.evaluate(script, query)
+        if not isinstance(result, dict) or result.get('status') != 'ok':
+            code = result.get('status') if isinstance(result, dict) else None
+            raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
+        return result.get('rows')

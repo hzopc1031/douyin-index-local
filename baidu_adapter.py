@@ -183,6 +183,19 @@ def page_absence(query, state):
     return make_result(q, rows)
 
 
+def collect_page(query, browser, *, chunk_interval=8, sleep=None):
+    import time
+    q = validate_query(query)
+    rows = []
+    for i, chunk in enumerate(chunks(q)):
+        if i:
+            (sleep or time.sleep)(chunk_interval)
+        rows.extend(browser.query(chunk))
+    result = make_result(q, rows)
+    public_result(result)
+    return result
+
+
 def collect(query, browser: BrowserTransport, *, chunk_interval=8, sleep=None):
     import time
     q = validate_query(query)

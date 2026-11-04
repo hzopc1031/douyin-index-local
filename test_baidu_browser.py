@@ -20,3 +20,15 @@ class ProfileTests(unittest.TestCase):
                 with self.subTest(path=path), patch.dict(os.environ, {'INDEX_HUB_BAIDU_PROFILE_DIR': str(path)}):
                     with self.assertRaises(ProfileError):
                         prepare_profile(root)
+
+
+class PageTransportTests(unittest.TestCase):
+    def test_origin_is_fixed_and_page_must_match(self):
+        from baidu_browser import PageTransport
+        from baidu_adapter import BaiduError
+        class Page:
+            url = 'https://example.com/'
+        with self.assertRaises(ValueError):
+            PageTransport(Page(), origin='http://127.0.0.1:1234')
+        with self.assertRaises(BaiduError):
+            PageTransport(Page()).query({})
