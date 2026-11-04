@@ -52,12 +52,15 @@ class BrowserPageTests(unittest.TestCase):
                 browser = playwright.chromium.launch(headless=False)
                 page = browser.new_page()
                 page.goto(origin)
-                from baidu_browser import page_status, login_open
-                self.assertEqual(page_status(page, origin=origin, allow_loopback=True)['state'], 'login_required')
+                from baidu_browser import status, login_open
+                self.assertEqual(status(page.context, origin=origin, allow_loopback=True)['state'], 'login_required')
                 page.evaluate("() => { const b = document.createElement('button'); b.textContent = '登录'; b.onclick = () => b.textContent = '退出登录'; document.body.append(b); }")
                 with patch('baidu_browser._page', return_value=page):
                     login_open(None)
-                self.assertEqual(page_status(page, origin=origin, allow_loopback=True)['state'], 'browser_ready')
+                page.context.add_cookies([{'name': 'BDUSS', 'value': 'synthetic-cookie-secret', 'url': origin}])
+                state = status(page.context, origin=origin, allow_loopback=True)
+                self.assertEqual(state['state'], 'browser_ready')
+                self.assertNotIn('synthetic-cookie-secret', repr(state))
                 import datetime
                 today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
                 query = dict(keywords=['a', 'b', 'c', 'd', 'e'], start_date='2026-10-01', end_date='2026-10-02', _budget_day=today)
@@ -209,3 +212,101 @@ class BridgeLeakTests(unittest.TestCase):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+class ReadOnlyStatusTests(unittest.TestCase):
+    def test_pages_cookie_and_signature(self):
+        from unittest.mock import Mock
+        from baidu_browser import status
+        secret = 'synthetic-cookie-secret'
+        passport = Mock(url='https://passport.baidu.com/verify')
+        index = Mock(url='https://index.baidu.com/')
+        index.evaluate.return_value = True
+        context = Mock(pages=[passport])
+        self.assertEqual(status(context)['state'], 'login_in_progress')
+        passport.goto.assert_not_called()
+        context.new_page.assert_not_called()
+        context.pages = [passport, index]
+        for cookies, signature, expected in [
+            ([], True, 'login_required'),
+            ([{'name': 'other', 'expires': -1, 'value': secret}], True, 'login_required'),
+            ([{'name': 'BDUSS', 'expires': 1, 'value': secret}], True, 'login_required'),
+            ([{'name': 'BDUSS', 'expires': -1, 'value': secret}], True, 'browser_ready'),
+            ([{'name': 'BDUSS', 'expires': 9999999999, 'value': secret}], False, 'signature_unavailable'),
+        ]:
+            with self.subTest(expected=expected, cookies=len(cookies)):
+                context.cookies.return_value = cookies
+                index.evaluate.return_value = signature
+                answer = status(context)
+                self.assertEqual(answer['state'], expected)
+                self.assertNotIn(secret, repr(answer))
+        context.cookies.side_effect = RuntimeError(secret)
+        with self.assertRaises(Exception) as caught:
+            status(context)
+        self.assertNotIn(secret, str(caught.exception))
+        index.goto.assert_not_called()
+        index.bring_to_front.assert_not_called()
+        passport.goto.assert_not_called()
+
+    def test_status_bridge_and_hub_accept_progress(self):
+        import asyncio
+        from unittest.mock import Mock
+        import baidu_adapter
+        import baidu_browser
+        import hub_baidu
+        worker = Mock(started=True, busy=False)
+        worker.call.return_value = {'ok': True, 'state': 'login_in_progress', 'live_enabled': True}
+        with patch.object(baidu_browser, 'browser', return_value=worker):
+            result = baidu_adapter.bridge_command('baidu_status')
+            worker.call.assert_called_once_with(baidu_browser.status, touch='status')
+        self.assertEqual(asyncio.run(hub_baidu.browser_status(Mock(bridge=Mock(return_value=result)))), 'login_in_progress')
+
+    def test_hold_bounds(self):
+        from baidu_browser import BaiduBrowser
+        for value in ('0', '86401', 'invalid'):
+            with self.subTest(value=value), patch.dict(os.environ, {'INDEX_HUB_BAIDU_LOGIN_HOLD_SECONDS': value}):
+                with self.assertRaises(ValueError):
+                    BaiduBrowser()
+
+
+class LifetimeClockTests(unittest.TestCase):
+    def test_status_activity_and_login_hold(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import baidu_browser
+        now = [0]
+        context = Mock()
+        playwright = Mock()
+        playwright.chromium.launch_persistent_context.return_value = context
+        events = [
+            (0, lambda c: {'state': 'login_required'}, True, True),
+            (100, lambda c: {'state': 'login_in_progress'}, 'status', False),
+            (200, lambda c: {'state': 'login_required'}, 'status', False),
+            (300, lambda c: {'state': 'browser_ready'}, 'status', False),
+            (301, None, True, False),
+        ]
+        timeouts = []
+        class Queue:
+            def get(self, timeout=None):
+                timeouts.append(timeout)
+                stamp, action, touch, hold = events.pop(0)
+                now[0] = stamp
+                return action, Mock(), touch, hold
+        worker = baidu_browser.BaiduBrowser.__new__(baidu_browser.BaiduBrowser)
+        worker.root = '.'
+        worker.idle_seconds = 300
+        worker.hold_seconds = 900
+        worker._queue = Queue()
+        worker.started = worker.busy = False
+        worker.last_state = 'login_required'
+        fake_clock = SimpleNamespace(monotonic=lambda: now[0])
+        with patch.object(baidu_browser, 'time', fake_clock), \
+             patch.object(baidu_browser, 'prepare_profile', return_value='profile'), \
+             patch.object(baidu_browser, 'ProfileLock') as lock, \
+             patch('playwright.sync_api.sync_playwright') as start:
+            lock.return_value.acquire.return_value = Mock()
+            start.return_value.start.return_value = playwright
+            worker._run()
+        self.assertEqual(timeouts, [None, 900, 800, 700, 200])
+        self.assertEqual(worker.last_state, 'browser_ready')
+        context.close.assert_called_once()
