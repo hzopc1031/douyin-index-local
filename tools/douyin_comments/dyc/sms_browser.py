@@ -39,6 +39,9 @@ RECTS = dict(slider_handle='.secsdk-captcha-drag-icon',
 LOGIN_PANEL_SECONDS = 60
 SMS_RESPONSE_SECONDS = 15
 LOGIN_SIGNAL_SECONDS = 10
+CREATOR_URL = 'https://creator.douyin.com/creator-micro/creator-count/arithmetic-index'
+KEY_COOKIES = ('sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard')
+SIGNAL_COOKIES = (*KEY_COOKIES, 'uid_tt')
 
 
 # All DOM text (including reflected codes), form fields and editable content
@@ -154,11 +157,12 @@ class SmsBrowser:
         self.profile = Profile(profile)
         self.display = Display()  # always owned; never use :107 or inherited DISPLAY
         self.backend = backend
-        self.url = site.FAKE_ORIGIN if backend else site.LOGIN_URL
+        self.url = site.FAKE_ORIGIN if backend else CREATOR_URL
         self.solver = solver
         self.playwright = self.persistent = self.context = self.page = None
         self.driver_pid = None
         self.abort_task = None
+        self.response_tasks = set()
         self.private_values = []
         self.fatal = False
         self.audit_id = ''
@@ -395,7 +399,7 @@ class SmsBrowser:
                 await self.context.route('**/*', self.backend)
             initial = await self.context.cookies(self.url)
             self.initial_sessions = {(c['name'], c['domain'], c['path']): c['value'] for c in initial
-                                     if c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt')}
+                                     if c['name'] in KEY_COOKIES}
             self.context.on('requestfailed', self.request_failed)
             self.context.on('response', self.response)
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
@@ -411,11 +415,36 @@ class SmsBrowser:
             raise
 
     def response(self, response):
+        parsed = urlsplit(response.url)
+        if parsed.scheme == 'https' and parsed.path.rstrip('/').endswith('/check_qrconnect'):
+            task = asyncio.create_task(self.qr_response(response))
+            self.response_tasks.add(task)
+            task.add_done_callback(self.response_tasks.discard)
+        if response.request.resource_type == 'document':
+            host = parsed.hostname or ''
+            domain = host if host in ('creator.douyin.com', 'www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
+            audit('login_navigation', session=self.audit_id, domain=domain, http_status=response.status)
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
             self.fatal_reason = 'http_' + str(response.status)
             self.fatal = True
             if self.abort_task is None:
                 self.abort_task = asyncio.create_task(self.context.close())
+
+    async def qr_response(self, response):
+        status, redirect = None, None
+        try:
+            async with asyncio.timeout(2):
+                body = await response.json()
+            if type(body) is dict:
+                data = body.get('data') if type(body.get('data')) is dict else {}
+                value = data.get('status')
+                if type(value) in (str, int) and re.fullmatch(r'-?[0-9]{1,5}', str(value)):
+                    status = int(value)
+                redirect = any(key in obj for obj in (body, data) for key in ('redirect_url', 'redirectUrl'))
+        except Exception:
+            pass
+        audit('qrconnect_response', session=self.audit_id, http_status=response.status,
+              status=status, has_redirect=redirect)
 
     async def reset(self, mode="qr"):
         self.last_frame = None
@@ -604,20 +633,39 @@ class SmsBrowser:
             lambda: self.page.locator(', '.join(selectors)).filter(visible=True).count()))
         valid = await self.cookie_signals(panel, avatar)
         fresh = any(self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in valid)
-        return fresh and not panel and avatar
+        return (fresh and not panel and avatar) if self.backend else fresh
 
     async def cookie_signals(self, panel, avatar):
         all_cookies = await self.context.cookies()
         cookies = await self.context.cookies(self.url)
-        names = ('sessionid', 'sessionid_ss', 'sid_tt')
-        valid = [c for c in cookies if c['name'] in names and c.get('value') and
-                 in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com'))]
+        names = SIGNAL_COOKIES
+        domains = (urlsplit(self.url).hostname, 'douyin.com') if self.backend else ('douyin.com', 'creator.douyin.com')
+        valid = [c for c in cookies if c['name'] in KEY_COOKIES and c.get('value') and
+                 c['domain'].lstrip('.').lower() in domains]
+        now_wall = time.time()
+        def expired(c):
+            expiry = c.get('expires', -1)
+            if isinstance(expiry, (int, float)) and expiry > 0 and expiry <= now_wall:
+                return True
+            if c['name'] == 'sid_guard':
+                parts = unquote(c['value']).split('|')
+                if (len(parts) >= 3 and parts[0] and all(p.isascii() and p.isdecimal() and len(p) <= 12 for p in parts[1:3])):
+                    issued, age = map(int, parts[1:3])
+                    return issued > 0 and issued + age <= now_wall
+            return False
+        if any(expired(c) for c in valid):
+            valid = []
         signals = dict(panel_visible=bool(panel), avatar_visible=bool(avatar),
-                       **{name: any(c['name'] == name for c in valid) for name in names},
+                       **{name: any(c['name'] == name and c.get('value') and
+                                    c['domain'].lstrip('.').lower() in domains for c in cookies) for name in names},
                        **{name + '_any_domain': any(c['name'] == name and bool(c.get('value'))
                                                   for c in all_cookies) for name in names})
         now = time.monotonic()
         if signals != self.login_signals or now - self.login_signals_at >= LOGIN_SIGNAL_SECONDS:
+            if signals.get('panel_visible') != self.login_signals.get('panel_visible'):
+                host = urlsplit(self.page.url).hostname or ''
+                domain = host if host in ('creator.douyin.com', 'www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
+                audit('login_panel', session=self.audit_id, domain=domain, visible=bool(panel))
             self.login_signals = signals
             self.login_signals_at = now
             audit('login_signals', session=self.audit_id, **signals)
@@ -1157,6 +1205,21 @@ class SmsBrowser:
             raise
         if not confirmed:
             raise Stop(4, 'login_unconfirmed')
+        if not self.backend:
+            page = await self.context.new_page()
+            try:
+                await page.goto(site.LOGIN_URL, wait_until='domcontentloaded', timeout=15000)
+                if self.fatal:
+                    raise Stop(3, self.fatal_reason or 'access_denied')
+                for frame in page.frames:
+                    if await frame.locator(CHALLENGE).filter(visible=True).count():
+                        raise Stop(3, 'verification_required')
+                cookies = await self.context.cookies(site.LOGIN_URL)
+                if not any(c['name'] in KEY_COOKIES and c.get('value') and
+                           c['domain'].lstrip('.').lower() in ('douyin.com', 'www.douyin.com') for c in cookies):
+                    raise Stop(4, 'main_site_session_missing')
+            finally:
+                await page.close()
         recorded = False
         if self.state_dir is not None:
             try:
@@ -1169,6 +1232,9 @@ class SmsBrowser:
 
     async def close(self):
         self.cancel.set()
+        for task in self.response_tasks:
+            task.cancel()
+        await asyncio.gather(*self.response_tasks, return_exceptions=True)
         self.private_values.clear()
         self.initial_sessions.clear()
         self.last_frame = None

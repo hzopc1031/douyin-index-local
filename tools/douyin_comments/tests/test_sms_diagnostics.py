@@ -99,7 +99,7 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_redacts_url_title_exception_and_writes_private_evidence(self):
         with tempfile.TemporaryDirectory() as root:
             browser = SmsBrowser(Path(root) / 'profile', state_dir=root)
-            browser.page = Mock(url='https://www.douyin.com/jingxuan?secret=synthetic#secret')
+            browser.page = Mock(url='https://creator.douyin.com/jingxuan?secret=synthetic#secret')
             browser.page.title = AsyncMock(return_value='synthetic-private-title')
             browser.diagnostic_snapshot = AsyncMock(return_value=b'synthetic-png')
             browser.step('open_login_panel', '#login-panel-new visible', 10)
@@ -112,7 +112,7 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(value, encoded)
             self.assertEqual(result['reason'], 'login_step_timeout')
             self.assertEqual(result['timeout_seconds'], 10)
-            self.assertEqual(result['url'], 'https://www.douyin.com/jingxuan')
+            self.assertEqual(result['url'], 'https://creator.douyin.com/jingxuan')
             path = Path(result['screenshot'])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads((Path(root) / 'login-status.json').read_text()), result)
@@ -154,7 +154,7 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
         log = io.StringIO()
         with redirect_stderr(log):
             self.assertFalse(await browser.login_confirmed())
-        event = json.loads(log.getvalue())
+        event = next(json.loads(line) for line in log.getvalue().splitlines() if json.loads(line)['event'] == 'login_signals')
         self.assertTrue(event['sessionid_any_domain'])
         self.assertFalse(event['sessionid'])
         self.assertNotIn('synthetic-secret', log.getvalue())
@@ -165,7 +165,7 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_record_follows_cookie_copy_and_contains_no_values(self):
         with tempfile.TemporaryDirectory() as root:
-            browser = SmsBrowser('/unused', state_dir=root)
+            browser = SmsBrowser('/unused', backend=True, state_dir=root)
             browser.page = Mock(url=browser.url)
             browser.login_confirmed = AsyncMock(return_value=True)
             browser.context = Mock(cookies=AsyncMock(return_value=[dict(
@@ -179,7 +179,7 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_record_failure_does_not_undo_cookie_copy(self):
         with tempfile.TemporaryDirectory() as root:
-            browser = SmsBrowser('/unused', state_dir=root)
+            browser = SmsBrowser('/unused', backend=True, state_dir=root)
             browser.page = Mock(url=browser.url)
             browser.login_confirmed = AsyncMock(return_value=True)
             browser.context = Mock(cookies=AsyncMock(return_value=[dict(
@@ -191,7 +191,7 @@ class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
 
 class FreshLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_main_site_cookie_and_avatar_required(self):
-        browser = SmsBrowser('/unused')
+        browser = SmsBrowser('/unused', backend=True)
         cookie = dict(name='sessionid', value='synthetic-old', domain='.douyin.com', path='/')
         browser.context = Mock(cookies=AsyncMock(return_value=[cookie]))
         browser.page = Mock(url=browser.url)
@@ -214,7 +214,7 @@ class AccessDenialTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         browser = SmsBrowser('/unused')
         browser.context = Mock(close=AsyncMock())
-        browser.response(SimpleNamespace(status=429, request=SimpleNamespace(resource_type='xhr')))
+        browser.response(SimpleNamespace(url='https://creator.douyin.com/', status=429, request=SimpleNamespace(resource_type='xhr')))
         await browser.abort_task
         browser.context.close.assert_awaited_once()
         self.assertEqual(browser.fatal_reason, 'http_429')
@@ -227,3 +227,53 @@ class AccessDenialTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(RuntimeError):
                 await browser.close()
             self.assertIsNone(browser.profile.fd)
+
+class CreatorLoginTests(unittest.IsolatedAsyncioTestCase):
+    async def test_creator_cookie_scope_and_guard_expiry(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser.context = Mock()
+        now = int(__import__('time').time())
+        cookie = dict(name='sid_guard', value=f'synthetic|{now - 100}|10', domain='.douyin.com', expires=-1)
+        browser.context.cookies = AsyncMock(return_value=[cookie])
+        with patch('dyc.sms_browser.audit'):
+            self.assertFalse(await browser.cookie_signals(False, False))
+            cookie['value'] = f'synthetic|{now}|1000'
+            self.assertEqual(len(await browser.cookie_signals(False, False)), 1)
+            cookie['domain'] = 'login.douyin.com'
+            self.assertFalse(await browser.cookie_signals(False, False))
+
+    async def test_poll_diagnostics_redact_redirect(self):
+        browser = SmsBrowser('/unused')
+        response = Mock(status=200, json=AsyncMock(return_value={'data': {
+            'status': '3', 'redirect_url': 'synthetic-secret'}}))
+        with patch('dyc.sms_browser.audit') as audit:
+            await browser.qr_response(response)
+        self.assertEqual(audit.call_args.kwargs['status'], 3)
+        self.assertTrue(audit.call_args.kwargs['has_redirect'])
+        self.assertNotIn('synthetic-secret', str(audit.call_args))
+
+    async def test_main_site_challenge_stops_success(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser.login_confirmed = AsyncMock(return_value=True)
+        frame = Mock()
+        frame.locator.return_value.filter.return_value.count = AsyncMock(return_value=1)
+        page = Mock(frames=[frame], goto=AsyncMock(), close=AsyncMock())
+        browser.context = Mock(new_page=AsyncMock(return_value=page))
+        with self.assertRaises(Stop) as error:
+            await browser.persist()
+        self.assertEqual(error.exception.reason, 'verification_required')
+        page.close.assert_awaited_once()
+
+    async def test_creator_requires_new_key_cookie(self):
+        browser = SmsBrowser('/unused')
+        cookie = dict(name='sid_guard', value='synthetic', domain='.douyin.com', path='/', expires=-1)
+        browser.context = Mock(cookies=AsyncMock(return_value=[cookie]))
+        browser.page = Mock(url=browser.url)
+        browser.page.locator.return_value.filter.return_value.count = AsyncMock(return_value=0)
+        browser.initial_sessions = {('sid_guard', '.douyin.com', '/'): 'synthetic'}
+        with patch('dyc.sms_browser.audit'):
+            self.assertFalse(await browser.login_confirmed())
+            cookie['value'] = 'synthetic-new'
+            self.assertTrue(await browser.login_confirmed())
