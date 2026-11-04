@@ -192,10 +192,15 @@ class Hub:
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
         rows = self.store.db.execute("SELECT id,query FROM jobs WHERE status='queued' ORDER BY CASE WHEN json_extract(query,'$.kind') IS NULL THEN 0 ELSE 1 END,created").fetchall()
+        blocked = set()
         for row in rows:
-            adapter = require_platform(json.loads(row['query'])['platform'])
-            if not adapter.paused(self.store):
-                return await adapter.run_one(self, row)
+            platform = json.loads(row['query'])['platform']
+            if platform in blocked:
+                continue
+            adapter = require_platform(platform)
+            if not adapter.paused(self.store) and await adapter.run_one(self, row):
+                return True
+            blocked.add(platform)
         return False
 
     async def _run_douyin(self, row):
@@ -395,7 +400,7 @@ def openapi():
         if path == '/api/v1/insights/queries':
             operation['operationId'] = 'post_insight_query'
             operation['requestBody']['content']['application/json']['schema'] = {'type':'object','additionalProperties':False,'required':['keywords','kind','end_date'],'properties':{
-                'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':['douyin']},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
+                'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':[p['id'] for p in registry.descriptions() if p['available']]},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
         if path == '/api/v1/insights':
             operation['parameters']=[{'in':'query','name':k,'required':k in ('keyword','kind','end_date'),'schema':{'type':'string'}} for k in ('keyword','kind','start_date','end_date')]
         if path == '/api/v1/insights/ranges':
@@ -423,7 +428,7 @@ def openapi():
             'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'},
                                                'BasicAuth': {'type': 'http', 'scheme': 'basic'}},
              'schemas': {'Query': {'type': 'object', 'additionalProperties': False, 'required': ['keywords', 'end_date'],
-              'properties': {'platform': {'type': 'string', 'enum': ['douyin'], 'default': 'douyin'},
+              'properties': {'platform': {'type': 'string', 'enum': [p['id'] for p in registry.descriptions() if p['available']], 'default': 'douyin'},
                'keywords': {'type': 'array', 'minItems': 1, 'maxItems': 5, 'uniqueItems': True,
                             'items': {'type': 'string', 'minLength': 1, 'maxLength': 100}},
                'start_date': {'type': 'string', 'format': 'date', 'description': '不填默认截止日前六天；填写后支持最近两个日历年内的过去日期'},
@@ -527,6 +532,7 @@ def mount(app, hub):
         remaining = max(0, math.ceil(next_attempt - time.time()))
         return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser['state'],
                       'login_state': browser['login_state'], 'paused': s.get('paused'),
+                      'platform_status': {p['id']: registry.get(p['id']).status(s) for p in registry.descriptions() if p['available']},
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,
@@ -666,6 +672,13 @@ def mount(app, hub):
 
     async def resume(request):
         require(request, admin=True)
+        body = await read_json(request) if request.can_read_body else {}
+        if type(body) is not dict or set(body) - {'platform'}:
+            raise HubError('invalid_query', '仅接受 platform。')
+        adapter = require_platform(body.get('platform', 'douyin'))
+        if adapter.description['id'] != 'douyin':
+            await adapter.resume(hub)
+            return reply({'ok': True, 'note': '已恢复。'})
         async with hub._sms_lock:
             if login_mode() == 'sms' or (s.get('paused') or {}).get('code') == 'login_in_progress':
                 await hub._check_sms_pause()

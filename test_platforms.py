@@ -30,7 +30,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(adapter.description, {
             'id': 'douyin', 'name': '抖音指数', 'available': True, 'metric': 'search_index',
             'metric_name': '搜索指数', 'unit': '指数', 'region': '全国', 'timezone': 'Asia/Shanghai',
-            'description': '创作者中心关键词搜索指数；不代表实际搜索次数。'})
+            'description': '创作者中心关键词搜索指数；不代表实际搜索次数。',
+            'modules': ['related', 'audience']})
         rows = list(adapter.csv_rows({'keyword': '=word', 'points': [
             {'date': '2025-01-01', 'value': 0, 'composite_index': None, 'fetched_at': None}]}))
         self.assertEqual(rows, [
@@ -71,5 +72,32 @@ class WorkerDispatchTests(unittest.IsolatedAsyncioTestCase):
                 with patch('hub_web.require_platform', side_effect=adapters.get):
                     self.assertTrue(await hub.run_one())
                 self.assertEqual(adapters['ready'].run_one.await_args.args[1]['id'], 'ready')
+            finally:
+                store.close()
+
+    async def test_cooldown_skips_only_that_platform(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import AsyncMock, Mock, patch
+        from hub_store import Store, encode
+        from hub_web import Hub
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'hub.sqlite3')
+            try:
+                for index, platform in enumerate(('slow', 'slow', 'ready')):
+                    store.db.execute('INSERT INTO jobs(id,query,status,created) VALUES(?,?,?,?)',
+                                     (str(index), encode({'platform': platform}), 'queued', index))
+                adapters = {name: Mock() for name in ('slow', 'ready')}
+                for adapter in adapters.values():
+                    adapter.paused.return_value = False
+                adapters['slow'].run_one = AsyncMock(return_value=False)
+                adapters['ready'].run_one = AsyncMock(return_value=True)
+                hub = Hub.__new__(Hub)
+                hub.store = store
+                with patch('hub_web.require_platform', side_effect=adapters.get):
+                    self.assertTrue(await hub.run_one())
+                self.assertEqual(adapters['slow'].run_one.await_count, 1)
+                self.assertEqual(adapters['ready'].run_one.await_args.args[1]['id'], '2')
             finally:
                 store.close()

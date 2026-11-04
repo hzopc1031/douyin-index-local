@@ -26,13 +26,17 @@ class Placeholder:
 class Douyin:
     description = {'id': 'douyin', 'name': '抖音指数', 'available': True, 'metric': 'search_index',
                    'metric_name': '搜索指数', 'unit': '指数', 'region': '全国', 'timezone': 'Asia/Shanghai',
-                   'description': '创作者中心关键词搜索指数；不代表实际搜索次数。'}
+                   'description': '创作者中心关键词搜索指数；不代表实际搜索次数。',
+                   'modules': ['related', 'audience']}
 
     def initialize(self, store):
         pass
 
     def paused(self, store):
         return store.get('paused')
+
+    def status(self, store):
+        return {'paused': self.paused(store)}
 
     async def run_one(self, hub, row):
         return await hub._run_douyin(row)
