@@ -19,7 +19,7 @@ with sync_playwright() as pw:
         name = path.removeprefix('/api/v1/')
         values = {
             'platforms': {'platforms': PLATFORMS + [{'id': 'synthetic', 'name': '合成平台', 'available': True,
-                'metric_name': '合成指数', 'unit': '分', 'region': '全国', 'description': '合成来源', 'modules': []}]},
+                'metric_name': '合成指数', 'unit': '分', 'region': '全国', 'description': '合成来源', 'modules': ['related', 'audience']}]},
             'status': {'browser': 'browser_ready', 'login_state': 'cookie_present', 'login_mode': 'desktop',
                 'counts': {'keywords': 1, 'points': 1}, 'daily_online_attempts': 0,
                 'limits': {'online_attempts_per_day': 50}, 'cooldown_remaining_seconds': 0, 'paused': None},

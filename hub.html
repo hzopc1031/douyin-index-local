@@ -86,7 +86,7 @@ const fmt=t=>t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}):'—';
 const statusName=s=>({queued:'等待执行',running:'取数中',succeeded:'已完成',partial:'数据不完整',failed:'失败',no_data:'无数据'})[s]||s;
 function badgeStatus(s){return '<span class="status '+esc(s)+'">'+esc(statusName(s))+'</span>'}
 function platformInfo(id=chosenPlatform){return platforms.find(p=>p.id===id)||{}}
-function platformModules(id=chosenPlatform){const p=platformInfo(id);return p.modules||(id==='douyin'?['related','audience']:[])}
+function platformModules(id=chosenPlatform){return id==='douyin'?(platformInfo(id).modules||['related','audience']):[]}
 function drawPlatforms(){
  const selected=$('#queryPlatform').value;
  $('#queryPlatform').innerHTML=platforms.map(p=>'<option value="'+esc(p.id)+'" '+(p.available?'':'disabled')+'>'+esc(p.id==='douyin'?'抖音搜索指数':p.name)+(p.available?'':' · 待接入')+'</option>').join('');
