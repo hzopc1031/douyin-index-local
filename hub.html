@@ -534,7 +534,7 @@ function renderReportProgress(){
  const box=$('#reportProgress');if(!reportBatch){box.hidden=true;return}box.hidden=false;
  const q=reportBatch.query,done=reportBatch.entries.filter(e=>['succeeded','partial','failed','no_data'].includes(e.status)).length;
  $('#reportProgressTitle').textContent='本次完整查询 · '+done+' / '+reportBatch.entries.length+' 项已结束';
- $('#reportProgressRange').innerHTML=infoTip(q.keywords.join('、')+' · '+q.start_date+' — '+q.end_date,'各模块独立完成；排队共享至少 15 秒请求间隔，指数任务优先。');
+ $('#reportProgressRange').innerHTML=infoTip(q.keywords.join('、')+' · '+q.start_date+' — '+q.end_date,q.platform==='douyin'?'各模块独立完成；排队共享至少 15 秒请求间隔，指数任务优先。':'任务按平台各自的采集规则执行。');
  $('#reportProgressRows').innerHTML=reportBatch.entries.map(e=>'<div style="padding:10px 0;border-bottom:1px solid #edf0eb"><strong>'+esc(e.label)+'</strong> <span class="status '+esc(e.status)+'">'+esc(e.jobId?statusName(e.status):e.error?'提交未确认':'待提交')+'</span>'+(e.cache_hit?' <small>缓存</small>':'')+(e.error?'<div class="tiny">'+esc(e.error)+'</div>':'')+'</div>').join('');
  $('#retryBundle').hidden=!reportBatch.entries.some(e=>!e.jobId);$('#retryBundle').disabled=bundleSubmitting;
 }
