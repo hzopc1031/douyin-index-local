@@ -228,6 +228,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(platforms['platforms'][1]['live_enabled'])
             state = await (await client.get('/api/v1/status')).json()
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
+            self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 21))
             self.assertEqual(state['platform_status']['baidu']['limits']['http_daily'], 400)
             for kind in ('related', 'audience'):
                 response = await client.post('/api/v1/insights/queries', headers=headers, json=query() | {'kind': kind})

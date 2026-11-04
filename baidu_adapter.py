@@ -326,6 +326,10 @@ class BaiduAdapter:
             yield ['baidu', 'search_index', '全国', _csv_keyword(data['keyword']), p['date'],
                    '' if p['value'] is None else p['value'], '', p['fetched_at'], 'all', 'day', 'index.baidu.com', p['value_status']]
 
+    def status_counts(self, store):
+        words = {r[0] for r in store.db.execute('SELECT DISTINCT keyword FROM baidu_points')}
+        return words, store.db.execute('SELECT count(*) FROM baidu_points').fetchone()[0]
+
     def repoint_dataset(self, store, keep, old):
         store.db.execute('UPDATE baidu_points SET dataset=? WHERE dataset=?', (keep, old))
 
