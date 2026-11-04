@@ -125,6 +125,7 @@ class LoginSession:
         self.gate = asyncio.Lock()
         self.next_send = 0
         self.failure = None
+        self.last_picture = None
         self.send_result = None
         self.audit_id = secrets.token_hex(6)
         self.browser.audit_id = self.audit_id
@@ -161,6 +162,7 @@ class LoginSession:
         if self.state != state:
             audit('session_end', session=self.audit_id, state=state)
         self.state = state
+        self.last_picture = None
         self.code_allowed = False
         self.nonce = secrets.token_urlsafe(24)
         self.used_codes.clear()
@@ -192,6 +194,14 @@ class LoginSession:
             self.state = self.before_verification
 
     async def act(self, obj):
+        if obj.get('action') == 'status' or (self.gate.locked() and obj.get('action') == 'frame'):
+            action = obj['action']
+            fields(obj, {'action'})
+            if action == 'status':
+                return self.public()
+            if self.last_picture is not None:
+                return dict(self.public(), **self.last_picture)
+            reject('frame_unavailable')
         if self.gate.locked():
             reject("busy")
         async with self.locked(obj.get('action') if obj.get('action') in
@@ -246,7 +256,8 @@ class LoginSession:
                         self.send_result = None
                         await self.poll()
                         return self.public()
-                    await self.poll()
+                    if action != "frame":
+                        await self.poll()
                     if self.state in TERMINAL:
                         return self.public()
                     if action == "pointer":
@@ -255,6 +266,7 @@ class LoginSession:
                         await self.browser.pointer(obj["frame"], obj["points"])
                     if action == "frame":
                         picture = await self.browser.frame(self.state == "verification")
+                        self.last_picture = picture
                         return dict(self.public(), **picture)
                     await self.poll()
                     return self.public()

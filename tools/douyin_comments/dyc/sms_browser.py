@@ -180,6 +180,10 @@ class SmsBrowser:
         self.cancel = threading.Event()
         self.last_frame = None
         self.frame_token = ''
+        self.initial_sessions = {}
+        self.qr_confirmed = False
+        self.qr_generation = 0
+        self.login_signals = {}
 
     def step(self, name, condition, timeout):
         self.stage = name
@@ -418,7 +422,10 @@ class SmsBrowser:
                 service_workers='block', accept_downloads=False)
             await self.context.route('**/*', self.route)
             await self.context.route_web_socket('**/*', self.websocket)
-            await self.context.add_cookies(await self.persistent.cookies(self.url))
+            initial = await self.persistent.cookies(self.url)
+            self.initial_sessions = {(c['name'], c['domain'], c['path']): c['value'] for c in initial
+                                     if c['name'] in ('sessionid', 'sessionid_ss', 'sid_tt')}
+            await self.context.add_cookies(initial)
             self.context.on('request', self.redirected_request)
             self.context.on('response', self.response)
             self.page = await self.context.new_page()
@@ -444,9 +451,26 @@ class SmsBrowser:
                   **self.request_metadata(request.url, request.method))
 
     def response(self, response):
+        parsed = urlsplit(response.url)
+        if (parsed.scheme == 'https' and parsed.hostname == 'login.douyin.com' and
+                parsed.path.rstrip('/') == '/passport/web/check_qrconnect' and response.status == 200):
+            task = asyncio.create_task(self.read_qr_response(response, self.qr_generation))
+            self.guard_tasks.add(task)
+            task.add_done_callback(self.guard_tasks.discard)
         if response.status in (401, 403, 429) and response.request.resource_type in ('document', 'xhr', 'fetch'):
             self.fatal_reason = 'http_' + str(response.status)
             self.fatal = True
+
+    async def read_qr_response(self, response, generation):
+        try:
+            async with asyncio.timeout(2):
+                body = await response.json()
+            # shortcut: status 3 is uncalibrated for this endpoint; verify against a live response before expanding.
+            if (generation == self.qr_generation and type(body) is dict and
+                    type(body.get('data')) is dict and body['data'].get('status') == '3'):
+                self.qr_confirmed = True
+        except Exception:
+            pass
 
     def guard_response(self, event, session=None):
         task = asyncio.create_task(self.check_response(event, session))
@@ -466,7 +490,13 @@ class SmsBrowser:
             if status in (401, 403, 429) and event.get('resourceType') in ('Document', 'XHR', 'Fetch'):
                 self.fatal_reason = 'http_' + str(status)
                 self.fatal = True
-            denied = self.fatal or bool(event.get('responseErrorReason'))
+            if event.get('responseErrorReason') and not self.fatal:
+                try:
+                    await session.send('Fetch.failRequest', dict(requestId=request_id, errorReason=event['responseErrorReason']))
+                except Exception:
+                    pass
+                return
+            denied = self.fatal
             if 300 <= status < 400:
                 request = event['request']
                 location = next((h['value'] for h in event.get('responseHeaders', [])
@@ -499,6 +529,8 @@ class SmsBrowser:
                 pass
 
     async def reset(self, mode="qr"):
+        self.qr_generation += 1
+        self.qr_confirmed = False
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
@@ -640,12 +672,31 @@ class SmsBrowser:
         self.require_origin()
         if await self.challenge():
             return 'verification'
-        if await self.inside():
+        if await self.login_confirmed():
             return 'succeeded'
         if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
                 '验证码错误', exact=False).filter(visible=True).count()):
             raise Stop(4, 'code_invalid')
         return 'pending'
+
+    async def login_confirmed(self):
+        panel = bool(await self.read_dom('login_panel_count',
+            lambda: self.page.locator(site.LOGIN_PANEL).filter(visible=True).count()))
+        selectors = site.SIGNALS['logged_in'] if self.backend else site.SIGNALS['logged_in'][:1]
+        avatar = bool(await self.read_dom('account_signal',
+            lambda: self.page.locator(', '.join(selectors)).filter(visible=True).count()))
+        cookies = await self.context.cookies(self.url)
+        names = ('sessionid', 'sessionid_ss', 'sid_tt')
+        valid = [c for c in cookies if c['name'] in names and c.get('value') and
+                 in_domains(c['domain'].lstrip('.'), (urlsplit(self.url).hostname, 'douyin.com'))]
+        fresh = any(self.initial_sessions.get((c['name'], c['domain'], c['path'])) != c['value'] for c in valid)
+        signals = dict(panel_visible=panel, avatar_visible=avatar,
+                       **{name: any(c['name'] == name for c in valid) for name in names},
+                       qr_confirmed=self.qr_confirmed)
+        if signals != self.login_signals:
+            self.login_signals = signals
+            audit('login_signals', session=self.audit_id, **signals)
+        return bool(valid) and ((not panel and avatar) or (fresh and self.qr_confirmed))
 
     def sms_request(self, url, method):
         parsed = urlsplit(url)
@@ -1165,7 +1216,7 @@ class SmsBrowser:
     async def persist(self):
         self.step('persist_login', 'confirmed account and allowlisted session cookie', 3)
         self.require_origin()
-        if not await self.inside():
+        if not await self.login_confirmed():
             raise Stop(4, 'login_unconfirmed')
         cookies = await self.context.cookies(self.url)
         safe = [cookie for cookie in cookies if cookie['name'] in COOKIE_NAMES and
@@ -1189,10 +1240,20 @@ class SmsBrowser:
             if cookie.get('expires', -1) < 0:
                 cookie['expires'] = time.time() + SESSION_COOKIE_SECONDS
         await self.persistent.add_cookies(safe)
+        recorded = False
+        if self.state_dir is not None:
+            try:
+                atomic_text(self.state_dir / 'login-status.json', json.dumps(dict(
+                    status='SUCCEEDED', recorded_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))) + '\n')
+                recorded = True
+            except Exception:
+                pass
+        audit('login_succeeded', session=self.audit_id, status_recorded=recorded)
 
     async def close(self):
         self.cancel.set()
         self.private_values.clear()
+        self.initial_sessions.clear()
         self.last_frame = None
         self.frame_token = ''
         records = _processes(self.driver_pid) if self.driver_pid else {}

@@ -483,7 +483,7 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         for status in (401, 403, 429):
             browser = SmsBrowser('/unused', backend=AsyncMock())
-            browser.response(SimpleNamespace(status=status, request=SimpleNamespace(resource_type='xhr')))
+            browser.response(SimpleNamespace(url='https://www.douyin.com/', status=status, request=SimpleNamespace(resource_type='xhr')))
             route = SimpleNamespace(request=SimpleNamespace(url='https://www.douyin.com/retry', method='POST'), abort=AsyncMock(), continue_=AsyncMock())
             await browser.route(route)
             route.abort.assert_awaited_once()

@@ -130,6 +130,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expiry_releases_browser_and_replay_material(self):
         self.clock.value += 601
+        await self.session.poll()
         result = await self.session.act(dict(action='status'))
         self.assertEqual(result['state'], 'expired')
         self.assertFalse(self.session.key or self.session.used_codes)
@@ -141,7 +142,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             entered.set()
             await asyncio.Event().wait()
         self.browser.observe.side_effect = observe
-        pending = asyncio.create_task(self.session.act(dict(action='status')))
+        pending = asyncio.create_task(self.session.act(dict(action='pointer', nonce=self.session.nonce, frame='safe', points=[])))
         await entered.wait()
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
@@ -170,6 +171,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_requires_browser_observation_and_persistence(self):
         self.browser.observe.return_value = 'succeeded'
+        await self.session.poll()
         result = await self.session.act(dict(action='status'))
         self.assertEqual(result['state'], 'succeeded')
         self.browser.persist.assert_awaited_once()
@@ -289,7 +291,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_unresolved_verification_stops_without_send(self):
         self.session.stop_on_verification = True
         self.browser.observe.return_value = 'verification'
-        await self.session.act(dict(action='status'))
+        await self.session.poll()
         self.assertEqual(self.session.state, 'failed')
         self.browser.auto_step.assert_not_awaited()
         self.assertEqual(self.session.failure['reason'], 'challenge_detected')
@@ -318,6 +320,18 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"reason": "busy"', logs.getvalue())
         self.assertNotIn(PHONE, logs.getvalue())
         self.browser.send.assert_not_awaited()
+
+    async def test_status_and_cached_frame_during_observation(self):
+        await self.auth()
+        self.session.last_picture = {'image': 'synthetic', 'frame': 'safe'}
+        await self.session.gate.acquire()
+        try:
+            status, _, data = await self.request('/api', {'action': 'status'})
+            self.assertEqual((status, data['state']), (200, 'ready'))
+            status, _, data = await self.request('/api', {'action': 'frame'})
+            self.assertEqual((status, data['image']), (200, 'synthetic'))
+        finally:
+            self.session.gate.release()
 
     async def test_poll_timeout_releases_lock_and_closes(self):
         await self.auth()
@@ -351,6 +365,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.browser.observe.side_effect = RuntimeError(PHONE + CODE)
         logs = io.StringIO()
         with redirect_stdout(logs), redirect_stderr(logs):
+            await self.app.tick()
             result = await self.request('/api', dict(action='status'))
         serialized = json.dumps(result) + logs.getvalue()
         self.assertNotIn(PHONE, serialized)

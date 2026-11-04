@@ -242,3 +242,66 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             await browser.websocket(socket)
             socket.close.assert_awaited_once()
             socket.connect_to_server.assert_not_called()
+
+class LoginSignalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_qr_confirmation_requires_fresh_session_and_fixed_response(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from dyc.sms_browser import SmsBrowser
+        browser = SmsBrowser('/unused')
+        browser.context = MagicMock()
+        browser.context.cookies = AsyncMock(return_value=[dict(name='sessionid', value='synthetic', domain='.douyin.com', path='/')])
+        browser.page = MagicMock()
+        browser.page.url = browser.url
+        browser.page.locator.return_value.filter.return_value.count = AsyncMock(return_value=1)
+        browser.initial_sessions = {('sessionid', '.douyin.com', '/'): 'synthetic'}
+        response = MagicMock()
+        response.json = AsyncMock(return_value={'data': {'status': '3'}})
+        await browser.read_qr_response(response, browser.qr_generation)
+        self.assertFalse(await browser.login_confirmed())
+        browser.initial_sessions.clear()
+        self.assertTrue(await browser.login_confirmed())
+        response.json.return_value = {'data': {'status': '2'}}
+        await browser.read_qr_response(response, browser.qr_generation)
+        self.assertTrue(await browser.login_confirmed())
+        browser.qr_generation += 1
+        browser.qr_confirmed = False
+        response.json.return_value = {'data': {'status': '3'}}
+        await browser.read_qr_response(response, browser.qr_generation - 1)
+        self.assertFalse(await browser.login_confirmed())
+        self.assertEqual(set(browser.login_signals.values()), {True, False})
+
+    async def test_transport_error_is_not_a_guard_rejection(self):
+        from unittest.mock import AsyncMock
+        from dyc.sms_browser import SmsBrowser
+        browser = SmsBrowser('/unused')
+        session = AsyncMock()
+        await browser.check_response({'requestId': 'x', 'responseErrorReason': 'Aborted',
+                                      'request': {'url': 'about:blank'}}, session)
+        session.send.assert_awaited_once_with('Fetch.failRequest', {'requestId': 'x', 'errorReason': 'Aborted'})
+        self.assertFalse(browser.fatal)
+
+    async def test_success_record_follows_cookie_copy_and_contains_no_values(self):
+        with tempfile.TemporaryDirectory() as root:
+            browser = SmsBrowser('/unused', state_dir=root)
+            browser.page = Mock(url=browser.url)
+            browser.login_confirmed = AsyncMock(return_value=True)
+            browser.context = Mock(cookies=AsyncMock(return_value=[dict(
+                name='sessionid', value='synthetic-secret', domain='.douyin.com', path='/', expires=123)]))
+            browser.persistent = Mock(add_cookies=AsyncMock())
+            await browser.persist()
+            browser.persistent.add_cookies.assert_awaited_once()
+            record = json.loads((Path(root) / 'login-status.json').read_text())
+            self.assertEqual(record['status'], 'SUCCEEDED')
+            self.assertNotIn('synthetic-secret', json.dumps(record))
+
+    async def test_success_record_failure_does_not_undo_cookie_copy(self):
+        with tempfile.TemporaryDirectory() as root:
+            browser = SmsBrowser('/unused', state_dir=root)
+            browser.page = Mock(url=browser.url)
+            browser.login_confirmed = AsyncMock(return_value=True)
+            browser.context = Mock(cookies=AsyncMock(return_value=[dict(
+                name='sessionid', value='synthetic-secret', domain='.douyin.com', path='/', expires=123)]))
+            browser.persistent = Mock(add_cookies=AsyncMock())
+            with patch('dyc.sms_browser.atomic_text', side_effect=OSError('synthetic')):
+                await browser.persist()
+            browser.persistent.add_cookies.assert_awaited_once()
