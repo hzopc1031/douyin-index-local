@@ -13,15 +13,9 @@ from zoneinfo import ZoneInfo
 from hub_logging import redact
 
 TZ = ZoneInfo('Asia/Shanghai')
-PLATFORMS = [
-    {'id': 'douyin', 'name': '抖音指数', 'available': True, 'metric': 'search_index',
-     'metric_name': '搜索指数', 'unit': '指数', 'region': '全国', 'timezone': 'Asia/Shanghai',
-     'description': '创作者中心关键词搜索指数；不代表实际搜索次数。'},
-    {'id': 'baidu', 'name': '百度指数', 'available': False, 'metric': None,
-     'description': '待接入，指标及授权方式尚未确定。'},
-    {'id': 'google_trends', 'name': 'Google Trends', 'available': False, 'metric': None,
-     'description': '待接入；未来按其自身地区、时间窗和相对热度口径展示。'},
-]
+from platforms import registry, require_platform
+
+PLATFORMS = registry.descriptions()
 
 
 class HubError(ValueError):
@@ -43,6 +37,12 @@ def encode(value):
 
 
 def validate_query(body, *, historical=False):
+    if type(body) is not dict or set(body) - {'platform', 'keywords', 'start_date', 'end_date'}:
+        raise HubError('invalid_query', '仅接受 platform、keywords、start_date、end_date。')
+    return require_platform(body.get('platform', 'douyin')).validate_query(body, historical=historical)
+
+
+def _validate_douyin_query(body, *, historical=False):
     if type(body) is not dict or set(body) - {'platform', 'keywords', 'start_date', 'end_date'}:
         raise HubError('invalid_query', '仅接受 platform、keywords、start_date、end_date。')
     if body.get('platform', 'douyin') != 'douyin':
@@ -217,6 +217,9 @@ class Store:
                 self.db.execute('DELETE FROM datasets WHERE id=?', (row['id'],))
 
     def ingest(self, result, dataset_id=None):
+        return require_platform(result['metadata']['platform']).ingest(self, result, dataset_id)
+
+    def _ingest_douyin(self, result, dataset_id=None):
         m = result['metadata']
         query = {'platform': 'douyin', 'keywords': m['keywords'], 'start_date': m['start_date'], 'end_date': m['end_date']}
         stamp = dt.datetime.fromisoformat(m['fetched_at']).timestamp()
@@ -452,8 +455,9 @@ class Store:
         return row[0]
 
     def series(self, platform, keyword, start=None, end=None):
-        if platform != 'douyin':
-            raise HubError('platform_unavailable', '该平台尚未接入。', 422)
+        return require_platform(platform).series(self, keyword, start, end)
+
+    def _douyin_series(self, platform, keyword, start=None, end=None):
         if not isinstance(keyword, str) or not 1 <= len(keyword) <= 100:
             raise HubError('invalid_keyword', '请指定关键词。')
         if bool(start) != bool(end):

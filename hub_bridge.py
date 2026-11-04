@@ -151,10 +151,8 @@ def start_bridge(api):
                 elif message.get('command') == 'query':
                     from hub_store import validate_query
                     query = validate_query(message.get('payload'))
-                    answer = api.fetch_batch('\n'.join(query['keywords']), query['end_date'], cloud=True, start_date=query['start_date'])
-                    # The HTTP layer validates and projects the business result again.
-                    answer.pop('folder', None)
-                    answer.pop('comparison', None)
+                    from platforms import require_platform
+                    answer = require_platform(query['platform']).collect(api, query)
                 else:
                     answer = {'ok': False, 'code': 'invalid_command', 'message': '不支持的内部操作。'}
             except HubError as exc:

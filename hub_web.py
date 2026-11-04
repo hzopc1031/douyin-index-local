@@ -19,6 +19,7 @@ from aiohttp import web
 import hub_bridge
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
+from platforms import require_platform
 from sms_login import (FRAME_BASE64_LIMIT, SmsLoginError, TERMINAL, public_sms_status,
                        validate_sms_payload)
 
@@ -237,7 +238,7 @@ class Hub:
         self.store.set('daily', {'date': today, 'count': counter['count'] + 1})
         started = time.monotonic()
         try:
-            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, hub_bridge.BRIDGE_TIMEOUT)
+            response = await asyncio.to_thread(self.bridge, require_platform(query['platform']).bridge_command(query), query, hub_bridge.BRIDGE_TIMEOUT)
             # Only collection replies reset the streak; status preflights do not.
             self.store.set('consecutive_bridge_timeouts', 0)
             if response.get('ok') is not True:
@@ -273,7 +274,7 @@ class Hub:
                     self.store.save_insight(query,result)
                     self.store.update_job(row['id'],'succeeded',result=result)
                 else:
-                    result = public_result(response)
+                    result = require_platform(query['platform']).project(response)
                     self.store.ingest(result)
                     has_values=any(r['search_index'] is not None for r in result['rows'])
                     self.store.update_job(row['id'], 'succeeded' if result['metadata']['complete'] else 'partial' if has_values else 'no_data', result=result,
@@ -595,15 +596,10 @@ def mount(app, hub):
 
     async def export(request):
         require(request)
-        from storage import _csv_keyword
         data = get_series(request)
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['platform', 'metric', 'region', 'keyword', 'date', 'search_index', 'composite_index', 'fetched_at'])
-        for point in data['points']:
-            writer.writerow(['douyin', 'search_index', '全国', _csv_keyword(data['keyword']), point['date'],
-                             '' if point['value'] is None else point['value'],
-                             '' if point['composite_index'] is None else point['composite_index'], point['fetched_at']])
+        writer.writerows(require_platform(data['platform']).csv_rows(data))
         return web.Response(body=('\ufeff' + output.getvalue()).encode(), content_type='text/csv',
                             charset='utf-8', headers={'Content-Disposition': 'attachment; filename="index-series.csv"'})
 
