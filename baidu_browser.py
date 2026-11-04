@@ -62,8 +62,15 @@ class BaiduBrowser:
                 idle_seconds = 300
         if not 1 <= idle_seconds <= 86400:
             raise ValueError('Invalid browser idle timeout')
+        try:
+            hold_seconds = int(os.environ.get('INDEX_HUB_BAIDU_LOGIN_HOLD_SECONDS', '900'))
+        except ValueError:
+            raise ValueError('Invalid browser login hold') from None
+        if not 1 <= hold_seconds <= 86400:
+            raise ValueError('Invalid browser login hold')
         self.root = root
         self.idle_seconds = idle_seconds
+        self.hold_seconds = hold_seconds
         self._queue = queue.Queue()
         self.started = False
         self.busy = False
@@ -71,9 +78,9 @@ class BaiduBrowser:
         self._thread = threading.Thread(target=self._run, name='baidu-browser', daemon=True)
         self._thread.start()
 
-    def call(self, action, *, touch=True):
+    def call(self, action, *, touch=True, hold=False):
         result = queue.Queue(maxsize=1)
-        self._queue.put((action, result, touch))
+        self._queue.put((action, result, touch, hold))
         ok, value = result.get()
         if not ok:
             raise value
@@ -86,6 +93,7 @@ class BaiduBrowser:
     def _run(self):
         context = playwright = lock = None
         last_activity = time.monotonic()
+        hold_until = 0
 
         def stop():
             nonlocal context, playwright, lock
@@ -104,8 +112,8 @@ class BaiduBrowser:
 
         while True:
             try:
-                timeout = max(0, self.idle_seconds - (time.monotonic() - last_activity)) if context else None
-                action, result, touch = self._queue.get(timeout=timeout)
+                timeout = max(0, max(last_activity + self.idle_seconds, hold_until) - time.monotonic()) if context else None
+                action, result, touch, hold = self._queue.get(timeout=timeout)
             except queue.Empty:
                 try:
                     stop()
@@ -134,8 +142,17 @@ class BaiduBrowser:
                         os.umask(previous_mask)
                     self.started = True
                 value = action(context)
-                if touch:
-                    last_activity = time.monotonic()
+                now = time.monotonic()
+                if touch == 'status':
+                    self.last_state = value['state']
+                    if self.last_state == 'browser_ready':
+                        hold_until = 0
+                    else:
+                        last_activity = now
+                elif touch:
+                    last_activity = now
+                if hold:
+                    hold_until = now + self.hold_seconds
                 result.put((True, value))
             except Exception as exc:
                 if context is None:
@@ -143,6 +160,12 @@ class BaiduBrowser:
                         stop()
                     except Exception:
                         pass
+                else:
+                    now = time.monotonic()
+                    if touch:
+                        last_activity = now
+                    if hold:
+                        hold_until = now + self.hold_seconds
                 result.put((False, exc))
             finally:
                 self.busy = False
@@ -185,8 +208,12 @@ def browser():
 
 
 def _page(context):
-    page = context.pages[0] if context.pages else context.new_page()
     from urllib.parse import urlsplit
+    pages = context.pages
+    page = next((p for p in pages if (urlsplit(p.url).scheme, urlsplit(p.url).netloc) ==
+                 ('https', 'index.baidu.com')), None)
+    if page is None:
+        page = pages[0] if pages else context.new_page()
     url = urlsplit(page.url)
     if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
         page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
@@ -197,24 +224,37 @@ def _page(context):
 
 
 def login_open(context):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     page = _page(context)
     page.bring_to_front()
     login = page.get_by_text('登录', exact=True).first
     if login.is_visible(timeout=1000):
-        login.click(timeout=3000)
+        try:
+            login.click(timeout=3000)
+        except PlaywrightTimeoutError:
+            pass
     return {'ok': True, 'state': 'login_required'}
 
 
-def page_status(page, *, origin='https://index.baidu.com', allow_loopback=False):
-    PageTransport(page, origin=origin, allow_loopback=allow_loopback)
-    state = page.evaluate('''origin => {
-      if (location.origin !== origin) return 'login_required';
-      if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return 'signature_unavailable';
-      const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-      return [...document.querySelectorAll('a,button,span,div')].some(e => visible(e) && e.textContent.trim() === '退出登录') ? 'browser_ready' : 'login_required';
-    }''', origin)
-    return {'ok': True, 'state': state, 'live_enabled': True}
-
-
-def status(context):
-    return page_status(_page(context))
+def status(context, *, origin='https://index.baidu.com', allow_loopback=False):
+    from urllib.parse import urlsplit
+    try:
+        pages = context.pages
+        page = next((p for p in pages if (urlsplit(p.url).scheme, urlsplit(p.url).netloc) ==
+                     (urlsplit(origin).scheme, urlsplit(origin).netloc)), None)
+        if page is None:
+            state = 'login_in_progress'
+        else:
+            PageTransport(page, origin=origin, allow_loopback=allow_loopback)
+            now = time.time()
+            logged_in = any(c.get('name') == 'BDUSS' and
+                            (c.get('expires') == -1 or c.get('expires', 0) > now)
+                            for c in context.cookies(origin))
+            if not logged_in:
+                state = 'login_required'
+            else:
+                ready = page.evaluate("origin => location.origin === origin && !!window.Paris && typeof window.Paris.getAcsInstance === 'function'", origin)
+                state = 'browser_ready' if ready else 'signature_unavailable'
+        return {'ok': True, 'state': state, 'live_enabled': True}
+    except Exception:
+        raise ProfileError('Baidu status unavailable') from None

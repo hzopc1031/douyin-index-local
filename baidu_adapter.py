@@ -12,6 +12,7 @@ DIMENSIONS = dict(platform='baidu', metric='search_index', device='all', region=
                   granularity='day', source='index.baidu.com')
 ERRORS = {
     'login_required': '百度未登录，请登录。',
+    'login_in_progress': '百度登录进行中。',
     'rate_limited': '百度限流，请冷却后人工恢复。',
     'bad_request': '百度拒绝请求参数。',
     'abnormal_access': '百度报告异常访问。',
@@ -252,11 +253,9 @@ def bridge_command(command, payload=None):
         instance = baidu_browser.browser()
         if not instance.started or instance.busy:
             return {'ok': True, 'state': instance.last_state, 'live_enabled': True}
-        result = instance.call(baidu_browser.status, touch=False)
-        instance.last_state = result['state']
-        return result
+        return instance.call(baidu_browser.status, touch='status')
     if command == 'baidu_login_open':
-        return baidu_browser.browser().call(baidu_browser.login_open)
+        return baidu_browser.browser().call(baidu_browser.login_open, hold=True)
     if not isinstance(payload, dict):
         raise BaiduError()
     day = payload.get('_budget_day')
@@ -274,11 +273,11 @@ def bridge_command(command, payload=None):
     import hub_baidu
     try:
         def run(context):
+            page = baidu_browser._page(context)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
             if state != 'browser_ready':
                 raise BaiduError(state)
-            page = baidu_browser._page(context)
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)

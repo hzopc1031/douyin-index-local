@@ -35,7 +35,10 @@ def run():
                     elif path == 'status':
                         data = dict(login_mode='desktop', browser='login_required', login_state='no_session_cookie',
                                     counts=dict(keywords=1, points=0), daily_online_attempts=0,
-                                    limits=dict(online_attempts_per_day=50), cooldown_remaining_seconds=0)
+                                    limits=dict(online_attempts_per_day=50), cooldown_remaining_seconds=0,
+                                    platform_status={'baidu': dict(browser='login_in_progress', paused=None,
+                                        daily=dict(attempts=0, http_reserved=0),
+                                        limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
                         data = {'datasets': [{'metadata': raw['metadata'], 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
@@ -52,6 +55,7 @@ def run():
                 page.route('**/*', route)
                 page.goto('http://baidu-ui.invalid/')
                 page.wait_for_function('!refreshing && platforms.length===3')
+                assert 'login_in_progress' in page.locator('#baiduBudgetStatus').inner_text()
                 page.locator('[data-platform=baidu]').click()
                 page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
