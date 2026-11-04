@@ -120,7 +120,6 @@ class Hub:
         self._qr_last_start = None
         self._sms_lock = asyncio.Lock()
         self._platform_locks = {}
-        self._baidu_lock = asyncio.Lock()
         self.bridge = bridge
         self.worker_task = None
 

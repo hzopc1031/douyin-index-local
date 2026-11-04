@@ -87,7 +87,7 @@ def fail(store, job_id, code):
 
 
 async def run_one(hub, row, query):
-    async with hub._baidu_lock:
+    async with hub._platform_locks.setdefault('baidu', asyncio.Lock()):
         store = hub.store
         if store.job(row['id'])['status'] != 'queued' or store.get('baidu.paused'):
             return False

@@ -159,7 +159,7 @@ def parse_index(data, ptbk, query):
                             or series.get('type', 'day') != 'day'):
                         raise BaiduError()
                     plain = decrypt(ptbk, series['data'])
-                    tokens = plain.split(',') if plain else [''] * days
+                    tokens = plain.split(',')
                     if len(tokens) != days:
                         raise BaiduError()
                 for i, token in enumerate(tokens):
