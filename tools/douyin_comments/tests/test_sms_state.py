@@ -384,6 +384,14 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.auth()
         result = await self.request('/api', {'action': 'status', 'phone': PHONE})
         self.assertEqual(result[2], {'error': 'invalid_request'})
+        with patch('dyc.sms_web.audit') as audit:
+            await self.request('/api', {'action': 'cancel'})
+            await self.app.dispatch('GET', '/?secret=' + PHONE, self.headers, b'')
+        rejected = [call.kwargs for call in audit.call_args_list if call.args[0] == 'request_rejected']
+        self.assertEqual(rejected[0]['missing'], ['nonce'])
+        self.assertEqual(rejected[0]['path'], '/api')
+        self.assertEqual((rejected[1]['path'], rejected[1]['method']), ('other', 'GET'))
+        self.assertNotIn(PHONE, str(rejected))
 
     async def test_timer_closes_abandoned_session(self):
         await self.auth()

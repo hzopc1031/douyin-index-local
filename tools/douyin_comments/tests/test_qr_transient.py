@@ -1,4 +1,6 @@
 """Offline QR navigation and transient DOM regression tests."""
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -179,6 +181,24 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.failure['reason'], 'login_expired')
         self.assertTrue(any(call.args[0] == 'session_end' for call in audit.call_args_list))
         browser.diagnose.assert_awaited_once_with(None, 'login_expired')
+
+    async def test_deadline_emits_failure_and_session_end(self):
+        browser = self.browser()
+        browser.close = AsyncMock()
+        browser.state_dir = None
+        browser.page.title = AsyncMock(return_value='')
+        now = [0]
+        session = LoginSession(browser, None, clock=lambda: now[0], seconds=10)
+        app = WebApp('https://dyc.invalid', '', lambda: session, clock=lambda: now[0])
+        app.session = session
+        now[0] = 10
+        log = io.StringIO()
+        with redirect_stderr(log):
+            await app.tick()
+        self.assertIn('"event": "login_failure"', log.getvalue())
+        self.assertIn('"event": "session_end"', log.getvalue())
+        self.assertEqual(session.state, 'expired')
+        browser.close.assert_awaited_once()
 
     async def test_page_change_categories_are_transient(self):
         browser = self.browser()

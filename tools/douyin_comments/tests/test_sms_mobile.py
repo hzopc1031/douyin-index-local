@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from urllib.parse import urlsplit
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from dyc.errors import Stop
 from dyc.sms_browser import SmsBrowser
@@ -16,6 +16,32 @@ from tests.test_sms_state import ORIGIN, PHONE, CODE, DummyBrowser
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_observes_qr_responses_on_pages_and_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            async def official(route):
+                if '/check_qrconnect' in route.request.url:
+                    await route.fulfill(content_type='application/json', body='{"data":{"status":2}}',
+                                        headers={'Access-Control-Allow-Origin': '*'})
+                else:
+                    await route.fulfill(content_type='text/html; charset=utf-8', body=HTML)
+            browser = SmsBrowser(Path(root) / 'profile', backend=official)
+            await browser.start()
+            try:
+                page = await browser.context.new_page()
+                await page.goto('https://www.douyin.com/')
+                async with page.expect_event('framenavigated'):
+                    await page.evaluate("""() => { const f = document.createElement('iframe');
+                        f.src = 'https://sso.douyin.com/'; document.body.appendChild(f); }""")
+                frame = await (await page.locator('iframe').element_handle()).content_frame()
+                with patch('dyc.sms_browser.audit') as audit:
+                    await page.evaluate("fetch('https://www.douyin.com/check_qrconnect/')")
+                    await frame.evaluate("fetch('https://sso.douyin.com/check_qrconnect/')")
+                    await asyncio.gather(*browser.response_tasks)
+                events = [c for c in audit.call_args_list if c.args[0] == 'qrconnect_response']
+                self.assertEqual(len(events), 2)
+            finally:
+                await browser.close()
+
     async def test_mobile_qr_flow_and_no_browser_storage(self):
         await self.mobile_flow(no_token=False)
 
@@ -133,6 +159,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
             front = await browser.persistent.browser.new_context(viewport=dict(width=390, height=844),
                                                                  is_mobile=True, has_touch=True, service_workers='block')
             requests = []
+            rejected = []
             console = []
             frame_requested, release_frame = asyncio.Event(), asyncio.Event()
             async def frontend(route):
@@ -145,6 +172,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 requests.append((req.method, target))
                 status, extra, data = await app.dispatch(req.method, target, headers,
                                                         (req.post_data or '').encode())
+                if status != 200:
+                    rejected.append((target, status))
                 if (target == '/api' and json.loads(req.post_data or '{}').get('action') == 'frame'
                         and not frame_requested.is_set()):
                     frame_requested.set()
@@ -198,6 +227,7 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(PHONE, ''.join(console))
                 self.assertNotIn(CODE, ''.join(console))
                 self.assertFalse(foreign)
+                self.assertFalse(rejected)
                 self.assertTrue(all(method == 'POST' for method, path in requests if path in ('/auth', '/api')))
             finally:
                 release_start.set()

@@ -192,7 +192,10 @@ class WebApp:
         except LoginError as error:
             code = str(error)
             code = code if code in ERRORS else 'login_failed'
-            audit('request_rejected', action=action, reason=code)
+            audit('request_rejected', action=action, reason=code,
+                  path=target if target in ('/', '/app.js', '/app.css', '/auth', '/api') else 'other',
+                  method=method if method in ('GET', 'POST') else 'other',
+                  missing=getattr(error, 'missing', []))
             if (action == 'send' and code not in ('csrf', 'unauthorized', 'busy', 'qr_only') and
                     self.session and not self.starting and not self.session.gate.locked() and
                     hasattr(self.session.browser, 'send_evidence')):

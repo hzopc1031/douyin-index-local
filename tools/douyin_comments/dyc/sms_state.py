@@ -55,7 +55,9 @@ def payload(raw):
 
 def fields(obj, names):
     if type(obj) is not dict or set(obj) != set(names):
-        reject()
+        error = LoginError("invalid_request")
+        error.missing = sorted(set(names) - set(obj)) if type(obj) is dict else sorted(names)
+        raise error from None
 
 
 def secret(value, pattern):
