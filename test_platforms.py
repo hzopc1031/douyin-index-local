@@ -45,3 +45,31 @@ class PlatformTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(HubError) as error:
                 validate_query(body)
             self.assertEqual(error.exception.code, expected)
+
+
+class WorkerDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_skips_paused_platform_and_dispatches_next(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import AsyncMock, Mock, patch
+        from hub_store import Store, encode
+        from hub_web import Hub
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / 'hub.sqlite3')
+            try:
+                for identifier in ('paused', 'ready'):
+                    store.db.execute('INSERT INTO jobs(id,query,status,created) VALUES(?,?,?,?)',
+                                     (identifier, encode({'platform': identifier}), 'queued',
+                                      1 if identifier == 'paused' else 2))
+                adapters = {'paused': Mock(), 'ready': Mock()}
+                adapters['paused'].paused.return_value = True
+                adapters['ready'].paused.return_value = False
+                adapters['ready'].run_one = AsyncMock(return_value=True)
+                hub = Hub.__new__(Hub)
+                hub.store = store
+                with patch('hub_web.require_platform', side_effect=adapters.get):
+                    self.assertTrue(await hub.run_one())
+                self.assertEqual(adapters['ready'].run_one.await_args.args[1]['id'], 'ready')
+            finally:
+                store.close()
