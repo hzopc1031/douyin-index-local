@@ -160,6 +160,12 @@ class BaiduBrowser:
                         stop()
                     except Exception:
                         pass
+                else:
+                    now = time.monotonic()
+                    if touch:
+                        last_activity = now
+                    if hold:
+                        hold_until = now + self.hold_seconds
                 result.put((False, exc))
             finally:
                 self.busy = False
@@ -218,11 +224,15 @@ def _page(context):
 
 
 def login_open(context):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     page = _page(context)
     page.bring_to_front()
     login = page.get_by_text('登录', exact=True).first
     if login.is_visible(timeout=1000):
-        login.click(timeout=3000)
+        try:
+            login.click(timeout=3000)
+        except PlaywrightTimeoutError:
+            pass
     return {'ok': True, 'state': 'login_required'}
 
 

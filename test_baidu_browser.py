@@ -35,6 +35,20 @@ class PageTransportTests(unittest.TestCase):
         with self.assertRaises(BaiduError):
             PageTransport(Page()).query({})
 
+    def test_login_open_click_timeout(self):
+        from unittest.mock import Mock
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from baidu_browser import login_open
+        page = Mock()
+        login = page.get_by_text.return_value.first
+        login.is_visible.return_value = True
+        login.click.side_effect = PlaywrightTimeoutError('synthetic timeout')
+        with patch('baidu_browser._page', return_value=page):
+            self.assertEqual(login_open(None), {'ok': True, 'state': 'login_required'})
+        login.click.side_effect = RuntimeError('other error')
+        with patch('baidu_browser._page', return_value=page), self.assertRaises(RuntimeError):
+            login_open(None)
+
 
 @unittest.skipUnless(os.environ.get('INDEX_HUB_REQUIRE_BROWSER_TESTS') == '1', 'browser tests not requested')
 class BrowserPageTests(unittest.TestCase):
@@ -279,6 +293,50 @@ class ReadOnlyStatusTests(unittest.TestCase):
 
 
 class LifetimeClockTests(unittest.TestCase):
+    def test_failed_action_keeps_hold_and_refreshes_activity(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import baidu_browser
+        now = [0]
+        context = Mock()
+        playwright = Mock()
+        playwright.chromium.launch_persistent_context.return_value = context
+        failure = RuntimeError('synthetic failure')
+        result = Mock()
+        def fail(_context):
+            now[0] = 100
+            raise failure
+        events = [(0, fail, result, True, True),
+                  (350, lambda c: None, Mock(), False, False),
+                  (351, lambda c: {'state': 'browser_ready'}, Mock(), 'status', False),
+                  (352, None, Mock(), True, False)]
+        timeouts = []
+        class Queue:
+            def get(self, timeout=None):
+                timeouts.append(timeout)
+                stamp, action, response, touch, hold = events.pop(0)
+                now[0] = stamp
+                if stamp == 350:
+                    context.close.assert_not_called()
+                return action, response, touch, hold
+        worker = baidu_browser.BaiduBrowser.__new__(baidu_browser.BaiduBrowser)
+        worker.root = '.'
+        worker.idle_seconds = 300
+        worker.hold_seconds = 900
+        worker._queue = Queue()
+        worker.started = worker.busy = False
+        worker.last_state = 'login_required'
+        with patch.object(baidu_browser, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+             patch.object(baidu_browser, 'prepare_profile', return_value='profile'), \
+             patch.object(baidu_browser, 'ProfileLock') as lock, \
+             patch('playwright.sync_api.sync_playwright') as start:
+            lock.return_value.acquire.return_value = Mock()
+            start.return_value.start.return_value = playwright
+            worker._run()
+        result.put.assert_called_once_with((False, failure))
+        self.assertEqual(timeouts, [None, 900, 650, 49])
+        context.close.assert_called_once()
+
     def test_status_activity_and_login_hold(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
