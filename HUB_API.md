@@ -136,6 +136,22 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 任务来源：新建任务记录管理端/API 密钥类型、密钥名称与前缀、连接来源 IP 和最多 512 字符 User-Agent，仅管理登录可查看。忽略 X-Forwarded-For 等未信任代理头。管理端认证也可来自脚本，不声称必定是网页。User-Agent 是客户端声明，不是设备证明。不存认证头、完整密钥或 Cookie。幂等重提交保留首次来源；旧任务显示未记录。
 
+## 热榜快照（第一期）
+
+热榜与搜索指数分开。数据来自免登录的 `https://aweme.snssdk.com/aweme/v1/hot/search/list/`，不走创作者中心，不使用浏览器 Cookie，也不占用每日 50 次搜索指数额度。热度不是搜索指数，也不是创作者中心综合指数。缺失为 null；未上榜不记为 0 或第 50 名。
+
+调度在网关进程内，默认关闭。只有环境变量 `INDEX_HUB_HOTLIST_ENABLED` 精确为 `1` 时才启动循环，约每 5 秒检查一次是否到期，到期才发请求。`INDEX_HUB_HOTLIST_INTERVAL_SECONDS` 默认 3600，小于 1800 时按 1800 执行，非法值回退 3600。没有更早的尝试记录时，开启后的第一轮会抓取；之后至少间隔上述秒数。每个上海自然日最多 48 次成功抓取。失败不补跑。HTTP 429、403 或响应不是 JSON 时暂停热榜，暂停状态写在 SQLite，重启后仍然有效。须管理员调用 `POST /api/v1/hot/resume`（需要 `X-Hub-Request: 1`）后才会再抓；恢复本身不会立刻补一次。
+
+| 方法 / 路径 | 权限 | 作用 |
+|---|---|---|
+| GET `/hot/latest` | read | 最近一次完整快照，不触发抓取 |
+| GET `/hot/word?sentence_id=` 或 `?word=` | read | 该话题实际上榜记录；两者只能填一个 |
+| POST `/hot/resume` | 仅管理登录 | 解除热榜暂停，不消耗搜索指数额度 |
+
+`GET /status` 增加 `hotlist`：`enabled`、`paused`、`interval_seconds`、`daily_success_limit`、`daily_successes`。搜索指数的 `daily_online_attempts` 与此无关。
+
+部署时不要在未确认前打开开关。开启步骤：只给 gateway 单元增加 `INDEX_HUB_HOTLIST_ENABLED=1`（间隔可选），然后重启 gateway。desktop 单元不用改，热榜不经过 Unix 桥。`hub.html` 由每次请求读盘，页面更新后刷新即可；调度和 API 随 gateway 进程生效。
+
 ## 扩展数据（试验接入）
 POST /api/v1/insights/queries：与 queries 相同的 Bearer/query 权限及 Idempotency-Key，增加 kind=related 或 audience，keywords 恰好一个；支持 start_date/end_date。每个模块独立任务、一次在线尝试，复用全局 50 次日限额、15 秒间隔与 24 小时缓存。结果通过 jobs/{id} 获取。
 GET /api/v1/insights?keyword=酵素&kind=related&start_date=2026-10-21&end_date=2026-10-27：仅历史读取；status=available 或 not_collected，result 含 data、metadata。关联词包含 content_related、search_related；画像包含 dimensions[].labels[].name/value/tgi。value 是接口原值，尚未核实百分比单位。无内容时不伪造数据。

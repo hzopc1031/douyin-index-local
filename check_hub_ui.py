@@ -73,6 +73,13 @@ def run(output=None):
                     elif path == 'insights':
                         kind = query['kind'][0]
                         data = dict(status=fixture[kind],result=dict(metadata=META,data=dict(search_related=RELATED,content_related=RELATED[10:]) if kind=='related' else dict(dimensions=AUDIENCE)))
+                    elif path == 'hot/latest':
+                        data = dict(board='word_list', fetched_at='2026-11-04T12:00:00+08:00', live_request=False,
+                                    note='热榜热度不是搜索指数，也不是创作者中心综合指数。',
+                                    items=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00'),
+                                           dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
+                    elif path == 'hot/word':
+                        data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
@@ -283,6 +290,17 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
                 page.locator('[data-platform=douyin]').click()
+                page.locator('[data-tab=hot]').click()
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert page.locator('#hotRows tr').nth(0).locator('td').nth(0).inner_text() == '1'
+                assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
+                assert page.locator('#hotRows tr').nth(1).locator('td').nth(0).inner_text() == '2'
+                assert page.locator('#hotRows tr').nth(1).locator('td').nth(2).inner_text() == '—'
+                page.locator('#hotSentence').fill('s1')
+                page.locator('#hotWordButton').click()
+                page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")
+                page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
                 page.locator('#submitButton').click()

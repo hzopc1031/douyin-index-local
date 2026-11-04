@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -136,8 +137,18 @@ class Store:
                 value TEXT,composite TEXT,fetched REAL,dataset TEXT,
                 PRIMARY KEY(platform,metric,region,keyword,day));
             CREATE TABLE IF NOT EXISTS insights(id TEXT PRIMARY KEY,qhash TEXT,fetched REAL,result TEXT);
+            CREATE TABLE IF NOT EXISTS hot_snapshots(
+                id TEXT NOT NULL, fetched REAL NOT NULL, board TEXT NOT NULL,
+                item_key TEXT NOT NULL, key_kind TEXT NOT NULL, sentence_id TEXT,
+                word TEXT NOT NULL, position INTEGER NOT NULL, hot_value TEXT,
+                label TEXT, event_time TEXT, video_count TEXT, sentence_tag TEXT,
+                word_type TEXT, group_id TEXT, source TEXT NOT NULL,
+                PRIMARY KEY(id, item_key));
             CREATE INDEX IF NOT EXISTS dataset_cache ON datasets(qhash,fetched);
             CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,created);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_fetch ON hot_snapshots(board, fetched);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_sentence ON hot_snapshots(sentence_id, fetched);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_word ON hot_snapshots(word, fetched);
         ''')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
@@ -482,3 +493,92 @@ class Store:
                 'keyword': keyword, 'region': '全国', 'unit': '指数', 'points': values,
                 'source': 'creator.douyin.com', 'live_request': False,
                 'note': '仅返回已保存数据；缺失为 null，搜索指数不是实际搜索次数。'}
+
+    def save_hot_snapshot(self, snapshot):
+        """Store one complete hot-list observation. Incomplete input is rejected."""
+        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True or snapshot.get('board') != 'word_list':
+            raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+        items = snapshot.get('items')
+        source = snapshot.get('source')
+        if not isinstance(items, list) or not items or not isinstance(source, str) or len(source) > 200:
+            raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+        try:
+            stamp = dt.datetime.fromisoformat(snapshot['fetched_at'])
+            if stamp.tzinfo is None:
+                raise ValueError
+            fetched = stamp.timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise HubError('incomplete_snapshot', '热榜采集时间无效，本次快照不入库。') from None
+        seen_words, seen_positions, seen_keys = set(), set(), set()
+        rows = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+            word, position = item.get('word'), item.get('position')
+            key, kind = item.get('item_key'), item.get('key_kind')
+            if (not isinstance(word, str) or not word or word in seen_words
+                    or type(position) is not int or position < 1 or position in seen_positions
+                    or kind not in ('sentence_id', 'word') or not isinstance(key, str) or key in seen_keys):
+                raise HubError('incomplete_snapshot', '热榜词或名次无法核验，本次快照不入库。')
+            sentence_id = item.get('sentence_id')
+            if kind == 'sentence_id' and (not isinstance(sentence_id, str) or not sentence_id or key != 'id:' + sentence_id):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+            if kind == 'word' and (sentence_id is not None or key != 'word:' + word):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+            seen_words.add(word)
+            seen_positions.add(position)
+            seen_keys.add(key)
+            heat = item.get('hot_value')
+            if heat is not None and (isinstance(heat, bool) or not isinstance(heat, (int, float)) or isinstance(heat, float) and not math.isfinite(heat) or heat < 0):
+                raise HubError('incomplete_snapshot', '热榜热度无法核验，本次快照不入库。')
+            group_id = item.get('group_id')
+            if group_id is not None and (not isinstance(group_id, str) or len(group_id) > 64):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+
+            def stored_int(value):
+                if value is None:
+                    return encode(None)
+                if isinstance(value, bool) or type(value) is not int:
+                    raise HubError('incomplete_snapshot', '热榜字段无法核验，本次快照不入库。')
+                return encode(value)
+
+            rows.append((key, kind, sentence_id, word, position, encode(heat),
+                         stored_int(item.get('label')), stored_int(item.get('event_time')),
+                         stored_int(item.get('video_count')), stored_int(item.get('sentence_tag')),
+                         stored_int(item.get('word_type')), group_id))
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.executemany('''INSERT INTO hot_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                                [(identifier, fetched, 'word_list', *row, source) for row in rows])
+        return identifier
+
+    @staticmethod
+    def _hot_item(row):
+        return {'item_key': row['item_key'], 'key_kind': row['key_kind'], 'sentence_id': row['sentence_id'],
+                'word': row['word'], 'position': row['position'], 'hot_value': json.loads(row['hot_value']),
+                'label': json.loads(row['label']), 'event_time': json.loads(row['event_time']),
+                'video_count': json.loads(row['video_count']), 'sentence_tag': json.loads(row['sentence_tag']),
+                'word_type': json.loads(row['word_type']), 'group_id': row['group_id'],
+                'fetched_at': dt.datetime.fromtimestamp(row['fetched'], TZ).isoformat()}
+
+    def latest_hot(self):
+        row = self.db.execute(
+            "SELECT id FROM hot_snapshots WHERE board='word_list' ORDER BY fetched DESC, id DESC LIMIT 1").fetchone()
+        if row is None:
+            return {'board': 'word_list', 'source': None, 'fetched_at': None, 'items': []}
+        rows = self.db.execute("SELECT * FROM hot_snapshots WHERE id=? ORDER BY position", (row['id'],)).fetchall()
+        return {'board': 'word_list', 'source': rows[0]['source'],
+                'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
+                'items': [self._hot_item(item) for item in rows]}
+
+    def hot_history(self, *, sentence_id=None, word=None):
+        if bool(sentence_id) == bool(word):
+            raise HubError('invalid_parameters', '请指定 sentence_id 或精确话题之一。')
+        if sentence_id is not None:
+            rows = self.db.execute(
+                "SELECT * FROM hot_snapshots WHERE sentence_id=? ORDER BY fetched DESC LIMIT 500", (sentence_id,))
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM hot_snapshots WHERE word=? ORDER BY fetched DESC LIMIT 500", (word,))
+        points = [self._hot_item(item) for item in rows][::-1]
+        return {'sentence_id': sentence_id, 'word': word, 'points': points}

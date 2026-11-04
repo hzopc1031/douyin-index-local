@@ -17,6 +17,7 @@ from hub_paths import state_dir
 
 from aiohttp import web
 import hub_bridge
+from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
 from sms_login import (FRAME_BASE64_LIMIT, SmsLoginError, TERMINAL, public_sms_status,
@@ -66,6 +67,26 @@ PARAMETER_ERRORS = {'invalid_query', 'invalid_dates', 'invalid_keywords', 'inval
 SAFE_ERRORS.update({code: '参数错误，请检查请求' for code in PARAMETER_ERRORS})
 SAFE_ERRORS['busy_requeue_exhausted'] = '浏览器长时间被占用，已放回队列多次仍未执行，未自动重试'
 PAUSING = {'browser_unavailable', 'authentication_required', 'verification_required', 'rate_limited', 'access_denied'}
+HOT_INTERVAL_FLOOR = 1800
+HOT_INTERVAL_DEFAULT = 3600
+HOT_DAILY_SUCCESS_LIMIT = 48
+HOT_PAUSE_CODES = frozenset({'rate_limited', 'access_denied', 'response_format'})
+HOT_POLL_SECONDS = 5
+HOT_NOTE = '热榜热度不是搜索指数，也不是创作者中心综合指数。缺失为 null。未上榜不记为 0 或第 50 名。'
+_HOT_ID = re.compile(r'[A-Za-z0-9_-]{1,64}')
+
+
+def hotlist_enabled():
+    return os.environ.get('INDEX_HUB_HOTLIST_ENABLED') == '1'
+
+
+def hotlist_interval_seconds():
+    raw = os.environ.get('INDEX_HUB_HOTLIST_INTERVAL_SECONDS', str(HOT_INTERVAL_DEFAULT))
+    try:
+        value = int(raw) if isinstance(raw, str) and raw.isascii() and raw.isdecimal() else HOT_INTERVAL_DEFAULT
+    except (TypeError, ValueError):
+        value = HOT_INTERVAL_DEFAULT
+    return max(HOT_INTERVAL_FLOOR, value)
 SMS_ERRORS = {
     'invalid_payload': (400, '请求字段无效。'), 'invalid_phone': (400, '请输入有效的手机号。'),
     'invalid_code': (400, '请输入 4 至 8 位数字验证码。'), 'invalid_text': (400, '仅允许 1 至 8 位数字或字母。'),
@@ -120,6 +141,8 @@ class Hub:
         self._sms_lock = asyncio.Lock()
         self.bridge = bridge
         self.worker_task = None
+        self.hotlist_task = None
+        self.hot_client_factory = HotListClient
 
     def _sms_pause(self, snapshot):
         paused = (self.store.get('paused') or {}).get('code')
@@ -317,17 +340,71 @@ class Hub:
                 self.store.set('worker_error', '任务处理暂不可用，请检查服务。')
             await asyncio.sleep(1)
 
+    async def run_hot_once(self, *, client=None, now=None):
+        """Fetch one hot-list snapshot. Does not use the search-index quota."""
+        if not hotlist_enabled():
+            return {'ok': False, 'code': 'disabled'}
+        if self.store.get('hot_paused'):
+            return {'ok': False, 'code': 'paused'}
+        now = time.time() if now is None else now
+        last = self.store.get('hot_last_attempt_at') or 0
+        if now - last < hotlist_interval_seconds():
+            return {'ok': False, 'code': 'interval'}
+        day = dt.datetime.fromtimestamp(now, TZ).date().isoformat()
+        counter = self.store.get('hot_daily') or {'date': day, 'count': 0}
+        if counter.get('date') != day:
+            counter = {'date': day, 'count': 0}
+        if counter.get('count', 0) >= HOT_DAILY_SUCCESS_LIMIT:
+            return {'ok': False, 'code': 'daily_limit'}
+        # Record the attempt before the request so a failure is not fetched again
+        # until the interval elapses. This does not touch the search-index counter.
+        self.store.set('hot_last_attempt_at', now)
+        owns_client = client is None
+        client = client or self.hot_client_factory()
+        try:
+            snapshot = await asyncio.to_thread(client.fetch)
+            self.store.save_hot_snapshot(snapshot)
+        except HotListError as exc:
+            if exc.code in HOT_PAUSE_CODES:
+                paused = {'code': exc.code, 'since': now}
+                if type(exc.http_status) is int:
+                    paused['http_status'] = exc.http_status
+                self.store.set('hot_paused', paused)
+                logger.warning('hotlist paused code=%s', exc.code)
+            else:
+                logger.warning('hotlist stopped code=%s', exc.code)
+            return {'ok': False, 'code': exc.code}
+        finally:
+            if owns_client:
+                client.close()
+        self.store.set('hot_daily', {'date': day, 'count': counter['count'] + 1})
+        self.store.set('hot_last_success_at', now)
+        return {'ok': True, 'fetched_at': snapshot['fetched_at']}
+
+    async def hotlist_worker(self):
+        while True:
+            try:
+                await self.run_hot_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error('hotlist %s', exc_summary(exc))
+            await asyncio.sleep(HOT_POLL_SECONDS)
+
     async def start(self, app):
         counts = self.store.interrupt_pending()
         logger.info('interrupt_pending requeued=%d interrupted=%d', counts['requeued'], counts['interrupted'])
         self.store.import_results(self.root / 'results')
         self.worker_task = asyncio.create_task(self.worker(), name='index-hub-worker')
+        if hotlist_enabled():
+            self.hotlist_task = asyncio.create_task(self.hotlist_worker(), name='index-hub-hotlist')
 
     async def close(self, app):
-        if self.worker_task:
-            self.worker_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.worker_task
+        for task in (self.worker_task, self.hotlist_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         self.store.close()
 
 
@@ -363,6 +440,21 @@ async def read_json(request):
         raise HubError('invalid_json', 'JSON 格式无效。') from None
 
 
+def _hotlist_status(store, day):
+    counter = store.get('hot_daily') or {'date': day, 'count': 0}
+    if not isinstance(counter, dict) or counter.get('date') != day:
+        successes = 0
+    else:
+        successes = counter.get('count') or 0
+    return {'enabled': hotlist_enabled(), 'paused': store.get('hot_paused'),
+            'interval_seconds': hotlist_interval_seconds(),
+            'daily_success_limit': HOT_DAILY_SUCCESS_LIMIT, 'daily_successes': successes,
+            'last_attempt_at': store.get('hot_last_attempt_at'),
+            'last_success_at': store.get('hot_last_success_at'),
+            'source': HOT_LIST_URL,
+            'note': '热榜调度默认关闭，与搜索指数每日 50 次分开计数。' + HOT_NOTE}
+
+
 def openapi():
     error = {'description': '结构化错误；不包含认证信息', 'content': {'application/json': {'schema': {'type': 'object'}}}}
     paths = {}
@@ -378,6 +470,8 @@ def openapi():
         ('/api/v1/insights/ranges', 'get', '列出全部已存扩展日期段及每段最近任务状态（只读）'),
         ('/api/v1/insights/queries', 'post', '提交扩展采集任务（试验接入）'),
         ('/api/v1/export.csv', 'get', '导出已存储趋势 CSV'),
+        ('/api/v1/hot/latest', 'get', '读取最近一次完整热榜快照，不触发抓取'),
+        ('/api/v1/hot/word', 'get', '读取一个话题的实际上榜记录，不触发抓取'),
     ]:
         operation = {'summary': summary, 'operationId': method + '_' + path.rsplit('/', 1)[-1].replace('.', '_').replace('{', '').replace('}', ''),
                      'responses': {'200': {'description': '成功'}, '400': error, '401': error, '403': error, '429': error}}
@@ -399,7 +493,13 @@ def openapi():
         if path.endswith(('series', 'export.csv')):
             operation['parameters'] = [{'in': 'query', 'name': k, 'required': k == 'keyword',
                                         'schema': {'type': 'string'}} for k in ('platform', 'keyword', 'start_date', 'end_date')]
+        if path == '/api/v1/hot/word':
+            operation['parameters'] = [{'in': 'query', 'name': name, 'required': False,
+                                        'schema': {'type': 'string'}} for name in ('sentence_id', 'word')]
         paths[path] = {method: operation}
+    paths['/api/v1/hot/resume'] = {'post': {
+        'summary': '人工恢复热榜调度。不立即补抓，不消耗搜索指数额度。',
+        'responses': {'200': {'description': '已恢复'}, '401': error, '403': error}}}
     for path, method in (('/api/v1/login/qr', 'get'), ('/api/v1/login/qr/image', 'get'),
                          ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
         paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
@@ -412,7 +512,7 @@ def openapi():
             'responses': {'200': {'description': '状态快照或 PNG；no-store'},
                           **{str(code): error for code in (400, 401, 403, 409, 429, 503)}}}}
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
-             'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
+             'description': '自用平台聚合接口。抖音搜索指数可用；热榜是独立快照，不是搜索指数。1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
             'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'},
                                                'BasicAuth': {'type': 'http', 'scheme': 'basic'}},
@@ -529,6 +629,7 @@ def mount(app, hub):
                       'limits': {'keywords': 5, 'days': 731, 'online_interval_seconds': 15,
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
+                      'hotlist': _hotlist_status(s, day),
                       'counts': {'datasets': s.db.execute('SELECT count(*) FROM datasets').fetchone()[0],
                                  'keywords': s.db.execute('SELECT count(DISTINCT keyword) FROM points').fetchone()[0],
                                  'points': s.db.execute('SELECT count(*) FROM points').fetchone()[0]}})
@@ -678,6 +779,37 @@ def mount(app, hub):
             s.set('worker_error', None)
         return reply({'ok': True, 'note': '已恢复。保留原有冷却间隔与每日上限；失败任务不会重试。'})
 
+    def hot_public(value):
+        return {**value, 'live_request': False, 'note': HOT_NOTE}
+
+    async def hot_latest(request):
+        require(request)
+        if request.query:
+            raise HubError('invalid_parameters', '最新热榜不接受查询参数。')
+        return reply(hot_public(s.latest_hot()))
+
+    async def hot_word(request):
+        require(request)
+        if set(request.query) - {'sentence_id', 'word'} or any(len(request.query.getall(key)) != 1 for key in request.query):
+            raise HubError('invalid_parameters', '请只提供一个 sentence_id 或一个精确话题。')
+        sentence_id, word = request.query.get('sentence_id'), request.query.get('word')
+        if bool(sentence_id) == bool(word):
+            raise HubError('invalid_parameters', '请指定 sentence_id 或精确话题之一。')
+        if sentence_id is not None and _HOT_ID.fullmatch(sentence_id) is None:
+            raise HubError('invalid_parameters', 'sentence_id 无效。')
+        if word is not None and (word != word.strip() or not 1 <= len(word) <= 200
+                                 or any(ord(char) < 32 or ord(char) == 127 for char in word)):
+            raise HubError('invalid_parameters', '话题须为 1—200 字的精确文本。')
+        history = s.hot_history(sentence_id=sentence_id, word=word)
+        history['note'] = HOT_NOTE + '仅返回实际上榜记录。'
+        history['live_request'] = False
+        return reply(history)
+
+    async def hot_resume(request):
+        require(request, admin=True)
+        s.set('hot_paused', None)
+        return reply({'ok': True, 'note': '已恢复热榜调度。不会立即补抓，仍受间隔和每日成功上限约束。'})
+
     async def schema(request):
         require(request)
         return reply(openapi())
@@ -704,6 +836,9 @@ def mount(app, hub):
     app.router.add_route('POST', '/api/v1/keys', keys)
     app.router.add_delete('/api/v1/keys/{key_id}', revoke)
     app.router.add_post('/api/v1/collection/resume', resume)
+    app.router.add_get('/api/v1/hot/latest', hot_latest)
+    app.router.add_get('/api/v1/hot/word', hot_word)
+    app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)
     app.on_cleanup.append(hub.close)
