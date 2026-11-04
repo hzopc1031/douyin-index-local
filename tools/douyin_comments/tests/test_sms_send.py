@@ -186,20 +186,3 @@ class SendTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body_read.is_set())
         self.assertEqual(result['outcome'], 'accepted')
         self.assertEqual(listeners, {})
-
-    async def test_session_acceptance_failure_and_quota_survive_restart(self):
-        for status, body, expected in CASES:
-            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
-                clock, browser = Clock(), DummyBrowser()
-                quota = SmsQuota(root, clock)
-                session = LoginSession(browser, quota, clock=clock)
-                browser.send.return_value = sms_result(status, body)
-                result = await session.act(dict(action='send', nonce=session.nonce, phone=PHONE))
-                self.assertEqual(result['state'], 'code_sent' if expected == 'accepted' else 'failed')
-                self.assertEqual(session.code_allowed, expected == 'accepted')
-                if expected != 'accepted':
-                    browser.close.assert_awaited_once()
-                with self.assertRaisesRegex(Exception, 'send_interval'):
-                    quota.reserve()
-                clock.value += 60
-                quota.reserve()

@@ -19,7 +19,7 @@ from .sms_state import LoginError, LoginSession, SmsQuota, TERMINAL, audit, fiel
 ERRORS = {'invalid_request', 'unauthorized', 'csrf', 'busy', 'replayed_action',
           'replayed_code', 'wrong_state', 'send_interval', 'send_hour_limit',
           'send_day_limit', 'quota_unavailable', 'login_failed', 'invalid_points',
-          'stale_frame', 'frame_unavailable', 'expired'}
+          'stale_frame', 'frame_unavailable', 'expired', 'qr_only'}
 HEADERS = {'Cache-Control': 'no-store, max-age=0', 'Pragma': 'no-cache',
            'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
            'X-Frame-Options': 'DENY', 'Cross-Origin-Resource-Policy': 'same-origin',
@@ -193,7 +193,7 @@ class WebApp:
             code = str(error)
             code = code if code in ERRORS else 'login_failed'
             audit('request_rejected', action=action, reason=code)
-            if (action == 'send' and code not in ('csrf', 'unauthorized', 'busy') and
+            if (action == 'send' and code not in ('csrf', 'unauthorized', 'busy', 'qr_only') and
                     self.session and not self.starting and not self.session.gate.locked() and
                     hasattr(self.session.browser, 'send_evidence')):
                 try:

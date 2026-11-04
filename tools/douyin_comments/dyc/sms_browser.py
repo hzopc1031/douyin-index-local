@@ -498,7 +498,7 @@ class SmsBrowser:
             except Exception:
                 pass
 
-    async def reset(self, mode="sms"):
+    async def reset(self, mode="qr"):
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.

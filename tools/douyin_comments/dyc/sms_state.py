@@ -115,7 +115,7 @@ class LoginSession:
         self.deadline = clock() + min(seconds, 600)
         self.state = "ready"
         self.before_verification = "ready"
-        self.mode = "sms"
+        self.mode = "qr"
         self.masked_phone = ""
         self.nonce = secrets.token_urlsafe(24)
         self.key = secrets.token_bytes(32)
@@ -198,8 +198,6 @@ class LoginSession:
                                ('status', 'frame', 'send', 'code', 'mode', 'pointer', 'cancel') else 'unknown'):
             if self.state not in TERMINAL and self.clock() >= self.deadline:
                 await self.fail(reason="login_expired", state="expired")
-            if self.state in TERMINAL:
-                return self.public()
             action = obj.get("action")
             schema = {"status": {"action"}, "frame": {"action"},
                       "send": {"action", "nonce", "phone"},
@@ -210,6 +208,10 @@ class LoginSession:
             if not isinstance(action, str) or action not in schema:
                 reject()
             fields(obj, schema[action])
+            if action in ("send", "code") or (action == "mode" and obj["mode"] == "sms"):
+                reject("qr_only")
+            if self.state in TERMINAL:
+                return self.public()
             if action not in ("status", "frame"):
                 if not isinstance(obj["nonce"], str) or not hmac.compare_digest(obj["nonce"], self.nonce):
                     reject("replayed_action")
@@ -224,7 +226,7 @@ class LoginSession:
                         await self.finish("cancelled")
                         return self.public()
                     if action == "mode":
-                        if obj["mode"] not in ("sms", "qr"):
+                        if obj["mode"] != "qr":
                             reject()
                         if self.stop_on_verification:
                             status = await self.browser.observe()
@@ -247,39 +249,7 @@ class LoginSession:
                     await self.poll()
                     if self.state in TERMINAL:
                         return self.public()
-                    if action == "send":
-                        if self.mode != "sms" or self.state not in ("ready", "code_sent"):
-                            reject("wrong_state")
-                        phone = secret(obj.pop("phone"), r"1[3-9][0-9]{9}")
-                        try:
-                            self.quota.reserve()
-                            self.next_send = self.clock() + 60
-                            self.code_allowed = False
-                            self.masked_phone = phone[:3] + "****" + phone[-4:]
-                            audit('send_admitted', session=self.audit_id, reason='quota_reserved')
-                            self.send_result = await self.browser.send(phone)
-                            if self.send_result['outcome'] not in ('accepted', 'code_sent_by_countdown'):
-                                await self.fail(reason='sms_' + self.send_result['outcome'])
-                                return self.public()
-                            self.code_allowed = True
-                            self.state = "code_sent"
-                        finally:
-                            phone = None
-                    elif action == "code":
-                        if self.mode != "sms" or self.state != "code_sent" or not self.code_allowed:
-                            reject("wrong_state")
-                        code = secret(obj.pop("code"), r"[0-9]{6}")
-                        try:
-                            digest = hmac.digest(self.key, code.encode(), "sha256")
-                            if digest in self.used_codes:
-                                reject("replayed_code")
-                            self.used_codes.add(digest)
-                            self.code_allowed = False
-                            self.state = "submitting"
-                            await self.browser.submit(code)
-                        finally:
-                            code = None
-                    elif action == "pointer":
+                    if action == "pointer":
                         if self.state != "verification":
                             reject("wrong_state")
                         await self.browser.pointer(obj["frame"], obj["points"])

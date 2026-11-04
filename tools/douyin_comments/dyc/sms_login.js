@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   let csrf = '', nonce = '', state = null, busy = false, gesture = null, frameId = '';
   const terminal = new Set(['succeeded', 'failed', 'expired', 'cancelled']);
-  const messages = {ready: '已就绪。可发短信或切换扫码。', code_sent: '平台已接受发码请求，请查看短信并输入验证码。',
+  const messages = {ready: '请用抖音 App 扫码登录。', code_sent: '平台已接受发码请求，请查看短信并输入验证码。',
     submitting: '已提交，正在等待官方登录确认。', verification: '请完成下方安全验证。',
     succeeded: '登录成功，dyc 登录态已保存。', failed: '登录已停止，可能遇到验证或访问限制。请联系管理员查看状态。',
     expired: '会话已到期并释放。', cancelled: '会话已结束并释放。'};
@@ -21,22 +21,17 @@
     playwright_start: '启动浏览器', browser_launch: '启动浏览器', isolated_context: '准备登录页面',
     redirect_guard: '准备登录保护', navigate: '打开登录页面', login_entry: '准备登录页面',
     phone_input_ready: '准备手机号输入', observe_login: '登录状态检查', send_sms: '发码检查'};
-  function clearInputs() { for (const id of ['token', 'phone', 'code']) $(id).value = ''; }
+  function clearInputs() { for (const id of ['token']) $(id).value = ''; }
   function controls() {
-    for (const id of ['unlock', 'send', 'submit', 'smsMode', 'qrMode', 'refresh', 'cancel'])
+    for (const id of ['unlock', 'refresh', 'cancel'])
       $(id).disabled = busy || Boolean(gesture) || terminal.has(state?.state);
     $('retry').disabled = busy || !state?.retryable;
-    if (state) {
-      $('send').disabled ||= state.resend_in > 0 || !['ready', 'code_sent'].includes(state.state);
-      $('submit').disabled ||= state.state !== 'code_sent';
-    }
+
   }
   function render(data) {
     state = data; nonce = data.nonce;
     $('status').textContent = data.preparation_failed ? '手机登录准备失败。可手动重新开始。' : messages[data.state] || '正在准备。';
     $('retry').hidden = !data.retryable;
-    $('modes').hidden = terminal.has(data.state);
-    $('sms').hidden = data.mode !== 'sms' || terminal.has(data.state);
     $('picture').hidden = !data.failure_image && (!(data.state === 'verification' || data.mode === 'qr') || terminal.has(data.state));
     if (data.failure_image) { $('frame').src = 'data:image/png;base64,' + data.failure_image; $('hint').textContent = '检测到安全验证，已停止；截图已脱敏。'; $('refresh').hidden = true; } else $('refresh').hidden = false;
     $('details').textContent = terminal.has(data.state) ? '' : `${data.phone || ''} 剩余 ${data.expires_in} 秒`;
@@ -91,8 +86,14 @@
     const data = await post('/api', {action: 'frame'});
     render(data);
     if (data.image) {
+      const src = 'data:image/png;base64,' + data.image;
+      if ($('frame').src !== src) {
+        const image = new Image();
+        image.src = src;
+        await image.decode();
+        $('frame').src = src;
+      }
       frameId = data.frame;
-      $('frame').src = 'data:image/png;base64,' + data.image;
       $('hint').textContent = data.state === 'verification'
         ? (data.prompt || '请在图中拖动滑块或点选。文字和输入框已遮盖。')
         : '请用抖音 App 扫码；可在另一屏幕展示此二维码。';
@@ -116,6 +117,7 @@
     const data = noToken ? {} : {token: $('token').value}; clearInputs();
     const result = await post('/auth', data); csrf = result.csrf;
     $('auth').hidden = true; $('login').hidden = false; render(result);
+    if (!terminal.has(result.state)) await frame();
   });
   $('unlock').onclick = unlock;
   if (noToken) {
@@ -124,14 +126,6 @@
     $('expiry').textContent = '登录会话最长 10 分钟；遇到安全验证或访问限制会停止。';
     unlock();
   }
-  $('send').onclick = () => run(async () => {
-    const data = {phone: $('phone').value}; clearInputs(); await action('send', data);
-  });
-  $('submit').onclick = () => run(async () => {
-    const data = {code: $('code').value}; clearInputs(); await action('code', data);
-  });
-  $('smsMode').onclick = () => run(() => action('mode', {mode: 'sms'}));
-  $('qrMode').onclick = () => run(() => action('mode', {mode: 'qr'}));
   $('retry').onclick = () => run(async () => {
     $('status').textContent = '正在重新准备手机登录，可能需要约 90 秒。';
     clearInputs(); await action('retry');

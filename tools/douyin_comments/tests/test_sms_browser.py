@@ -75,6 +75,7 @@ class SmsDomTests(unittest.IsolatedAsyncioTestCase):
         browser = SmsBrowser(self.profile, backend=self.backend, solver=solver)
         try:
             await browser.start()
+            await browser.reset(mode="sms")
             yield browser
         finally:
             await browser.close()

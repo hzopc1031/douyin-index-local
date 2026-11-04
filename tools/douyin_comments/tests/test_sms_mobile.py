@@ -16,7 +16,7 @@ from tests.test_sms_state import ORIGIN, PHONE, CODE, DummyBrowser
 
 
 class MobileTests(unittest.IsolatedAsyncioTestCase):
-    async def test_mobile_sms_flow_qr_toggle_and_no_browser_storage(self):
+    async def test_mobile_qr_flow_and_no_browser_storage(self):
         await self.mobile_flow(no_token=False)
 
     async def test_mobile_no_token_direct_login_and_refresh(self):
@@ -82,16 +82,16 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(requests.count(('/api','retry')),1)
                 self.assertEqual(requests.count(('/api','status')),0)
                 release.set()
-                await page.locator('#sms').wait_for(state='visible')
+                await page.locator('#picture').wait_for(state='visible')
                 self.assertTrue(await page.locator('#retry').is_hidden())
                 await page.clock.fast_forward(2600)
-                await page.wait_for_function("() => document.querySelector('#send').disabled === false")
+                await page.wait_for_function("() => !document.querySelector('#refresh').disabled")
                 self.assertGreaterEqual(requests.count(('/api','status')),1)
                 await page.locator('#cancel').click()
                 await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已结束')")
                 self.assertEqual(len(browsers),2)
                 await page.locator('#retry').click()
-                await page.locator('#sms').wait_for(state='visible')
+                await page.locator('#picture').wait_for(state='visible')
                 self.assertEqual(len(browsers),3)
                 app.session.deadline = 0
                 await app.tick()
@@ -100,33 +100,8 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('到期', await page.locator('#status').inner_text())
                 self.assertFalse(app.done.is_set())
                 await page.locator('#retry').click()
-                await page.locator('#sms').wait_for(state='visible')
+                await page.locator('#picture').wait_for(state='visible')
                 self.assertEqual(len(browsers),4)
-                app.session.send_result = dict(outcome='accepted', http_status=200,
-                    business_code='0', description='平台已接受发码请求')
-                app.session.state = 'code_sent'
-                await page.clock.fast_forward(2600)
-                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('平台已接受')")
-                browsers[-1].observe.side_effect = Stop(4, 'code_invalid')
-                browsers[-1].diagnose.return_value = {'reason': 'code_invalid'}
-                await page.clock.fast_forward(2600)
-                await page.locator('#retry').wait_for(state='visible')
-                self.assertIn('登录已停止', await page.locator('#status').inner_text())
-                self.assertNotIn('平台已接受', await page.locator('#status').inner_text())
-                self.assertIn('验证码错误', await page.locator('#details').inner_text())
-                self.assertTrue(await page.locator('#sms').is_hidden())
-                self.assertFalse(app.done.is_set())
-                for outcome, description in (('unconfirmed', '未确认已发送：15 秒内未捕获真实发码请求'),
-                        ('business_failed', '平台拒绝发码'), ('rate_limited', '平台限制发码频率'),
-                        ('verification_required', '平台要求安全验证')):
-                    app.session.send_result = dict(outcome=outcome, http_status=None,
-                        business_code=None, description=description)
-                    await page.reload()
-                    await page.locator('#retry').wait_for(state='visible')
-                    self.assertEqual(await page.locator('#status').inner_text(), description)
-                    self.assertNotIn('发码冷却', await page.locator('#details').inner_text())
-                    self.assertTrue(await page.locator('#sms').is_hidden())
-                    self.assertEqual(len(browsers), 4)
                 for browser in browsers: browser.send.assert_not_awaited()
             finally:
                 release.set()
@@ -205,23 +180,19 @@ class MobileTests(unittest.IsolatedAsyncioTestCase):
                     await page.locator('#login').wait_for(state='visible')
                     browser.start.assert_awaited_once()
                 self.assertEqual(await page.locator('#token').input_value(), '')
-                await page.locator('#qrMode').click()
                 await asyncio.wait_for(frame_requested.wait(), 5)
-                self.assertTrue(await page.locator('#smsMode').is_disabled())
                 release_frame.set()
                 await page.locator('#frame').wait_for(state='visible')
-                self.assertTrue(await page.locator('#sms').is_hidden())
-                await page.locator('#smsMode').click()
-                await page.locator('#sms').wait_for(state='visible')
-                await page.locator('#phone').fill(PHONE)
-                await page.locator('#send').click()
-                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('平台已接受发码')")
-                self.assertEqual(await page.locator('#phone').input_value(), '')
-                await page.locator('#code').fill(CODE)
-                await page.locator('#submit').click()
-                await page.wait_for_function("() => document.querySelector('#status').textContent.includes('已提交')")
-                self.assertEqual(await page.locator('#code').input_value(), '')
-                self.assertEqual(sent, [('/passport/web/send_code/', True), ('/submit', True)])
+                await page.wait_for_function("() => document.querySelector('#frame').src.startsWith('data:image/png;base64,')")
+                self.assertEqual(await page.locator('#smsMode, #phone, #send, #code, #submit').count(), 0)
+                await page.evaluate("""() => { window.frameChanges = 0;
+                  new MutationObserver(() => window.frameChanges++).observe(document.querySelector('#frame'), {attributes: true, attributeFilter: ['src']}); }""")
+                before = requests.count(('POST', '/api'))
+                await page.clock.fast_forward(2600)
+                await page.wait_for_function("() => !document.querySelector('#refresh').disabled")
+                self.assertGreaterEqual(requests.count(('POST', '/api')), before + 2)
+                self.assertEqual(await page.evaluate('window.frameChanges'), 0)
+                self.assertEqual(sent, [])
                 self.assertEqual(await page.evaluate('[localStorage.length, sessionStorage.length]'), [0, 0])
                 self.assertEqual(await page.evaluate('document.cookie'), 'other_tool=synthetic-theme')  # auth remains HttpOnly
                 self.assertNotIn(PHONE, ''.join(console))

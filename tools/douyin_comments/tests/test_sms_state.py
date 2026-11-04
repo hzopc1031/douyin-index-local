@@ -117,42 +117,18 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     async def action(self, action, **extra):
         return await self.session.act(dict(action=action, nonce=self.session.nonce, **extra))
 
-    async def test_nonce_code_replay_and_redacted_response(self):
-        nonce = self.session.nonce
-        result = await self.action('send', phone=PHONE)
-        self.assertNotIn(PHONE, json.dumps(result))
-        self.assertEqual(result['phone'], '139****1234')
-        with self.assertRaisesRegex(LoginError, 'replayed_action'):
-            await self.session.act(dict(action='send', nonce=nonce, phone=PHONE))
-        await self.action('code', code=CODE)
-        with self.assertRaisesRegex(LoginError, 'wrong_state'):
-            await self.action('code', code=CODE)
-        await self.action('mode', mode='sms')
-        self.clock.value += 60
-        await self.action('send', phone=PHONE)
-        with self.assertRaisesRegex(LoginError, 'replayed_code'):
-            await self.action('code', code=CODE)
-        self.browser.submit.assert_awaited_once_with(CODE)
-
-    async def test_serial_rejection_no_queued_credentials(self):
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def send(_):
-            entered.set()
-            await release.wait()
-            return dict(outcome="accepted")
-        self.browser.send.side_effect = send
-        pending = asyncio.create_task(self.action('send', phone=PHONE))
-        await entered.wait()
-        try:
-            with self.assertRaisesRegex(LoginError, 'busy'):
-                await self.action('send', phone=PHONE)
-        finally:
-            release.set()
-            await pending
-        self.browser.send.assert_awaited_once()
+    async def test_default_qr_and_reject_sms_actions(self):
+        self.assertEqual(self.session.public()['mode'], 'qr')
+        for action, extra in (('mode', {'mode': 'sms'}), ('send', {'phone': PHONE}), ('code', {'code': CODE})):
+            with self.subTest(action=action), self.assertRaisesRegex(LoginError, 'qr_only'):
+                await self.action(action, **extra)
+        self.browser.observe.assert_not_awaited()
+        self.browser.reset.assert_not_awaited()
+        self.browser.send.assert_not_awaited()
+        self.browser.submit.assert_not_awaited()
+        self.assertFalse((Path(self.tmp.name) / 'sms-attempts.json').exists())
 
     async def test_expiry_releases_browser_and_replay_material(self):
-        await self.action('send', phone=PHONE)
         self.clock.value += 601
         result = await self.session.act(dict(action='status'))
         self.assertEqual(result['state'], 'expired')
@@ -161,11 +137,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_pending_operation_closes_browser(self):
         entered = asyncio.Event()
-        async def send(_):
+        async def observe():
             entered.set()
             await asyncio.Event().wait()
-        self.browser.send.side_effect = send
-        pending = asyncio.create_task(self.action('send', phone=PHONE))
+        self.browser.observe.side_effect = observe
+        pending = asyncio.create_task(self.session.act(dict(action='status')))
         await entered.wait()
         pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
@@ -193,7 +169,6 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser.auto_step.assert_not_awaited()
 
     async def test_success_requires_browser_observation_and_persistence(self):
-        await self.action('send', phone=PHONE)
         self.browser.observe.return_value = 'succeeded'
         result = await self.session.act(dict(action='status'))
         self.assertEqual(result['state'], 'succeeded')
@@ -201,18 +176,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.browser.close.assert_awaited_once()
 
     async def test_verification_restores_actual_prior_state(self):
-        for state, mode, allowed in (('ready', 'sms', False), ('code_sent', 'sms', True),
-                                     ('submitting', 'sms', False), ('ready', 'qr', False)):
-            self.session.state, self.session.mode, self.session.code_allowed = state, mode, allowed
-            self.browser.observe.return_value = 'verification'
-            await self.session.poll()
-            await self.session.poll()  # repeated polls must not overwrite the saved state
-            self.browser.observe.return_value = 'pending'
-            await self.session.poll()
-            self.assertEqual(self.session.state, state)
-        self.session.mode = 'sms'
-        await self.action('send', phone=PHONE)
-        self.browser.send.assert_awaited_once()
+        self.browser.observe.return_value = 'verification'
+        await self.session.poll()
+        await self.session.poll()
+        self.browser.observe.return_value = 'pending'
+        await self.session.poll()
+        self.assertEqual(self.session.state, 'ready')
+
 
 
 class WebTests(unittest.IsolatedAsyncioTestCase):
@@ -319,12 +289,21 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_unresolved_verification_stops_without_send(self):
         self.session.stop_on_verification = True
         self.browser.observe.return_value = 'verification'
-        await self.session.act(dict(action='send', nonce=self.session.nonce, phone=PHONE))
+        await self.session.act(dict(action='status'))
         self.assertEqual(self.session.state, 'failed')
         self.browser.auto_step.assert_not_awaited()
         self.assertEqual(self.session.failure['reason'], 'challenge_detected')
         self.browser.send.assert_not_awaited()
         self.browser.close.assert_awaited_once()
+
+    async def test_http_rejects_sms_without_side_effects(self):
+        await self.auth()
+        for action, extra in (('mode', {'mode': 'sms'}), ('send', {'phone': PHONE}), ('code', {'code': CODE})):
+            status, _, data = await self.request('/api', dict(action=action, nonce=self.session.nonce, **extra))
+            self.assertEqual((status, data), (409, {'error': 'qr_only'}))
+        self.browser.observe.assert_not_awaited()
+        self.browser.send.assert_not_awaited()
+        self.browser.submit.assert_not_awaited()
 
     async def test_busy_rejection_audited_and_never_sends(self):
         await self.auth()
@@ -369,10 +348,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exceptions_and_responses_never_leak_secret(self):
         await self.auth()
-        self.browser.send.side_effect = RuntimeError(PHONE + CODE)
+        self.browser.observe.side_effect = RuntimeError(PHONE + CODE)
         logs = io.StringIO()
         with redirect_stdout(logs), redirect_stderr(logs):
-            result = await self.request('/api', dict(action='send', nonce=self.session.nonce, phone=PHONE))
+            result = await self.request('/api', dict(action='status'))
         serialized = json.dumps(result) + logs.getvalue()
         self.assertNotIn(PHONE, serialized)
         self.assertNotIn(CODE, serialized)

@@ -38,7 +38,7 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
             now += 4
         with patch('dyc.sms_browser.time', SimpleNamespace(monotonic=lambda: now)), \
              patch('dyc.sms_browser.asyncio.sleep', advance):
-            await browser.reset()
+            await browser.reset(mode="sms")
         self.assertEqual(now, 24)
         self.assertEqual(browser.stage_timeout, 60)
         browser.page.goto.assert_awaited_once()

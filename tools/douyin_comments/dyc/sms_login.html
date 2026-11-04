@@ -10,15 +10,7 @@
 <button id="unlock">进入登录</button></section>
 <section id="login" hidden>
 <button id="retry" hidden>重新开始</button>
-<nav id="modes"><button id="smsMode">短信登录</button><button id="qrMode">切换扫码</button></nav>
-<section id="sms"><label for="phone">中国大陆手机号（+86）</label>
-<input id="phone" type="password" inputmode="numeric" autocomplete="off" maxlength="11">
-<p>点击发码即向抖音请求验证码；登录即表示同意抖音用户协议和隐私政策。</p>
-<button id="send">发送验证码</button>
-<label for="code">6 位短信验证码</label>
-<input id="code" type="password" inputmode="numeric" autocomplete="off" maxlength="6">
-<button id="submit">提交验证码</button></section>
-<section id="picture" hidden><p id="hint">请在图中拖动滑块或点选。页面变化后请刷新截图。</p>
+<section id="picture" hidden><p id="hint">请用抖音 App 扫码登录。</p>
 <img id="frame" alt="登录验证或二维码" draggable="false">
 <button id="refresh">刷新截图</button></section>
 <p id="details"></p><button id="cancel" class="secondary">结束并释放登录会话</button>
