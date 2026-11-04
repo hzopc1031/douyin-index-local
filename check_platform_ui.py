@@ -9,6 +9,7 @@ with sync_playwright() as pw:
     browser = pw.chromium.launch()
     page = browser.new_page()
     writes = []
+    held = []
     def route(r):
         request = r.request
         path = urlparse(request.url).path
@@ -28,6 +29,9 @@ with sync_playwright() as pw:
             'insights/ranges': {'ranges': [], 'attempts': []},
             'insights': {'status': 'empty'},
         }
+        if name == 'series' and 'platform=douyin' in request.url and not held:
+            held.append(r)
+            return
         if request.method == 'POST':
             writes.append((name, request.post_data_json))
             data = {'job': {'id': 'mock', 'status': 'queued', 'cache_hit': False}}
@@ -41,6 +45,11 @@ with sync_playwright() as pw:
     assert page.locator('#resultTab-related').is_hidden()
     assert page.locator('#resultTab-audience').is_hidden()
     assert '合成来源' in page.locator('#chartMeta').inner_text()
+    assert held
+    held[0].fulfill(content_type='application/json', body=json.dumps({'platform': 'douyin', 'keyword': '杭州', 'points': [{'date': '2026-10-31', 'value': 999, 'composite_index': 1}]}))
+    page.wait_for_timeout(100)
+    assert '合成指数' in page.locator('#trendSummary').inner_text()
+    assert '999' not in page.locator('#trendSummary').inner_text()
     page.locator('#openQuery').click()
     assert page.locator('#queryPlatform').input_value() == 'fake_wechat'
     page.locator('#queryWords').fill('杭州')
