@@ -75,6 +75,28 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         browser.persist.assert_awaited_once()
         browser.close.assert_awaited_once()
 
+    async def test_frame_reacquires_current_creator_page(self):
+        browser = self.browser()
+        browser.page.is_closed.return_value = True
+        current = Mock(url=browser.url, is_closed=Mock(return_value=False))
+        browser.context.pages.append(current)
+        qr = Mock(screenshot=AsyncMock(return_value=b'png'))
+        with patch('dyc.sms_browser.ready_qr', AsyncMock(return_value=qr)):
+            result = await browser.frame(False)
+        self.assertIs(browser.page, current)
+        self.assertTrue(result['image'])
+
+    async def test_closed_qr_page_is_replaced_for_pending_redirect(self):
+        browser = self.browser()
+        old = browser.page
+        old.is_closed.return_value = True
+        current = Mock(url=browser.url, goto=AsyncMock(), is_closed=Mock(return_value=False))
+        browser.context.new_page = AsyncMock(return_value=current)
+        browser.qr_redirect = ('https://sso.douyin.com/redirect', 0, old, browser.url)
+        self.assertEqual(await browser.observe(), 'pending')
+        self.assertIs(browser.page, current)
+        current.goto.assert_awaited_once()
+
     async def test_real_challenge_on_old_page_blocks_new_page_success(self):
         browser = self.browser()
         browser.context.pages.append(Mock(url=browser.url, is_closed=Mock(return_value=False)))
@@ -86,6 +108,25 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         browser.fatal_reason = 'http_403'
         with self.assertRaises(Stop):
             await browser.observe()
+
+    async def test_redirect_challenge_blocks_other_creator_page(self):
+        browser = self.browser()
+        browser.context.pages.append(Mock(url=browser.url, is_closed=Mock(return_value=False)))
+        browser.page.url = 'https://sso.douyin.com/passport/'
+        browser._challenge = AsyncMock(return_value=object())
+        with self.assertRaises(Stop) as caught:
+            await browser.observe()
+        self.assertEqual(caught.exception.reason, 'verification_required')
+        browser.login_confirmed.assert_not_awaited()
+
+    async def test_redirect_challenge_checked_after_frame_changes_page(self):
+        browser = self.browser()
+        browser.context.pages.append(Mock(url='https://sso.douyin.com/passport/', is_closed=Mock(return_value=False)))
+        browser._challenge = AsyncMock(return_value=object())
+        with self.assertRaises(Stop) as caught:
+            await browser.observe()
+        self.assertEqual(caught.exception.reason, 'verification_required')
+        browser.login_confirmed.assert_not_awaited()
 
     async def test_earlier_page_can_succeed_and_pending_keeps_qr_page(self):
         browser = self.browser()
@@ -119,6 +160,25 @@ class QrTransientTests(unittest.IsolatedAsyncioTestCase):
         await app.tick()
         self.assertEqual(session.state, 'ready')
         browser.close.assert_not_awaited()
+
+    async def test_observation_timeout_at_deadline_records_expiration(self):
+        browser = self.browser()
+        now = [0]
+        async def timeout():
+            now[0] = 10
+            raise TimeoutError()
+        browser.observe = timeout
+        browser.close = AsyncMock()
+        browser.diagnose = AsyncMock(return_value={'reason': 'login_expired'})
+        session = LoginSession(browser, None, clock=lambda: now[0], seconds=10)
+        app = WebApp('https://dyc.invalid', '', lambda: session, clock=lambda: now[0])
+        app.session = session
+        with patch('dyc.sms_state.audit') as audit:
+            await app.tick()
+        self.assertEqual(session.state, 'expired')
+        self.assertEqual(session.failure['reason'], 'login_expired')
+        self.assertTrue(any(call.args[0] == 'session_end' for call in audit.call_args_list))
+        browser.diagnose.assert_awaited_once_with(None, 'login_expired')
 
     async def test_page_change_categories_are_transient(self):
         browser = self.browser()

@@ -226,9 +226,11 @@ class WebApp:
                 async with asyncio.timeout(max(.001, min(15, session.deadline-self.clock()))):
                     await session.poll()
             except Exception as error:
-                if not (isinstance(error, TimeoutError) and self.clock() < session.deadline and
+                if self.clock() >= session.deadline:
+                    await session.fail(reason='login_expired', state='expired')
+                elif not (isinstance(error, TimeoutError) and
                         getattr(session.browser, 'stage', '') == 'observe_login'):
-                    await session.fail(error, state='expired' if self.clock() >= session.deadline else 'failed')
+                    await session.fail(error)
         if session.state == 'succeeded':
             if self.terminal_at is None:
                 self.terminal_at = self.clock()

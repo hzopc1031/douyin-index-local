@@ -253,6 +253,79 @@ class CreatorLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(audit.call_args.kwargs['has_redirect'])
         self.assertNotIn('synthetic-secret', str(audit.call_args))
 
+    async def test_qr_status_shapes_and_safe_fields(self):
+        browser = SmsBrowser('/unused')
+        for body, expected in (({'status': 3}, 3), ({'data': {'status': '3'}}, 3),
+                               ({'data': {'data': {'status': 2}}}, 2)):
+            body.update(error_code='0', description='synthetic-secret', **{'synthetic-secret': 'hidden'})
+            with patch('dyc.sms_browser.audit') as audit:
+                await browser.qr_response(Mock(status=200, json=AsyncMock(return_value=body)))
+            fields = audit.call_args.kwargs
+            self.assertEqual(fields['status'], expected)
+            self.assertEqual(fields['error_code'], 0)
+            self.assertEqual(fields['description'], 'present')
+            self.assertNotIn('synthetic-secret', str(fields))
+
+    async def test_confirmed_redirect_follows_only_allowed_host(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url, is_closed=Mock(return_value=False), goto=AsyncMock())
+        browser.context = Mock(pages=[browser.page])
+        browser.challenge = AsyncMock(return_value=None)
+        browser.login_confirmed = AsyncMock(return_value=False)
+        browser.read_dom = AsyncMock(return_value=0)
+        redirect = 'https://sso.douyin.com/path?ticket=synthetic-secret'
+        with patch('dyc.sms_browser.audit'):
+            await browser.qr_response(Mock(status=200, json=AsyncMock(return_value={'data': {'status': '3', 'redirect_url': redirect}})))
+            url, stamp, page, original_url = browser.qr_redirect
+            browser.qr_redirect = (url, stamp - 3, page, original_url)
+            await browser.observe()
+        browser.page.goto.assert_awaited_once_with(redirect, wait_until='domcontentloaded', timeout=15000)
+        with patch('dyc.sms_browser.audit'):
+            await browser.qr_response(Mock(status=200, json=AsyncMock(return_value={'data': {'status': 3, 'redirect_url': 'https://evil.invalid/'}})))
+        self.assertIsNone(browser.qr_redirect)
+
+    async def test_redirect_waits_for_challenge_and_keeps_first_timestamp(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url, is_closed=Mock(return_value=False), goto=AsyncMock())
+        browser.context = Mock(pages=[browser.page])
+        browser.challenge = AsyncMock(return_value=object())
+        browser.login_confirmed = AsyncMock(return_value=False)
+        response = Mock(status=200, json=AsyncMock(return_value={'data': {
+            'status': 3, 'redirect_url': 'https://sso.douyin.com/redirect'}}))
+        with patch('dyc.sms_browser.audit'), patch('dyc.sms_browser.time.monotonic', return_value=10):
+            await browser.qr_response(response)
+            await browser.qr_response(response)
+            self.assertEqual(browser.qr_redirect[1], 10)
+            self.assertEqual(await browser.observe(), 'verification')
+        browser.page.goto.assert_not_awaited()
+
+    async def test_stale_response_cannot_queue_redirect_after_reset(self):
+        browser = SmsBrowser('/unused')
+        browser.page = Mock(url=browser.url)
+        browser.qr_generation = 1
+        response = Mock(status=200, json=AsyncMock(return_value={'data': {
+            'status': 3, 'redirect_url': 'https://sso.douyin.com/redirect'}}))
+        with patch('dyc.sms_browser.audit'):
+            await browser.qr_response(response, 0)
+        self.assertIsNone(browser.qr_redirect)
+
+    async def test_redirect_on_login_domain_reopens_creator(self):
+        browser = SmsBrowser('/unused')
+        original = Mock(url=browser.url, is_closed=Mock(return_value=False))
+        async def navigate(url, **kwargs):
+            original.url = url
+        original.goto = AsyncMock(side_effect=navigate)
+        creator = Mock(url=browser.url, goto=AsyncMock(), is_closed=Mock(return_value=False))
+        browser.page = original
+        browser.context = Mock(pages=[original], new_page=AsyncMock(return_value=creator))
+        browser.challenge = AsyncMock(return_value=None)
+        browser._challenge = AsyncMock(return_value=None)
+        browser.login_confirmed = AsyncMock(return_value=False)
+        browser.qr_redirect = ('https://sso.douyin.com/redirect', 0, original, browser.url)
+        await browser.observe()
+        creator.goto.assert_awaited_once_with(browser.url, wait_until='domcontentloaded', timeout=15000)
+        self.assertIs(browser.page, creator)
+
     async def test_main_site_challenge_stops_success(self):
         browser = SmsBrowser('/unused')
         browser.page = Mock(url=browser.url)

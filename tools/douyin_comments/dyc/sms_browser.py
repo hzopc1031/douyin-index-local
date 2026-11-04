@@ -177,6 +177,11 @@ class SmsBrowser:
         self.login_signals = {}
         self.login_signals_at = 0
         self.request_counts = {}
+        self.qr_redirect = None
+        self.qr_status = None
+        self.qr_generation = 0
+        self.qr_redirect_used = False
+        self.qr_requests = {}
 
     def count_request(self, url, outcome):
         host = (urlsplit(url).hostname or '').lower()
@@ -188,7 +193,14 @@ class SmsBrowser:
               count=self.request_counts[key])
 
     def request_failed(self, request):
+        self.qr_requests.pop(request, None)
         self.count_request(request.url, 'failed')
+
+    def request_started(self, request):
+        parsed = urlsplit(request.url)
+        if (parsed.scheme == 'https' and parsed.hostname == 'login.douyin.com' and
+                parsed.path.rstrip('/').endswith('/check_qrconnect')):
+            self.qr_requests[request] = self.qr_generation
 
     def step(self, name, condition, timeout):
         self.stage = name
@@ -401,6 +413,7 @@ class SmsBrowser:
             self.initial_sessions = {(c['name'], c['domain'], c['path']): c['value'] for c in initial
                                      if c['name'] in KEY_COOKIES}
             self.context.on('requestfailed', self.request_failed)
+            self.context.on('request', self.request_started)
             self.context.on('response', self.response)
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
             self.page.set_default_timeout(3000)
@@ -416,8 +429,9 @@ class SmsBrowser:
 
     def response(self, response):
         parsed = urlsplit(response.url)
-        if parsed.scheme == 'https' and parsed.path.rstrip('/').endswith('/check_qrconnect'):
-            task = asyncio.create_task(self.qr_response(response))
+        if (parsed.scheme == 'https' and parsed.hostname == 'login.douyin.com' and
+                parsed.path.rstrip('/').endswith('/check_qrconnect')):
+            task = asyncio.create_task(self.qr_response(response, self.qr_requests.pop(response.request, -1)))
             self.response_tasks.add(task)
             task.add_done_callback(self.response_tasks.discard)
         if response.request.resource_type == 'document':
@@ -430,23 +444,60 @@ class SmsBrowser:
             if self.abort_task is None:
                 self.abort_task = asyncio.create_task(self.context.close())
 
-    async def qr_response(self, response):
-        status, redirect = None, None
+    async def qr_response(self, response, generation=None):
+        if generation is None:
+            generation = self.qr_generation
+        status, redirect, error_code, description = None, None, None, 'missing'
+        objects = []
         try:
             async with asyncio.timeout(2):
                 body = await response.json()
             if type(body) is dict:
-                data = body.get('data') if type(body.get('data')) is dict else {}
-                value = data.get('status')
-                if type(value) in (str, int) and re.fullmatch(r'-?[0-9]{1,5}', str(value)):
-                    status = int(value)
-                redirect = any(key in obj for obj in (body, data) for key in ('redirect_url', 'redirectUrl'))
+                objects = [body]
+                while len(objects) < 4 and type(objects[-1].get('data')) is dict:
+                    objects.append(objects[-1]['data'])
+                for obj in reversed(objects):
+                    value = obj.get('status')
+                    if type(value) in (str, int) and str(value) in ('0', '1', '2', '3', '4', '5'):
+                        status = int(value)
+                        break
+                for obj in objects:
+                    value = obj.get('error_code')
+                    if type(value) in (str, int) and re.fullmatch(r'-?[0-9]{1,5}', str(value)):
+                        error_code = int(value)
+                    if 'description' in obj:
+                        description = 'empty' if obj['description'] in ('', None) else 'present'
+                    for key in ('redirect_url', 'redirectUrl'):
+                        if isinstance(obj.get(key), str) and obj[key]:
+                            redirect = obj[key]
         except Exception:
             pass
+        domain = 'none'
+        if redirect:
+            try:
+                parsed = urlsplit(redirect)
+                host = parsed.hostname or ''
+                domain = host if host in ('creator.douyin.com', 'www.douyin.com', 'login.douyin.com', 'sso.douyin.com') else 'other'
+                if (generation == self.qr_generation and not self.qr_redirect and not self.qr_redirect_used
+                        and status == 3 and parsed.scheme == 'https' and not parsed.username and not parsed.password
+                        and parsed.port in (None, 443) and in_domains(host, ('douyin.com', 'iesdouyin.com', 'snssdk.com', 'amemv.com', 'bytedance.com'))):
+                    self.qr_redirect = (redirect, time.monotonic(), self.page, self.page.url if self.page else '')
+            except ValueError:
+                domain = 'invalid'
+        known = {'data', 'status', 'error_code', 'description', 'message', 'code', 'status_code',
+                 'redirect_url', 'redirectUrl', 'token', 'ticket', 'qrcode_index_url', 'is_login'}
+        fields = [sorted({key if key in known else '[other]' for key in obj}) for obj in objects]
         audit('qrconnect_response', session=self.audit_id, http_status=response.status,
-              status=status, has_redirect=redirect)
+              status=status, error_code=error_code, description=description,
+              has_redirect=bool(redirect), redirect_domain=domain, fields=fields,
+              status_changed=status != self.qr_status)
+        self.qr_status = status
 
     async def reset(self, mode="qr"):
+        self.qr_generation += 1
+        self.qr_redirect = None
+        self.qr_redirect_used = False
+        self.qr_requests.clear()
         self.last_frame = None
         self.frame_token = ''
         # Destroy the DOM containing old inputs, without storing page state.
@@ -592,10 +643,23 @@ class SmsBrowser:
             pages = self.context.pages
             if not isinstance(pages, list):
                 pages = [self.page]
+            previous = self.page
+            for page in pages:
+                if page.is_closed() or page.url == 'about:blank' or urlsplit(page.url).netloc == urlsplit(self.url).netloc:
+                    continue
+                self.page = page
+                if self.login_redirect_page() and await self._challenge(redirect=True):
+                    raise Stop(3, 'verification_required')
+            self.page = previous
             pages = [page for page in pages if not page.is_closed() and
                      urlsplit(page.url).scheme == 'https' and
                      urlsplit(page.url).netloc == urlsplit(self.url).netloc]
             if not pages:
+                if self.qr_redirect and self.qr_redirect[2] and self.qr_redirect[2].is_closed():
+                    self.step('qr_redirect', 'replace closed QR page', 15)
+                    self.page = await self.context.new_page()
+                    await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
+                    return 'pending'
                 if not self.page.is_closed() and self.page.url != 'about:blank':
                     if not self.login_redirect_page():
                         self.require_origin()
@@ -603,7 +667,6 @@ class SmsBrowser:
                         raise Stop(3, 'verification_required')
                 await self.cookie_signals(None, None)
                 return 'pending'
-            previous = self.page
             for page in pages:
                 self.page = page
                 if await self.challenge():
@@ -613,6 +676,24 @@ class SmsBrowser:
                 if await self.login_confirmed():
                     return 'succeeded'
             self.page = previous if previous in pages else pages[-1]
+            if self.qr_redirect and time.monotonic() - self.qr_redirect[1] >= 2:
+                redirect, _, original, original_url = self.qr_redirect
+                target = (original if original in pages and original.url == original_url else
+                          pages[-1] if original and original.is_closed() else None)
+                if target:
+                    self.qr_redirect = None
+                    self.qr_redirect_used = True
+                    self.page = target
+                    self.step('qr_redirect', 'confirmed QR redirect navigation', 15)
+                    await target.goto(redirect, wait_until='domcontentloaded', timeout=15000)
+                    if (not target.is_closed() and self.login_redirect_page() and
+                            urlsplit(target.url).netloc != urlsplit(self.url).netloc):
+                        if await self._challenge(redirect=True):
+                            raise Stop(3, 'verification_required')
+                        page = await self.context.new_page()
+                        await page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
+                        self.page = page
+                    return 'pending'
             if await self.read_dom('code_error_visible', lambda: self.page.get_by_text(
                     '验证码错误', exact=False).filter(visible=True).count()):
                 raise Stop(4, 'code_invalid')
@@ -1096,6 +1177,14 @@ class SmsBrowser:
         return hashlib.sha256(capture.png).digest(), capture.metadata, capture.prompt
 
     async def frame(self, verification):
+        if (self.page.is_closed() or self.page.url == 'about:blank' or
+                (not self.fatal and self.login_redirect_page() and
+                 urlsplit(self.page.url).netloc != urlsplit(self.url).netloc)):
+            pages = [page for page in self.context.pages if not page.is_closed() and
+                     urlsplit(page.url).scheme == 'https' and
+                     urlsplit(page.url).netloc == urlsplit(self.url).netloc]
+            if pages:
+                self.page = pages[-1]
         if self.page.is_closed() or self.page.url == 'about:blank':
             reject('frame_unavailable')
         if not self.fatal and self.page.url != self.url and self.login_redirect_page() and \
@@ -1236,6 +1325,8 @@ class SmsBrowser:
             task.cancel()
         await asyncio.gather(*self.response_tasks, return_exceptions=True)
         self.private_values.clear()
+        self.qr_redirect = None
+        self.qr_requests.clear()
         self.initial_sessions.clear()
         self.last_frame = None
         self.frame_token = ''
