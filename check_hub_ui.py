@@ -80,6 +80,18 @@ def run(output=None):
                                            dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
+                    elif path == 'groups' and request.method == 'GET':
+                        data = dict(groups=[dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])],
+                                    note='工作台热度分，不是搜索次数，也不是抖音综合指数。')
+                    elif path.startswith('groups/') and path.endswith('/score'):
+                        data = dict(note='工作台热度分，不是搜索次数，也不是抖音综合指数。',
+                                    weights=dict(search=0.7, hot=0.3),
+                                    search=dict(score=None, missing=[dict(day='2026-11-03', keyword='西湖')]),
+                                    hot=dict(score=None, snapshot_status='available',
+                                             members=[dict(keyword='杭州', status='exact', ratio=1),
+                                                      dict(keyword='西湖', status='未上榜', ratio=None)],
+                                             substring_hits=[dict(keyword='西湖', word='西湖醋鱼')]),
+                                    fusion=dict(score=None))
                     elif path == 'hot/rising':
                         data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
                                     current_fetched_at='2026-11-04T12:00:00+08:00', baseline_fetched_at=None,
@@ -316,6 +328,15 @@ def run(output=None):
                 assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
+                page.locator('[data-tab=groups]').click()
+                page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
+                assert '工作台热度分' in page.locator('#groupIntro').inner_text()
+                assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
+                page.locator('#groupScoreButton').click()
+                page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('未上榜')")
+                assert '0.7' in page.locator('#groupWeights').inner_text()
+                assert page.locator('#groupFusionScore').inner_text() == '—'
+                assert '西湖醋鱼' in page.locator('#groupMembers').inner_text()
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()

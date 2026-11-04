@@ -164,7 +164,24 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 阈值环境变量：`INDEX_HUB_RISING_MIN_AGE_SECONDS`、`INDEX_HUB_RISING_MAX_AGE_SECONDS`、`INDEX_HUB_RISING_LOOKBACK_SECONDS`、`INDEX_HUB_RISING_RANK_RISE`、`INDEX_HUB_RISING_RANK_MAX`、`INDEX_HUB_RISING_HEAT_PCT`、`INDEX_HUB_RISING_HEAT_DELTA`、`INDEX_HUB_RISING_Z_MIN_SAMPLES`、`INDEX_HUB_RISING_Z_MIN`。非法值回退默认。settings 键 `hot_rising_thresholds` 里字段合法时覆盖对应环境变量。若最小基线年龄大于最大年龄，这两个字段回退默认。接口和页面都返回实际生效的阈值。
 
-部署时不要在未确认前打开开关。开启步骤：只给 gateway 单元增加 `INDEX_HUB_HOTLIST_ENABLED=1`（间隔可选），然后重启 gateway。desktop 单元不用改，热榜不经过 Unix 桥。`hub.html` 由每次请求读盘，页面更新后刷新即可；调度和 API 随 gateway 进程生效。
+部署时不要在未确认前打开开关。开启步骤：只给 gateway 单元增加 `INDEX_HUB_HOTLIST_ENABLED=1`（间隔可选），然后重启 gateway。desktop 单元不用改，热榜不经过 Unix 桥。`hub.html` 由每次请求读盘，页面更新后刷新即可；调度和 API 随 gateway 进程生效。从 `server-snapshot-2026-10-30` 升到本分支的完整步骤见 [docs/UPGRADE.md](docs/UPGRADE.md)。
+
+## 关键词组（第三期）
+
+`keyword_groups` 只保存组名和关键词。三个分数在读取时计算，不写入 `points.composite`，不创建采集任务，不增加每日 50 次额度。搜索指数仍由用户在趋势页或 `POST /queries` 手动提交。
+
+| 方法 / 路径 | 权限 | 作用 |
+|---|---|---|
+| GET `/groups` | read | 列出关键词组 |
+| POST `/groups` | query，或带管理登录 | 创建。管理员 POST 仍要 `X-Hub-Request: 1` |
+| DELETE `/groups/{id}` | query，或带管理登录 | 删除组，不删除已存搜索指数 |
+| GET `/groups/{id}/score` | read | 计算三个分数 |
+
+搜索指数分：同一日历日每个词都有非空搜索指数才计算。当前日取最新的齐全日，基线取最早的齐全日并记为 100。基线合计为 0 时不归一化，搜索分为 null，原始合计仍返回。没有齐全日时搜索分为 null，并列出参考日缺了哪些词。
+
+热榜分：没有完整快照时为 null，这时不能把词标成未上榜。有快照时，精确相等的词用 `hot_value / 榜内最大热度`，全组都有正热度才取平均再乘 100。任一未精确上榜或热度缺失，热榜分为 null；未上榜词单独列出。子串关系只出现在 `substring_hits`，不进入分数。
+
+融合分：搜索分和热榜分都有值时为 `search_weight × 搜索分 + hot_weight × 热榜分`，否则 null。默认权重 0.7 和 0.3。环境变量 `INDEX_HUB_GROUP_SEARCH_WEIGHT`、`INDEX_HUB_GROUP_HOT_WEIGHT` 取 0 到 1 的有限数；settings 键 `group_score_weights` 的合法字段再覆盖。页面显示实际权重。文案固定为工作台热度分，不是搜索次数，也不是抖音综合指数。
 
 ## 扩展数据（试验接入）
 POST /api/v1/insights/queries：与 queries 相同的 Bearer/query 权限及 Idempotency-Key，增加 kind=related 或 audience，keywords 恰好一个；支持 start_date/end_date。每个模块独立任务、一次在线尝试，复用全局 50 次日限额、15 秒间隔与 24 小时缓存。结果通过 jobs/{id} 获取。

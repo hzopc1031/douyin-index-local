@@ -149,6 +149,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS hot_snapshots_fetch ON hot_snapshots(board, fetched);
             CREATE INDEX IF NOT EXISTS hot_snapshots_sentence ON hot_snapshots(sentence_id, fetched);
             CREATE INDEX IF NOT EXISTS hot_snapshots_word ON hot_snapshots(word, fetched);
+            CREATE TABLE IF NOT EXISTS keyword_groups(
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, keywords TEXT NOT NULL, created REAL NOT NULL);
         ''')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
@@ -582,3 +584,32 @@ class Store:
                 "SELECT * FROM hot_snapshots WHERE word=? ORDER BY fetched DESC LIMIT 500", (word,))
         points = [self._hot_item(item) for item in rows][::-1]
         return {'sentence_id': sentence_id, 'word': word, 'points': points}
+
+    @staticmethod
+    def _group(row):
+        return {'id': row['id'], 'name': row['name'], 'keywords': json.loads(row['keywords']),
+                'created': row['created']}
+
+    def create_group(self, name, keywords):
+        if self.db.execute('SELECT COUNT(*) FROM keyword_groups').fetchone()[0] >= 100:
+            raise HubError('group_limit', '关键词组已达 100 个上限。', 429)
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.execute('INSERT INTO keyword_groups VALUES(?,?,?,?)',
+                            (identifier, name, encode(keywords), time.time()))
+        return self.get_group(identifier)
+
+    def list_groups(self):
+        rows = self.db.execute('SELECT * FROM keyword_groups ORDER BY created DESC, id DESC')
+        return [self._group(row) for row in rows]
+
+    def get_group(self, identifier):
+        row = self.db.execute('SELECT * FROM keyword_groups WHERE id=?', (identifier,)).fetchone()
+        if row is None:
+            raise HubError('group_not_found', '关键词组不存在。', 404)
+        return self._group(row)
+
+    def delete_group(self, identifier):
+        self.get_group(identifier)
+        with self.db:
+            self.db.execute('DELETE FROM keyword_groups WHERE id=?', (identifier,))

@@ -17,6 +17,7 @@ from hub_paths import state_dir
 
 from aiohttp import web
 import hub_bridge
+from group_score import GROUP_NOTE, group_score, validate_group
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
@@ -502,6 +503,20 @@ def openapi():
     paths['/api/v1/hot/resume'] = {'post': {
         'summary': '人工恢复热榜调度。不立即补抓，不消耗搜索指数额度。',
         'responses': {'200': {'description': '已恢复'}, '401': error, '403': error}}}
+    paths['/api/v1/groups'] = {
+        'get': {'summary': '列出关键词组，不计算分数也不触发采集',
+                'responses': {'200': {'description': '成功'}, '401': error, '403': error}},
+        'post': {'summary': '创建关键词组。不提交搜索指数任务。',
+                 'requestBody': {'required': True, 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                 'responses': {'201': {'description': '已创建'}, '400': error, '401': error, '403': error}}}
+    paths['/api/v1/groups/{id}'] = {
+        'delete': {'summary': '删除关键词组，不删除已保存的搜索指数',
+                   'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
+                   'responses': {'200': {'description': '已删除'}, '401': error, '403': error, '404': error}}}
+    paths['/api/v1/groups/{id}/score'] = {
+        'get': {'summary': '用已保存数据计算工作台热度分，不触发采集',
+                'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
+                'responses': {'200': {'description': '成功'}, '401': error, '403': error, '404': error}}}
     for path, method in (('/api/v1/login/qr', 'get'), ('/api/v1/login/qr/image', 'get'),
                          ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
         paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
@@ -815,6 +830,30 @@ def mount(app, hub):
         report.update(live_request=False, note=RISING_NOTE)
         return reply(report)
 
+    def group_id(request):
+        identifier = request.match_info['id']
+        if re.fullmatch(r'[0-9a-f]{32}', identifier) is None:
+            raise HubError('group_not_found', '关键词组不存在。', 404)
+        return identifier
+
+    async def groups(request):
+        if request.method == 'GET':
+            require(request)
+            return reply({'groups': s.list_groups(), 'live_request': False, 'note': GROUP_NOTE})
+        require(request, 'query')
+        name, keywords = validate_group(await read_json(request))
+        return reply({'group': s.create_group(name, keywords), 'live_request': False,
+                      'note': '已保存关键词组，未提交搜索指数任务。'}, 201)
+
+    async def group_delete(request):
+        require(request, 'query')
+        s.delete_group(group_id(request))
+        return reply({'ok': True, 'live_request': False})
+
+    async def group_score_view(request):
+        require(request)
+        return reply(group_score(s, s.get_group(group_id(request))))
+
     async def hot_resume(request):
         require(request, admin=True)
         s.set('hot_paused', None)
@@ -849,6 +888,10 @@ def mount(app, hub):
     app.router.add_get('/api/v1/hot/latest', hot_latest)
     app.router.add_get('/api/v1/hot/word', hot_word)
     app.router.add_get('/api/v1/hot/rising', hot_rising)
+    app.router.add_get('/api/v1/groups', groups)
+    app.router.add_post('/api/v1/groups', groups)
+    app.router.add_delete('/api/v1/groups/{id}', group_delete)
+    app.router.add_get('/api/v1/groups/{id}/score', group_score_view)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)
