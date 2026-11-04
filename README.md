@@ -1,6 +1,6 @@
 # 抖音搜索指数本地小批量验证工具
 
-新增腾讯云运行版本：**指数工作台 / Index Atlas**，提供自用网页、SQLite 历史库、第三方 Bearer API Key、异步任务和 OpenAPI 文档。当前已接入抖音搜索指数；百度与 Google Trends 明确显示待接入。操作和接口说明见 [HUB_API.md](HUB_API.md)。
+新增腾讯云运行版本：**指数工作台 / Index Atlas**，提供自用网页、SQLite 历史库、第三方 Bearer API Key、异步任务和 OpenAPI 文档。当前已接入抖音搜索指数；百度已接入离线适配，真实传输尚未启用；Google Trends 待接入。百度范围与限额见 [BAIDU_P0.md](BAIDU_P0.md)，操作和接口说明见 [HUB_API.md](HUB_API.md)。
 
 新增实验入口：[外部设备登录、EC2 无浏览器单次查询](CLOUD_POC.md)。
 `login_transfer.py` 在另一台电脑打开官方登录页，人用手机扫码；会话通过已验证的 SSH 直接进入 EC2 上 `cloud_probe.py` 的内存。EC2 不安装浏览器，只执行一次单词七天查询并清除会话。此入口已通过离线测试，尚未完成真实跨设备登录取数；不代表长期登录保持或登录设备断网运行已验证。
