@@ -1,5 +1,6 @@
 async (query) => {
   const fail = status => ({status});
+  if (location.origin !== query._origin) return fail('network_error');
   const deadline = promise => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error()), 25000))]);
   const get = async (path, headers = {}) => {
     const controller = new AbortController();

@@ -61,10 +61,10 @@ async def browser_status(hub):
 
 def status_snapshot(store):
     config = limits()
-    return {'browser': 'login_required', 'login_state': '待登录', 'live_enabled': False,
+    return {'browser': 'login_required', 'login_state': '待登录', 'live_enabled': True,
             'paused': store.get('baidu.paused'), 'daily': daily(store),
             'cooldown_remaining_seconds': max(0, math.ceil(store.get('baidu.next_attempt_at', 0)-time.time())),
-            'limits': config, 'note': '传输尚未启用；额度为工程保护，不是官方配额。'}
+            'limits': config, 'note': '额度为工程保护，不是官方配额。'}
 
 
 async def status(hub):

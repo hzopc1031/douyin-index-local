@@ -59,6 +59,7 @@ class BaiduBrowser:
         self.root = root
         self.idle_seconds = idle_seconds
         self._queue = queue.Queue()
+        self.started = False
         self._thread = threading.Thread(target=self._run, name='baidu-browser', daemon=True)
         self._thread.start()
 
@@ -90,6 +91,7 @@ class BaiduBrowser:
                     if lock:
                         lock.release()
                     context = playwright = lock = None
+                    self.started = False
 
         while True:
             try:
@@ -116,6 +118,7 @@ class BaiduBrowser:
                     lock = ProfileLock(profile).acquire()
                     playwright = sync_playwright().start()
                     context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+                    self.started = True
                 result.put((True, action(context)))
             except Exception as exc:
                 if context is None:
@@ -140,8 +143,47 @@ class PageTransport:
         if (current.scheme, current.netloc) != (expected.scheme, expected.netloc):
             raise baidu_adapter.BaiduError('network_error')
         script = Path(__file__).with_name('baidu_page.js').read_text(encoding='utf-8')
-        result = self.page.evaluate(script, query)
+        result = self.page.evaluate(script, {**query, '_origin': self.origin})
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
             raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
         return result.get('rows')
+
+
+_browser = None
+_browser_guard = threading.Lock()
+
+
+def browser():
+    global _browser
+    with _browser_guard:
+        if _browser is None:
+            _browser = BaiduBrowser()
+        return _browser
+
+
+def _page(context):
+    page = context.pages[0] if context.pages else context.new_page()
+    if not page.url.startswith('https://index.baidu.com/'):
+        page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
+    return page
+
+
+def login_open(context):
+    page = _page(context)
+    page.bring_to_front()
+    login = page.get_by_text('登录', exact=True).first
+    if login.is_visible(timeout=1000):
+        login.click(timeout=3000)
+    return {'ok': True, 'state': 'login_required'}
+
+
+def status(context):
+    page = _page(context)
+    state = page.evaluate('''() => {
+      if (location.origin !== 'https://index.baidu.com') return 'login_required';
+      if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return 'signature_unavailable';
+      const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+      return [...document.querySelectorAll('a,button,span,div')].some(e => visible(e) && e.textContent.trim() === '退出登录') ? 'browser_ready' : 'login_required';
+    }''')
+    return {'ok': True, 'state': state, 'live_enabled': True}

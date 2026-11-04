@@ -249,20 +249,33 @@ def public_result(result):
 
 
 def bridge_command(command, payload=None):
-    """Fail closed until the separate off-record window has a verified transport."""
+    import baidu_browser
     if command == 'baidu_status':
-        return {'ok': True, 'state': 'login_required', 'login_state': 'not_connected', 'live_enabled': False}
-    validate_query(payload)
-    return {'ok': False, 'code': 'login_required'}
+        instance = baidu_browser.browser()
+        if not instance.started:
+            return {'ok': True, 'state': 'login_required', 'live_enabled': True}
+        return instance.call(baidu_browser.status)
+    if command == 'baidu_login_open':
+        return baidu_browser.browser().call(baidu_browser.login_open)
+    query = validate_query(payload)
+    import hub_baidu
+    try:
+        def run(context):
+            page = baidu_browser._page(context)
+            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'])
+            return {'ok': True, **result}
+        return baidu_browser.browser().call(run)
+    except BaiduError as exc:
+        return {'ok': False, 'code': exc.code}
 
 
 class BaiduAdapter:
-    description = {'id': 'baidu', 'name': '百度指数', 'available': True, 'live_enabled': False,
+    description = {'id': 'baidu', 'name': '百度指数', 'available': True, 'live_enabled': True,
                    'metric': 'search_index', 'metric_name': '整体搜索指数', 'unit': '指数',
                    'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': [],
-                   'description': '全国百度搜索指数；传输尚未启用，指数不等于搜索次数。'}
+                   'description': '全国百度搜索指数；指数不等于搜索次数。'}
 
-    bridge_commands = ('baidu_status', 'baidu_query')
+    bridge_commands = ('baidu_status', 'baidu_query', 'baidu_login_open')
     dispatch_bridge = staticmethod(bridge_command)
 
     def initialize(self, store):
