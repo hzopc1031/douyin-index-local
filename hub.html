@@ -85,18 +85,26 @@ document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>tab(b.dataset.t
 const fmt=t=>t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}):'—';
 const statusName=s=>({queued:'等待执行',running:'取数中',succeeded:'已完成',partial:'数据不完整',failed:'失败',no_data:'无数据'})[s]||s;
 function badgeStatus(s){return '<span class="status '+esc(s)+'">'+esc(statusName(s))+'</span>'}
+function platformInfo(id=chosenPlatform){return platforms.find(p=>p.id===id)||{}}
+function platformModules(id=chosenPlatform){return id==='douyin'?(platformInfo(id).modules||['related','audience']):[]}
 function drawPlatforms(){
+ const selected=$('#queryPlatform').value;
+ $('#queryPlatform').innerHTML=platforms.map(p=>'<option value="'+esc(p.id)+'" '+(p.available?'':'disabled')+'>'+esc(p.id==='douyin'?'抖音搜索指数':p.name)+(p.available?'':' · 待接入')+'</option>').join('');
+ $('#queryPlatform').value=platforms.some(p=>p.id===selected&&p.available)?selected:(platformInfo().available?chosenPlatform:'douyin');
+ for(const kind of ['related','audience']){const visible=platformModules().includes(kind);const tab=$('#resultTab-'+kind);if(!visible&&tab.getAttribute('aria-selected')==='true')resultTab('summary');tab.hidden=!visible;document.querySelector('[data-result-link="'+kind+'"]').closest('article').hidden=!visible;}
+
  $('#platformChips').innerHTML=platforms.map(p=>'<button class="chip '+(chosenPlatform===p.id?'active':'')+'" data-platform="'+esc(p.id)+'">'+esc(p.name)+(p.available?'':'<small>待接入</small>')+'</button>').join('');
  document.querySelectorAll('[data-platform]').forEach(b=>b.onclick=()=>{chosenPlatform=b.dataset.platform;drawPlatforms();Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message))});
- $('#platformList').innerHTML=platforms.map((p,i)=>'<div class="platformrow '+(p.available?'':'pending')+'"><span class="platformicon">'+['抖','百','G'][i]+'</span><div><strong>'+esc(p.name)+'</strong><small>'+esc(p.available?p.metric_name+' · 全国':'接入准备中')+'</small></div><span class="badge '+(p.available?'':'warn')+'">'+(p.available?'已接入':'待接入')+'</span></div>').join('');
- $('#connectionCards').innerHTML=platforms.map(p=>'<div class="card platformpreview"><div class="topline"><h2>'+esc(p.name)+'</h2><span class="badge '+(p.available?'':'warn')+'">'+(p.available?'已接入':'待接入')+'</span></div><p class="intro">'+esc(p.description)+'</p><div class="pendingbox">'+(p.available?'指标：搜索指数<br>范围：全国 / 抖音<br>取数窗口：最近两年自定义日期，每批最多五词<br>认证：腾讯服务器官方浏览器扫码<br>会话失效后由用户处理，服务不绕过平台验证。':'接入后将独立展示来源、地区、时间窗口与指标解释；目前没有该平台数据。')+'</div></div>').join('');
+ $('#platformList').innerHTML=platforms.map((p,i)=>'<div class="platformrow '+(p.available?'':'pending')+'"><span class="platformicon">'+(['抖','百','G'][i]||p.name[0])+'</span><div><strong>'+esc(p.name)+'</strong><small>'+esc(p.available?p.metric_name+' · '+(p.region||''):'接入准备中')+'</small></div><span class="badge '+(p.available?'':'warn')+'">'+(p.available?'已接入':'待接入')+'</span></div>').join('');
+ $('#connectionCards').innerHTML=platforms.map(p=>'<div class="card platformpreview"><div class="topline"><h2>'+esc(p.name)+'</h2><span class="badge '+(p.available?'':'warn')+'">'+(p.available?'已接入':'待接入')+'</span></div><p class="intro">'+esc(p.description)+'</p><div class="pendingbox">'+(p.available?(p.id==='douyin'?'指标：搜索指数<br>范围：全国 / 抖音<br>取数窗口：最近两年自定义日期，每批最多五词<br>认证：腾讯服务器官方浏览器扫码<br>会话失效后由用户处理，服务不绕过平台验证。':'指标：'+esc(p.metric_name||'')+'<br>单位：'+esc(p.unit||'')+'<br>范围：'+esc(p.region||'')+'<br>来源：'+esc(p.description||'')):'接入后将独立展示来源、地区、时间窗口与指标解释；目前没有该平台数据。')+'</div></div>').join('');
 }
+$('#queryPlatform').onchange=()=>{const p=platformInfo($('#queryPlatform').value), douyin=p.id==='douyin';$('#queryDialog .cardhead p').textContent=douyin?'一次提交：指数、关联词、人群画像':'一次提交：'+(p.metric_name||'指数');$('#submitButton').textContent=douyin?'查询全部模块 →':'查询 →';$('#submitButton').nextElementSibling.nextElementSibling.hidden=!douyin};
 function renderHistory(){
  const words=[...new Set([...(reportBatch?.query.keywords||[]),...datasets.flatMap(d=>d.metadata.keywords)])];const previous=$('#keywordSelect').value;
  $('#keywordSelect').innerHTML=words.length?words.map(w=>'<option>'+esc(w)+'</option>').join(''):'<option value="">暂无关键词</option>';
  if(words.includes(previous))$('#keywordSelect').value=previous;
  dateHint();
- $('#historyRows').innerHTML=datasets.length?datasets.map(d=>{const m=d.metadata;return '<tr><td><strong>'+m.keywords.map(esc).join('、')+'</strong></td><td>抖音 · 搜索指数</td><td>'+esc(m.start_date)+' — '+esc(m.end_date)+'</td><td><span class="status '+(m.complete?'succeeded':'partial')+'">'+(m.complete?'完整':Object.values(m.missing_search_dates||{}).every(a=>a.length===Math.round((new Date(m.end_date)-new Date(m.start_date))/86400000)+1)?'无有效日值':'有缺失')+'</span><br><small>'+({user_reported_match:'用户已报告逐日一致',pending:'页面核对待记录'})[m.verification]+'</small></td><td>'+esc(fmt(d.fetched))+'</td></tr>'}).join(''):'<tr><td colspan="5">暂无结果。提交首个查询后，历史会保存在这里。</td></tr>';
+ $('#historyRows').innerHTML=datasets.length?datasets.map(d=>{const m=d.metadata;return '<tr><td><strong>'+m.keywords.map(esc).join('、')+'</strong></td><td>'+esc((m.platform==='douyin'?'抖音':platformInfo(m.platform).name||m.platform||'抖音')+' · '+(platformInfo(m.platform).metric_name||m.metric_name||'搜索指数'))+'</td><td>'+esc(m.start_date)+' — '+esc(m.end_date)+'</td><td><span class="status '+(m.complete?'succeeded':'partial')+'">'+(m.complete?'完整':Object.values(m.missing_search_dates||{}).every(a=>a.length===Math.round((new Date(m.end_date)-new Date(m.start_date))/86400000)+1)?'无有效日值':'有缺失')+'</span><br><small>'+(m.platform==='douyin'?(({user_reported_match:'用户已报告逐日一致',pending:'页面核对待记录'})[m.verification]||''):'')+'</small></td><td>'+esc(fmt(d.fetched))+'</td></tr>'}).join(''):'<tr><td colspan="5">暂无结果。提交首个查询后，历史会保存在这里。</td></tr>';
 }
 let initialRangesSet=false,relatedLatestDate=null;
 function initializeRanges(history){
@@ -163,7 +171,7 @@ document.querySelectorAll('[data-period]').forEach(button=>button.onclick=()=>{
  if(!end){$('#'+prefix+'RangeError').textContent='请先设置官方可用的结束日期，再选择快捷段。';$('#'+prefix+'End').focus();return}
  $('#'+prefix+'Start').value=presetStart(end,period);selectRangePreset(prefix,period);rangeChanged(prefix);
 });
-$('#openQuery').onclick=()=>{$('#queryError').hidden=true;$('#queryDialog').showModal();dateHint()};
+$('#openQuery').onclick=()=>{if(platformInfo().available)$('#queryPlatform').value=chosenPlatform;$('#queryPlatform').onchange();$('#queryError').hidden=true;$('#queryDialog').showModal();dateHint()};
 $('#closeQuery').onclick=()=>$('#queryDialog').close();
 function resultTab(name,focus=false){
  document.querySelectorAll('[data-result-tab]').forEach(b=>{const active=b.dataset.resultTab===name;b.setAttribute('aria-selected',active);b.tabIndex=active?0:-1;if(active&&focus)b.focus()});
@@ -191,17 +199,22 @@ function renderJobs(){
  if(jobs.length){const j=jobs[0];$('#latestJob').textContent='最近任务：'+statusName(j.status)+(j.cache_hit?' · 缓存命中':'')+(j.error?' · '+j.error.message:'')}
 }
 function drawChart(data){
+ const platform=platformInfo(data.platform), isDouyin=(data.platform||chosenPlatform)==='douyin', metric=platform.metric_name||data.metric_name||'指数';
+ $('#showSearch').parentElement.lastChild.textContent=' '+metric;
+ $('#showComposite').parentElement.hidden=!isDouyin;
  const latest=data.points.at(-1),hasValues=data.points.some(p=>p.value!=null||p.composite_index!=null);
  $('#trendSummary').innerHTML=latest?'<div class="summary-number">'+numberLabel(latest.value)+'<small>搜索指数</small></div><p class="summary-caption">'+esc(latest.date)+' · 综合指数 '+numberLabel(latest.composite_index)+'</p><p class="summary-note">'+infoTip(hasValues?data.points.length+' 个日期':'无数据','缺失为 —；搜索指数不是搜索次数。综合指数尚未独立逐日人工核对。')+'</p>':'<p>'+infoTip('无数据','该范围暂无已保存的趋势数据，缺失不代表零。')+'</p>';
+ if(!isDouyin)$('#trendSummary').innerHTML=latest?'<div class="summary-number">'+numberLabel(latest.value)+'<small>'+esc(metric)+'</small></div><p class="summary-caption">'+esc(latest.date)+' · '+esc(platform.unit||'')+'</p><p class="summary-note">'+esc(platform.description||'')+'</p>':'<p>该范围暂无已保存的趋势数据。</p>';
  const points=data.points,W=960,H=300,L=70,R=22,T=25,B=45;
  const indexed=$('#chartMode').value==='indexed';
- const defs=[{key:'value',name:'搜索指数',color:'#287965',on:$('#showSearch').checked},{key:'composite_index',name:'综合指数',color:'#b67b35',on:$('#showComposite').checked}];
+ const defs=[{key:'value',name:metric,color:'#287965',on:$('#showSearch').checked},{key:'composite_index',name:'综合指数',color:'#b67b35',on:isDouyin&&$('#showComposite').checked}];
  const series=defs.filter(s=>s.on).map(s=>{const base=points.find(p=>p[s.key]!=null)?.[s.key];return {...s,base,values:points.map(p=>p[s.key]==null||indexed&&!(base>0)?null:indexed?p[s.key]/base*100:p[s.key])}});
  const valid=series.flatMap(s=>s.values.filter(v=>v!==null));
- $('#metricLabel').textContent=indexed?'首个有效日 = 100 · 各序列独立归一化':'原始指数 · 共用刻度 · 全国';
- $('#exportLink').href='/api/v1/export.csv?'+new URLSearchParams({platform:'douyin',keyword:data.keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})});$('#exportLink').style.display='';
+ $('#metricLabel').textContent=indexed?'首个有效日 = 100 · 各序列独立归一化':(isDouyin?'原始指数 · 共用刻度 · 全国':metric+' · '+(platform.unit||'')+' · '+(platform.region||''));
+ $('#exportLink').href='/api/v1/export.csv?'+new URLSearchParams({platform:data.platform||chosenPlatform,keyword:data.keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})});$('#exportLink').style.display='';
  $('#chartRange').textContent=points.length?points[0].date+' — '+points.at(-1).date+' · '+data.keyword:'—';
  $('#chartMeta').innerHTML=infoTip(indexed?'相对走势':'原始指数',(indexed?'用于比较相对变化，悬浮仍显示原始数值；首个有效值为零的序列不能归一化。':'绿线：搜索指数；橙线：综合指数。量级差异大时可切换“相对走势”。两者均不代表搜索次数。')+' 读取历史数据库，不额外请求平台。空缺保留为空缺，可悬停、触摸或用左右方向键查看日数值。综合指数尚未独立逐日人工核对。');
+ if(!isDouyin)$('#chartMeta').textContent=(platform.description||'')+' · '+(platform.name||'')+' · '+(platform.unit||'');
  if(!valid.length){$('#chart').innerHTML='<div class="empty">请选择至少一条有可用数据的曲线。</div>';return}
  const max=Math.max(...valid,1)*1.15,x=i=>L+(W-L-R)*(points.length===1?.5:i/(points.length-1)),y=v=>H-B-(H-T-B)*v/max;
  let svg='<svg viewBox="0 0 '+W+' '+H+'" tabindex="0" role="img" aria-label="双指数趋势，可用左右方向键查看数值">';
@@ -212,11 +225,11 @@ function drawChart(data){
  $('#chart').innerHTML=svg+'<div class="charttip" id="chartTooltip" hidden></div>';
  const surface=$('#chart svg'),tip=$('#chartTooltip'),cursor=$('#chartCursor');let active=0;
  const value=v=>v==null?'缺失':Number(v).toLocaleString();
- function show(i){active=i;const p=points[i],b=surface.getBoundingClientRect();cursor.setAttribute('x1',x(i));cursor.setAttribute('x2',x(i));cursor.setAttribute('visibility','visible');tip.hidden=false;tip.textContent=p.date+' · '+data.keyword+'\n搜索指数：'+value(p.value)+'\n综合指数：'+value(p.composite_index);tip.style.left=Math.max(0,Math.min(x(i)/W*b.width+12,b.width-tip.offsetWidth))+'px';tip.style.top='8px'}
+ function show(i){active=i;const p=points[i],b=surface.getBoundingClientRect();cursor.setAttribute('x1',x(i));cursor.setAttribute('x2',x(i));cursor.setAttribute('visibility','visible');tip.hidden=false;tip.textContent=p.date+' · '+data.keyword+'\n'+metric+'：'+value(p.value)+(isDouyin?'\n综合指数：'+value(p.composite_index):'');tip.style.left=Math.max(0,Math.min(x(i)/W*b.width+12,b.width-tip.offsetWidth))+'px';tip.style.top='8px'}
  surface.onpointermove=e=>{const b=surface.getBoundingClientRect(),px=(e.clientX-b.left)*W/b.width;show(Math.max(0,Math.min(points.length-1,Math.round((px-L)/(W-L-R)*(points.length-1)))))};
  surface.onpointerleave=()=>{tip.hidden=true;cursor.setAttribute('visibility','hidden')};surface.onfocus=()=>show(active);surface.onblur=surface.onpointerleave;surface.onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();show(Math.max(0,Math.min(points.length-1,active+(e.key==='ArrowRight'?1:-1))))}};
 }
-async function loadSeries(){if(rangeError('insight')){$('#chart').textContent=rangeError('insight');$('#trendSummary').textContent=rangeError('insight');return}const platform=platforms.find(p=>p.id===chosenPlatform);if(platform&&!platform.available){$('#chart').innerHTML='<div class="empty">'+esc(platform.name)+' 尚未接入，暂不展示数据。<br>'+esc(platform.description)+'</div>';$('#trendSummary').textContent='该平台尚未接入';$('#metricLabel').textContent='待接入';$('#chartRange').textContent='—';$('#chartMeta').textContent='';$('#exportLink').style.display='none';return}const keyword=$('#keywordSelect').value;if(!keyword){$('#trendSummary').textContent='暂无趋势数据，完成首次查询后即可查看。';$('#chart').innerHTML='<div class="empty">暂无趋势数据。完成首次查询后即可查看。</div>';return}const data=await api('series?'+new URLSearchParams({platform:'douyin',keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})}));if(!readingInfo())drawChart(data)}
+async function loadSeries(){if($('#chart').dataset.platform!==chosenPlatform){$('#chart').dataset.platform=chosenPlatform;$('#exportLink').style.display='none';$('#chartRange').textContent='—';$('#chartMeta').textContent='';$('#chart').textContent='正在读取趋势…'}if(rangeError('insight')){$('#chart').textContent=rangeError('insight');$('#trendSummary').textContent=rangeError('insight');return}const platform=platforms.find(p=>p.id===chosenPlatform);if(platform&&!platform.available){$('#chart').innerHTML='<div class="empty">'+esc(platform.name)+' 尚未接入，暂不展示数据。<br>'+esc(platform.description)+'</div>';$('#trendSummary').textContent='该平台尚未接入';$('#metricLabel').textContent='待接入';$('#chartRange').textContent='—';$('#chartMeta').textContent='';$('#exportLink').style.display='none';return}const keyword=$('#keywordSelect').value;if(!keyword){$('#exportLink').style.display='none';$('#chartMeta').textContent='';$('#chartRange').textContent='—';$('#trendSummary').textContent='暂无趋势数据，完成首次查询后即可查看。';$('#chart').innerHTML='<div class="empty">暂无趋势数据。完成首次查询后即可查看。</div>';return}const context=insightContext();const data=await api('series?'+new URLSearchParams({platform:chosenPlatform,keyword,...($('#insightStart').value&&$('#insightEnd').value?{start_date:$('#insightStart').value,end_date:$('#insightEnd').value}:{})}));if(context===insightContext()&&!readingInfo())drawChart(data)}
 $('#keywordSelect').onchange=()=>Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message));
 for(const id of ['#showSearch','#showComposite','#chartMode'])$(id).onchange=()=>loadSeries().catch(e=>toast(e.message));
 let qrTimer=null,qrLoading=false,qrEnabled=false,qrInitialized=false;
@@ -424,7 +437,7 @@ let insightRevision=0,audienceRangesSupported=true;
 function insightContext(){return [chosenPlatform,$('#keywordSelect').value,$('#insightStart').value,$('#insightEnd').value].join('|')}
 function knownAudienceJobs(keyword){
  const current=(reportBatch?.entries||[]).filter(e=>e.body.kind==='audience'&&e.body.keywords[0]===keyword).map(e=>e.lastJob||{query:e.body,status:e.status,error:e.error?{message:e.error}:null});
- return [...jobs,...current].filter(j=>j.query.kind==='audience'&&j.query.platform==='douyin'&&j.query.keywords[0]===keyword).sort((a,b)=>(b.created_at||0)-(a.created_at||0));
+ return [...jobs,...current].filter(j=>j.query.kind==='audience'&&j.query.platform===chosenPlatform&&j.query.keywords[0]===keyword).sort((a,b)=>(b.created_at||0)-(a.created_at||0));
 }
 async function audienceHistory(keyword){
  const pending=(reportBatch?.entries||[]).filter(e=>!e.jobId&&e.body.kind==='audience'&&e.body.keywords[0]===keyword).map(e=>({...e.body,status:'not_submitted',unconfirmed:Boolean(e.error)}));
@@ -500,8 +513,8 @@ async function loadInsight(kind,target,revision,context){
 async function loadInsights(){
  const revision=++insightRevision,context=insightContext();
  if($('#audienceRanges').dataset.context!==context){$('#audienceRanges').textContent='';$('#audienceRanges').dataset.context=context;for(const kind of ['related','audience'])insightMessage(kind,'#'+kind+'Data','正在读取当前范围…')}
- if(chosenPlatform!=='douyin'){for(const kind of ['related','audience'])insightMessage(kind,'#'+kind+'Data','该平台尚未接入');return}
- await Promise.all([['related','#relatedData'],['audience','#audienceData']].map(([kind,target])=>loadInsight(kind,target,revision,context)));
+ if(!platformModules().length){for(const kind of ['related','audience'])insightMessage(kind,'#'+kind+'Data',platformInfo().available?'该平台不支持此模块':'该平台尚未接入');return}
+ await Promise.all([['related','#relatedData'],['audience','#audienceData']].filter(([kind])=>platformModules().includes(kind)).map(([kind,target])=>loadInsight(kind,target,revision,context)));
 }
 $('#relatedSort').onchange=()=>loadInsights();
 let reportBatch=null,bundleSubmitting=false;
@@ -509,7 +522,7 @@ try{const saved=JSON.parse(sessionStorage.getItem('index-report-batch')||'null')
 function saveBatch(){try{sessionStorage.setItem('index-report-batch',JSON.stringify(reportBatch))}catch{}}
 function makeReportBatch(query,id){
  const entries=[{path:'queries',label:'指数趋势 · '+query.keywords.join('、'),body:{...query}}];
- for(const word of query.keywords)for(const [kind,label] of [['related','关联词'],['audience','人群画像']]){
+ for(const word of query.keywords)for(const [kind,label] of [['related','关联词'],['audience','人群画像']].filter(([kind])=>(typeof platformModules==='undefined'||platformModules(query.platform).includes(kind)))){
   const dates=insightDates(kind,query.start_date,query.end_date);
   if(dates.start_date>dates.end_date)throw Error('关联词可用截止日为 '+dates.end_date+'，开始日须不晚于该日。');
   entries.push({path:'insights/queries',label:label+' · '+word,body:{...query,...dates,keywords:[word],kind}});
@@ -521,7 +534,7 @@ function renderReportProgress(){
  const box=$('#reportProgress');if(!reportBatch){box.hidden=true;return}box.hidden=false;
  const q=reportBatch.query,done=reportBatch.entries.filter(e=>['succeeded','partial','failed','no_data'].includes(e.status)).length;
  $('#reportProgressTitle').textContent='本次完整查询 · '+done+' / '+reportBatch.entries.length+' 项已结束';
- $('#reportProgressRange').innerHTML=infoTip(q.keywords.join('、')+' · '+q.start_date+' — '+q.end_date,'各模块独立完成；排队共享至少 15 秒请求间隔，指数任务优先。');
+ $('#reportProgressRange').innerHTML=infoTip(q.keywords.join('、')+' · '+q.start_date+' — '+q.end_date,q.platform==='douyin'?'各模块独立完成；排队共享至少 15 秒请求间隔，指数任务优先。':'任务按平台各自的采集规则执行。');
  $('#reportProgressRows').innerHTML=reportBatch.entries.map(e=>'<div style="padding:10px 0;border-bottom:1px solid #edf0eb"><strong>'+esc(e.label)+'</strong> <span class="status '+esc(e.status)+'">'+esc(e.jobId?statusName(e.status):e.error?'提交未确认':'待提交')+'</span>'+(e.cache_hit?' <small>缓存</small>':'')+(e.error?'<div class="tiny">'+esc(e.error)+'</div>':'')+'</div>').join('');
  $('#retryBundle').hidden=!reportBatch.entries.some(e=>!e.jobId);$('#retryBundle').disabled=bundleSubmitting;
 }
@@ -557,11 +570,11 @@ $('#queryForm').onsubmit=async e=>{
   const words=$('#queryWords').value.split(/\n/).map(s=>s.trim()).filter(Boolean),start=$('#queryStart').value,end=$('#queryEnd').value;
   if(!words.length||words.length>5||new Set(words).size!==words.length||words.some(w=>w.length>100))throw Error('请输入 1—5 个不同的关键词，每词最多 100 字。');
   dateHint();if(!updateRange('query',true)){$('#queryRange').open=true;throw Error(rangeError('query'))}
-  const query={platform:'douyin',keywords:words,start_date:start,end_date:end};
+  const query={platform:$('#queryPlatform').value,keywords:words,start_date:start,end_date:end};
   if(reportBatch?.entries.some(e=>!e.jobId)){
    if(JSON.stringify(reportBatch.query)!==JSON.stringify(query))throw Error('上一批存在提交未确认的任务，请先点击“继续提交未确认任务”核实，避免遗留重复请求。');
   }else reportBatch=makeReportBatch(query,crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
-  saveBatch();chosenPlatform='douyin';drawPlatforms();renderHistory();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
+  saveBatch();chosenPlatform=query.platform;drawPlatforms();renderHistory();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
   $('#queryDialog').close();updateRange('insight');renderReportProgress();await submitReportBatch();await refresh();
  }catch(e){if($('#queryDialog').open){const error=$('#queryError');error.textContent=e.message;error.hidden=false;error.focus();error.scrollIntoView({block:'nearest'})}else toast(e.message)}finally{button.disabled=false}
 };

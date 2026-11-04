@@ -44,17 +44,17 @@ class IndexHubClient:
     def status(self):
         return self._request('GET', 'status')
 
-    def submit_query(self, keywords, *, end_date, idempotency_key, start_date=None):
+    def submit_query(self, keywords, *, end_date, idempotency_key, start_date=None, platform='douyin'):
         return self._request('POST', 'queries', headers={'Idempotency-Key': idempotency_key},
-                             json={'platform': 'douyin', 'keywords': keywords, 'end_date': end_date, **({'start_date':start_date} if start_date else {})})['job']
+                             json={'platform': platform, 'keywords': keywords, 'end_date': end_date, **({'start_date':start_date} if start_date else {})})['job']
 
     def job(self, identifier):
         if not isinstance(identifier, str) or len(identifier) != 32 or any(c not in '0123456789abcdef' for c in identifier):
             raise ValueError('Invalid job id')
         return self._request('GET', 'jobs/' + identifier)['job']
 
-    def series(self, keyword, *, start_date=None, end_date=None):
-        params = {'platform': 'douyin', 'keyword': keyword}
+    def series(self, keyword, *, start_date=None, end_date=None, platform='douyin'):
+        params = {'platform': platform, 'keyword': keyword}
         if start_date is not None:
             params.update(start_date=start_date, end_date=end_date)
         return self._request('GET', 'series', params=params)

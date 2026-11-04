@@ -19,6 +19,7 @@ from aiohttp import web
 import hub_bridge
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
+from platforms import registry, require_platform
 from sms_login import (FRAME_BASE64_LIMIT, SmsLoginError, TERMINAL, public_sms_status,
                        validate_sms_payload)
 
@@ -118,6 +119,7 @@ class Hub:
             bridge = call_bridge
         self._qr_last_start = None
         self._sms_lock = asyncio.Lock()
+        self._platform_locks = {}
         self.bridge = bridge
         self.worker_task = None
 
@@ -190,9 +192,19 @@ class Hub:
 
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
-        row = self.store.db.execute("SELECT id,query FROM jobs WHERE status='queued' ORDER BY CASE WHEN json_extract(query,'$.kind') IS NULL THEN 0 ELSE 1 END,created LIMIT 1").fetchone()
-        if not row or self.store.get('paused'):
-            return False
+        rows = self.store.db.execute("SELECT id,query FROM jobs WHERE status='queued' ORDER BY CASE WHEN json_extract(query,'$.kind') IS NULL THEN 0 ELSE 1 END,created").fetchall()
+        blocked = set()
+        for row in rows:
+            platform = json.loads(row['query'])['platform']
+            if platform in blocked:
+                continue
+            adapter = require_platform(platform)
+            if not adapter.paused(self.store) and await adapter.run_one(self, row):
+                return True
+            blocked.add(platform)
+        return False
+
+    async def _run_douyin(self, row):
         query = json.loads(row['query'])
         cached = self.store.cached(query)
         if cached:
@@ -237,7 +249,7 @@ class Hub:
         self.store.set('daily', {'date': today, 'count': counter['count'] + 1})
         started = time.monotonic()
         try:
-            response = await asyncio.to_thread(self.bridge, 'insight' if query.get('kind') else 'query', query, hub_bridge.BRIDGE_TIMEOUT)
+            response = await asyncio.to_thread(self.bridge, require_platform(query['platform']).bridge_command(query), query, hub_bridge.BRIDGE_TIMEOUT)
             # Only collection replies reset the streak; status preflights do not.
             self.store.set('consecutive_bridge_timeouts', 0)
             if response.get('ok') is not True:
@@ -273,7 +285,7 @@ class Hub:
                     self.store.save_insight(query,result)
                     self.store.update_job(row['id'],'succeeded',result=result)
                 else:
-                    result = public_result(response)
+                    result = require_platform(query['platform']).project(response)
                     self.store.ingest(result)
                     has_values=any(r['search_index'] is not None for r in result['rows'])
                     self.store.update_job(row['id'], 'succeeded' if result['metadata']['complete'] else 'partial' if has_values else 'no_data', result=result,
@@ -308,7 +320,10 @@ class Hub:
     async def worker(self):
         while True:
             try:
-                await self.sync_sms_pause()
+                try:
+                    await self.sync_sms_pause()
+                except HubError:
+                    pass
                 await self.run_one()
             except asyncio.CancelledError:
                 raise
@@ -389,7 +404,7 @@ def openapi():
         if path == '/api/v1/insights/queries':
             operation['operationId'] = 'post_insight_query'
             operation['requestBody']['content']['application/json']['schema'] = {'type':'object','additionalProperties':False,'required':['keywords','kind','end_date'],'properties':{
-                'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':['douyin']},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
+                'keywords':{'type':'array','minItems':1,'maxItems':1,'items':{'type':'string'}},'kind':{'enum':['related','audience']},'platform':{'enum':[p['id'] for p in registry.descriptions() if p['available']]},'start_date':{'type':'string','format':'date'},'end_date':{'type':'string','format':'date'}}}
         if path == '/api/v1/insights':
             operation['parameters']=[{'in':'query','name':k,'required':k in ('keyword','kind','end_date'),'schema':{'type':'string'}} for k in ('keyword','kind','start_date','end_date')]
         if path == '/api/v1/insights/ranges':
@@ -411,13 +426,17 @@ def openapi():
             'security': [{'BasicAuth': []}],
             'responses': {'200': {'description': '状态快照或 PNG；no-store'},
                           **{str(code): error for code in (400, 401, 403, 409, 429, 503)}}}}
+    for p in registry.descriptions():
+        platform = registry.get(p['id'])
+        if p['available'] and hasattr(platform, 'openapi_paths'):
+            paths.update(platform.openapi_paths())
     return {'openapi': '3.1.0', 'info': {'title': 'Index Atlas 指数工作台 API', 'version': '1.0.0',
              'description': '自用平台聚合接口。当前仅抖音搜索指数可用，1–5词、最近两年；非官方开放 API。搜索指数不是实际搜索次数。'},
             'servers': [{'url': '/'}], 'security': [{'BearerAuth': []}], 'paths': paths,
             'components': {'securitySchemes': {'BearerAuth': {'type': 'http', 'scheme': 'bearer'},
                                                'BasicAuth': {'type': 'http', 'scheme': 'basic'}},
              'schemas': {'Query': {'type': 'object', 'additionalProperties': False, 'required': ['keywords', 'end_date'],
-              'properties': {'platform': {'type': 'string', 'enum': ['douyin'], 'default': 'douyin'},
+              'properties': {'platform': {'type': 'string', 'enum': [p['id'] for p in registry.descriptions() if p['available']], 'default': 'douyin'},
                'keywords': {'type': 'array', 'minItems': 1, 'maxItems': 5, 'uniqueItems': True,
                             'items': {'type': 'string', 'minLength': 1, 'maxLength': 100}},
                'start_date': {'type': 'string', 'format': 'date', 'description': '不填默认截止日前六天；填写后支持最近两个日历年内的过去日期'},
@@ -508,7 +527,7 @@ def mount(app, hub):
 
     async def platforms(request):
         require(request)
-        return reply({'platforms': PLATFORMS})
+        return reply({'platforms': registry.descriptions()})
 
     async def status(request):
         require(request)
@@ -519,8 +538,23 @@ def mount(app, hub):
         browser = await hub.browser_status(details=True)
         next_attempt = s.get('last_attempt_at', 0) + 15
         remaining = max(0, math.ceil(next_attempt - time.time()))
+        words = {r[0] for r in s.db.execute('SELECT DISTINCT keyword FROM points')}
+        point_count = s.db.execute('SELECT count(*) FROM points').fetchone()[0]
+        for p in registry.descriptions():
+            adapter = registry.get(p['id'])
+            if p['available'] and hasattr(adapter, 'status_counts'):
+                extra_words, extra_points = adapter.status_counts(s)
+                words.update(extra_words)
+                point_count += extra_points
+        platform_status = {}
+        for p in registry.descriptions():
+            platform = registry.get(p['id'])
+            if p['available']:
+                async_status = getattr(platform, 'async_status', None)
+                platform_status[p['id']] = await async_status(hub) if async_status else platform.status(s)
         return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser['state'],
                       'login_state': browser['login_state'], 'paused': s.get('paused'),
+                      'platform_status': platform_status,
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
                       'next_online_attempt_at': next_attempt,
                       'cooldown_remaining_seconds': remaining,
@@ -530,8 +564,7 @@ def mount(app, hub):
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
                       'counts': {'datasets': s.db.execute('SELECT count(*) FROM datasets').fetchone()[0],
-                                 'keywords': s.db.execute('SELECT count(DISTINCT keyword) FROM points').fetchone()[0],
-                                 'points': s.db.execute('SELECT count(*) FROM points').fetchone()[0]}})
+                                 'keywords': len(words), 'points': point_count}})
 
     def job_view(value, request):
         result = dict(value)
@@ -595,15 +628,10 @@ def mount(app, hub):
 
     async def export(request):
         require(request)
-        from storage import _csv_keyword
         data = get_series(request)
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['platform', 'metric', 'region', 'keyword', 'date', 'search_index', 'composite_index', 'fetched_at'])
-        for point in data['points']:
-            writer.writerow(['douyin', 'search_index', '全国', _csv_keyword(data['keyword']), point['date'],
-                             '' if point['value'] is None else point['value'],
-                             '' if point['composite_index'] is None else point['composite_index'], point['fetched_at']])
+        writer.writerows(require_platform(data['platform']).csv_rows(data))
         return web.Response(body=('\ufeff' + output.getvalue()).encode(), content_type='text/csv',
                             charset='utf-8', headers={'Content-Disposition': 'attachment; filename="index-series.csv"'})
 
@@ -665,6 +693,13 @@ def mount(app, hub):
 
     async def resume(request):
         require(request, admin=True)
+        body = await read_json(request) if request.can_read_body else {}
+        if type(body) is not dict or set(body) - {'platform'}:
+            raise HubError('invalid_query', '仅接受 platform。')
+        adapter = require_platform(body.get('platform', 'douyin'))
+        if adapter.description['id'] != 'douyin':
+            await adapter.resume(hub)
+            return reply({'ok': True, 'note': '已恢复。'})
         async with hub._sms_lock:
             if login_mode() == 'sms' or (s.get('paused') or {}).get('code') == 'login_in_progress':
                 await hub._check_sms_pause()
@@ -689,6 +724,11 @@ def mount(app, hub):
     app.router.add_get('/api/v1/login/qr', qr_login)
     app.router.add_get('/api/v1/login/qr/{action:image}', qr_login)
     app.router.add_post('/api/v1/login/qr/{action:start|cancel}', qr_login)
+    for p in registry.descriptions():
+        adapter = registry.get(p['id'])
+        mount_routes = getattr(adapter, 'mount_routes', None)
+        if p['available'] and mount_routes:
+            mount_routes(app, hub, require, reply)
     app.router.add_get('/api/v1/platforms', platforms)
     app.router.add_get('/api/v1/status', status)
     app.router.add_post('/api/v1/queries', submit)
