@@ -144,6 +144,9 @@ class Store:
         if 'requeues' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN requeues INTEGER NOT NULL DEFAULT 0')
         self.db.commit()
+        for description in registry.descriptions():
+            if description['available']:
+                registry.get(description['id']).initialize(self)
         path.chmod(0o600)
         self.deduplicate()
 
@@ -403,7 +406,7 @@ class Store:
         if self.db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 20:
             raise HubError('queue_full', '任务队列已满，请稍后再试。', 429)
         cache = self.cached(query)
-        if not cache and self.get('paused'):
+        if not cache and require_platform(query['platform']).paused(self):
             raise HubError('collection_paused', '采集已暂停，请在网页处理登录或平台验证后手动恢复。', 409)
         now, identifier = time.time(), uuid.uuid4().hex
         with self.db:

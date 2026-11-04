@@ -19,7 +19,7 @@ from aiohttp import web
 import hub_bridge
 from qr_login import login_mode
 from hub_store import HubError, PLATFORMS, Store, TZ, exc_summary, public_result, validate_query
-from platforms import require_platform
+from platforms import registry, require_platform
 from sms_login import (FRAME_BASE64_LIMIT, SmsLoginError, TERMINAL, public_sms_status,
                        validate_sms_payload)
 
@@ -191,9 +191,14 @@ class Hub:
 
     async def run_one(self):
         """Process at most one job. Attempts are persisted before touching the browser."""
-        row = self.store.db.execute("SELECT id,query FROM jobs WHERE status='queued' ORDER BY CASE WHEN json_extract(query,'$.kind') IS NULL THEN 0 ELSE 1 END,created LIMIT 1").fetchone()
-        if not row or self.store.get('paused'):
-            return False
+        rows = self.store.db.execute("SELECT id,query FROM jobs WHERE status='queued' ORDER BY CASE WHEN json_extract(query,'$.kind') IS NULL THEN 0 ELSE 1 END,created").fetchall()
+        for row in rows:
+            adapter = require_platform(json.loads(row['query'])['platform'])
+            if not adapter.paused(self.store):
+                return await adapter.run_one(self, row)
+        return False
+
+    async def _run_douyin(self, row):
         query = json.loads(row['query'])
         cached = self.store.cached(query)
         if cached:
@@ -509,7 +514,7 @@ def mount(app, hub):
 
     async def platforms(request):
         require(request)
-        return reply({'platforms': PLATFORMS})
+        return reply({'platforms': registry.descriptions()})
 
     async def status(request):
         require(request)

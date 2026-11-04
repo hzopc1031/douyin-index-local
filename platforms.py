@@ -28,6 +28,15 @@ class Douyin:
                    'metric_name': '搜索指数', 'unit': '指数', 'region': '全国', 'timezone': 'Asia/Shanghai',
                    'description': '创作者中心关键词搜索指数；不代表实际搜索次数。'}
 
+    def initialize(self, store):
+        pass
+
+    def paused(self, store):
+        return store.get('paused')
+
+    async def run_one(self, hub, row):
+        return await hub._run_douyin(row)
+
     def validate_query(self, body, *, historical=False):
         from hub_store import _validate_douyin_query
         return _validate_douyin_query(body, historical=historical)
