@@ -192,7 +192,7 @@ sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_D
   .venv/bin/python topic_board.py --probe --rank total --category 全部
 ```
 
-先拉垂类用 `--probe --tags`。输出只有 `status`、`item_count`、`fields`。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
+先拉垂类用 `--probe --tags`。输出含 `status`、`item_count`、`fields` 和 `summary`。`summary` 只有 HTTP 状态、最终 URL 的主机和路径、content-type、顶层 code/message，以及 JSON 的键和类型；不包含正文字符串、普通数字、Cookie 或 token。同一份摘要追加到 `topic.log`。`request.through_page_fetch` 表示请求由热点宝页面的 `fetch` 发出；`fetch_hooked` 表示该函数已被页面替换；`extra_query_keys` 只列出实际 URL 比我们多出来的参数名（例如 `a_bogus`），不含参数值。打开页面时先用首页，若 `fetch` 仍是原生函数，再依次试 `/ranking`、`/topic`、`/analysis`，仍不自行签名。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
 
 搜索指数分：同一日历日每个词都有非空搜索指数才计算。当前日取最新的齐全日，基线取最早的齐全日并记为 100。基线合计为 0 时不归一化，搜索分为 null，原始合计仍返回。没有齐全日时搜索分为 null，并列出参考日缺了哪些词。
 

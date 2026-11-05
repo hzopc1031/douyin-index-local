@@ -162,7 +162,8 @@ def probe_main(argv):
     status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')
     print(json.dumps({'status': status, 'item_count': result.get('item_count') or 0,
                       'fields': result.get('fields') or [], 'rank': job.get('rank'),
-                      'category': job.get('tag_name')}, ensure_ascii=False))
+                      'category': job.get('tag_name'), 'summary': result.get('summary')},
+                     ensure_ascii=False))
     return 0 if status == 'ok' else 2
 
 

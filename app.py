@@ -116,7 +116,7 @@ class Api:
     def topic_fetch(self, payload):
         """One douhot request inside the page. Never returns cookies."""
         from topic_fetch import (BOARD_URL, TAG_URL, TopicFetchError, board_body, parse_board,
-                                 parse_tags, run_page_request)
+                                 parse_tags, run_page_request, write_topic_log)
         if not isinstance(payload, dict) or payload.get('action') not in ('tags', 'board'):
             return {'ok': False, 'code': 'invalid_parameters', 'requested': False, 'item_count': 0, 'fields': []}
         if not self._lock.acquire(blocking=False):
@@ -132,22 +132,32 @@ class Api:
                         'body': json.dumps(board_body(payload.get('rank'), payload.get('tag_id') or ''),
                                            ensure_ascii=False)}
             requested = True
-            body = run_page_request(window, spec)
+            body, summary = run_page_request(window, spec)
+            write_topic_log(summary)
+            try:
+                if payload['action'] == 'tags':
+                    tags = parse_tags(body)
+                else:
+                    items, fields = parse_board(body)
+            except TopicFetchError as exc:
+                exc.summary = summary
+                raise
             if payload['action'] == 'tags':
-                tags = parse_tags(body)
-                return {'ok': True, 'status': 'ok', 'requested': True, 'tags': tags,
+                return {'ok': True, 'status': 'ok', 'requested': True, 'tags': tags, 'summary': summary,
                         'item_count': len(tags), 'fields': ['id', 'name']}
-            items, fields = parse_board(body)
             return {'ok': True, 'status': 'ok', 'requested': True, 'items': items, 'fields': fields,
-                    'item_count': len(items), 'rank': payload.get('rank'),
+                    'summary': summary, 'item_count': len(items), 'rank': payload.get('rank'),
                     'category': payload.get('tag_name') or '全部'}
         except TopicFetchError as exc:
+            if exc.summary is not None:
+                write_topic_log(exc.summary)
             if exc.code == 'not_logged_in' and window is not None:
                 try:
                     window.show()
                 except Exception:
                     pass
-            return {'ok': False, 'code': exc.code, 'requested': requested, 'item_count': 0, 'fields': []}
+            return {'ok': False, 'code': exc.code, 'requested': requested, 'item_count': 0,
+                    'fields': [], 'summary': exc.summary}
         except Exception:
             return {'ok': False, 'code': 'browser_unavailable', 'requested': requested,
                     'item_count': 0, 'fields': []}

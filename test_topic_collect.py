@@ -33,6 +33,35 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'not_logged_in')
         self.assertIn(caught.exception.code, PAUSE_CODES)
 
+    def test_nested_tags_and_billboard_list_are_accepted(self):
+        tags = parse_tags({'code': 0, 'data': {'tag_list': [
+            {'id': 1, 'name': '美食', 'children': [{'id': 2, 'label': '火锅'}]},
+        ]}})
+        self.assertEqual([item['name'] for item in tags], ['美食', '火锅'])
+        items, _ = parse_board({'code': 0, 'data': {'billboard_list': [
+            {'challenge_id': '9', 'challenge_name': '词'},
+        ]}})
+        self.assertEqual(items[0]['title'], '词')
+        self.assertIsNone(items[0]['hot_value'])
+        with self.assertRaises(TopicFetchError) as caught:
+            parse_board({'code': 0, 'data': {'unexpected': {'value': 'secret-text'}}})
+        self.assertEqual(caught.exception.code, 'schema_mismatch')
+
+    def test_non_json_summary_keeps_no_body_text(self):
+        from topic_fetch import summarize_response
+        summary = summarize_response(
+            {'http_status': 200, 'url': 'https://douhot.douyin.com/login?token=abcdef',
+             'content_type': 'text/html; charset=utf-8', 'body': '<html>secret</html>'},
+            {'method': 'GET', 'url': 'https://douhot.douyin.com/douhot/v1/material/content_tag'},
+            {'hooked': False, 'path': '/'}, json_ok=False)
+        encoded = json.dumps(summary)
+        self.assertFalse(summary['json'])
+        self.assertEqual(summary['body_length'], len('<html>secret</html>'))
+        self.assertNotIn('secret', encoded)
+        self.assertNotIn('abcdef', encoded)
+        self.assertEqual(summary['content_type'], 'text/html')
+        self.assertEqual(summary['final_path'], '/login')
+
     def test_tags_replace_hardcoded_names(self):
         tags = parse_tags({'code': 0, 'data': [
             {'id': 11, 'name': '美食'}, {'tag_id': '12', 'tag_name': '旅行'}, {'name': '全部'},
@@ -71,11 +100,13 @@ class ParseTests(unittest.TestCase):
 
             def evaluate_js(self, script):
                 self.scripts.append(script)
+                if 'native code' in script:
+                    return {'hooked': True, 'path': '/topic'}
                 if 'fetch(' in script:
                     return {'state': 'started'}
-                return {'state': 'done', 'http_status': 200,
-                        'url': 'https://douhot.douyin.com/douhot/v1/material/challenge_billboard',
-                        'body': json.dumps({'code': 8})}
+                return {'state': 'done', 'http_status': 200, 'content_type': 'application/json',
+                        'url': 'https://douhot.douyin.com/douhot/v1/material/challenge_billboard?a_bogus=secret-value',
+                        'body': json.dumps({'code': 8, 'message': '未登录', 'token': 'should-not-appear'})}
 
         page = Page()
         ticks = {'n': 0}
@@ -84,12 +115,19 @@ class ParseTests(unittest.TestCase):
             ticks['n'] += 1
             return ticks['n']
 
-        payload = run_page_request(page, {'method': 'GET', 'url': 'https://douhot.douyin.com/douhot/v1/material/content_tag'},
-                                   sleep=lambda _seconds: None, clock=clock)
+        payload, summary = run_page_request(
+            page, {'method': 'GET', 'url': 'https://douhot.douyin.com/douhot/v1/material/content_tag'},
+            sleep=lambda _seconds: None, clock=clock)
         with self.assertRaises(TopicFetchError) as caught:
             parse_board(payload)
         self.assertEqual(caught.exception.code, 'not_logged_in')
         self.assertTrue(all('cookie' not in script.lower() for script in page.scripts))
+        self.assertEqual(summary['business']['code'], 8)
+        self.assertEqual(summary['request']['through_page_fetch'], True)
+        self.assertEqual(summary['request']['fetch_hooked'], True)
+        self.assertIn('a_bogus', summary['request']['extra_query_keys'])
+        self.assertNotIn('secret-value', json.dumps(summary))
+        self.assertNotIn('should-not-appear', json.dumps(summary))
 
 
 class StoreTests(unittest.TestCase):
