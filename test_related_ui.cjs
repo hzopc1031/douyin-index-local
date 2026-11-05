@@ -32,6 +32,19 @@ for(const id of ['#relatedData','#relatedSummary']){
  assert.match($(id).innerHTML, /class="info-popover"[^>]*>关联词数据截至 2026-10-25，使用 2026-09-28 至 2026-10-25/);
  assert(!$(id).innerHTML.includes('<p class="tiny">关联词数据截至'));
 }
+ctx.result.metadata.platform='baidu';
+ctx.result.metadata.related_period={start_date:'2025-11-09',end_date:'2026-11-01',days:358};
+vm.runInContext("renderInsight('related','#relatedData',result)",ctx);
+for(const id of ['#relatedData','#relatedSummary']){
+ assert($(id).innerHTML.includes('百度相关词窗口：2025-11-09 至 2026-11-01（358 天）'));
+ assert(!$(id).innerHTML.includes('单日快照'));
+ assert($(id).innerHTML.includes('关联词窗口'));
+}
+delete ctx.result.metadata.related_period;
+vm.runInContext("renderInsight('related','#relatedData',result)",ctx);
+assert($('#relatedData').innerHTML.includes('缺少 related_period'));
+assert(!$('#relatedData').innerHTML.includes('单日快照'));
+delete ctx.result.metadata.platform;
 vm.runInContext("let insightRevision=1;function insightContext(){return 'fixture'};"+
  html.slice(html.indexOf('async function loadInsight('),html.indexOf('async function loadInsights(')),ctx);
 (async()=>{

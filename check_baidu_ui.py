@@ -45,7 +45,14 @@ def run(output=None):
                         data = {'datasets': [{'metadata': raw['metadata'], 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
                     elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
-                    elif path == 'insights': data = {'status': 'no_data'}
+                    elif path == 'insights':
+                        params = parse_qs(url.query)
+                        if params.get('platform') == ['baidu'] and params.get('kind') == ['related']:
+                            data = {'status': 'available', 'result': {
+                                'data': {'search_related': [{'keyword': '合成关联词', 'relation_score': None, 'search_index': None, 'composite_index': None}], 'content_related': []},
+                                'metadata': {**q, 'source': '离线合成样例', 'fetched_at': '离线合成样例',
+                                    'related_period': {'start_date': '2025-11-09', 'end_date': '2026-11-01', 'days': 358}}}}
+                        else: data = {'status': 'no_data'}
                     elif path == 'jobs': data = {'jobs': []}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'series':
@@ -95,6 +102,17 @@ def run(output=None):
                 assert 'platform=baidu' in page.locator('#exportLink').get_attribute('href')
                 assert page.locator('#resultTab-related').is_visible()
                 assert page.locator('#resultTab-audience').is_visible()
+                page.locator('#resultTab-related').click()
+                page.wait_for_function("document.querySelector('#relatedData').textContent.includes('合成关联词')")
+                related = page.locator('#relatedData')
+                related.locator('.info-button').hover()
+                assert '百度相关词窗口：2025-11-09 至 2026-11-01（358 天）' in related.inner_text()
+                assert '离线合成样例' in related.inner_text()
+                assert '单日快照' not in related.inner_text()
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'2026-11-05-baidu-related-period-ui-desktop.png'))
+                page.keyboard.press('Escape')
+                page.locator('#resultTab-trend').click()
                 low_volume[0] = True
                 page.evaluate('loadSeries()')
                 page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('低量')")
