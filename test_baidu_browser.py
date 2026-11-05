@@ -210,7 +210,7 @@ class BridgeLeakTests(unittest.TestCase):
                 return page
             sock = Path(tmp) / 'bridge.sock'
             with patch.object(baidu_browser, '_browser', worker), patch.object(baidu_browser, '_page', page_for), \
-                 patch.object(baidu_browser, 'status', return_value={'state':'browser_ready'}), \
+                 patch.object(baidu_browser, 'status', return_value={'ok': True, 'state':'browser_ready', 'live_enabled': True}), \
                  patch.object(baidu_browser, 'PageTransport', side_effect=lambda page: transport(page, origin=origin, allow_loopback=True)), \
                  patch.object(hub_bridge, '_socket_path', return_value=sock):
                 bridge = hub_bridge.start_bridge(Mock())
@@ -234,6 +234,18 @@ class BridgeLeakTests(unittest.TestCase):
                     result_file = Path(tmp) / 'synthetic-result.json'
                     result_file.write_text(json.dumps(answer), encoding='utf-8')
                     import asyncio
+                    from hub_web import Hub
+                    async def related_worker():
+                        hub = Hub(tmp, hub_bridge.call_bridge)
+                        try:
+                            job, _ = hub.store.submit(related, 'synthetic', 'related-browser-fixture')
+                            self.assertTrue(await hub.run_one())
+                            self.assertEqual(hub.store.job(job['id'])['status'], 'succeeded')
+                            self.assertEqual(hub.store.insight(related)['data'], related_answer['data'])
+                            self.assertEqual(hub.store.get('baidu.daily')['http_reserved'], 1)
+                        finally:
+                            hub.store.close()
+                    asyncio.run(related_worker())
                     from aiohttp import web
                     from aiohttp.test_utils import TestClient, TestServer
                     from hub_web import Hub, PRINCIPAL_KEY, mount
