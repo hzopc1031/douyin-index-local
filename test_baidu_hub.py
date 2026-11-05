@@ -87,6 +87,38 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.job(dy['id'])['status'], 'succeeded')
         self.assertEqual(self.s.get('daily')['count'], 1)
 
+    async def test_idle_dispatch_and_resume(self):
+        original = self.hub.bridge
+        def idle_bridge(command, *args):
+            if command == 'baidu_status':
+                self.calls.append(command)
+                return {'ok': True, 'state': 'browser_idle', 'live_enabled': True}
+            return original(command, *args)
+        self.hub.bridge = idle_bridge
+        self.s.set('baidu.paused', {'code': 'login_required'})
+        await hub_baidu.resume(self.hub)
+        self.assertIsNone(self.s.get('baidu.paused'))
+        self.calls.clear()
+        job = self.submit()
+        await self.hub.run_one()
+        self.assertEqual(self.calls, ['baidu_status', 'baidu_query'])
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertIsNone(self.s.get('baidu.paused'))
+
+    async def test_other_nonready_states_remain_blocked(self):
+        for state in ('login_required', 'login_in_progress', 'signature_unavailable'):
+            with self.subTest(state=state):
+                self.hub.bridge = Mock(return_value={'ok': True, 'state': state, 'live_enabled': True})
+                self.s.set('baidu.paused', {'code': state})
+                with self.assertRaises(HubError):
+                    await hub_baidu.resume(self.hub)
+                self.s.set('baidu.paused', None)
+                job = self.submit()
+                await self.hub.run_one()
+                self.assertEqual(self.s.job(job['id'])['error']['code'], state)
+                self.hub.bridge.assert_called_with('baidu_status', None, 2)
+                self.assertEqual(hub_baidu.daily(self.s)['attempts'], 0)
+
     async def test_limits_interval_and_day_rollover(self):
         today = dt.datetime.now(b.TZ).date().isoformat()
         for attempts, http in [(120, 0), (0, 399), (0, 400)]:

@@ -75,7 +75,7 @@ async def resume(hub):
     paused = hub.store.get('baidu.paused') or {}
     if paused.get('code') == 'rate_limited' and time.time() < paused.get('since', time.time()) + limits()['rate_limit_cooldown_seconds']:
         raise HubError('rate_limited', '百度冷却尚未结束。', 409)
-    if await browser_status(hub) != 'browser_ready':
+    if await browser_status(hub) not in ('browser_ready', 'browser_idle'):
         raise HubError('login_required', '百度浏览器未就绪。', 409)
     hub.store.set('baidu.paused', None)
 
@@ -106,7 +106,7 @@ async def run_one(hub, row, query):
             fail(store, row['id'], 'baidu_daily_limit')
             return True
         state = await browser_status(hub)
-        if state != 'browser_ready':
+        if state not in ('browser_ready', 'browser_idle'):
             fail(store, row['id'], state)
             return True
         # Reserve both steps before dispatch; timeout/restart never refunds uncertain traffic.
