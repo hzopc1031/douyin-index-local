@@ -265,3 +265,5 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 管理员使用 `POST /api/v1/login/baidu/open` 打开或聚焦官方登录窗口，再通过远程桌面扫码；`GET /api/v1/status` 的 `platform_status.baidu.browser` 显示浏览器状态。处理登录、验证或风控后，管理员通过 `POST /api/v1/collection/resume` 指定 `{"platform":"baidu"}` 人工恢复；限频至少冷却一小时，失败任务不自动重试。接口不接收或返回百度 Cookie。配置、凭据边界、部署与七日独立页面验收见 [BAIDU.md](BAIDU.md)。离线测试不代表线上验收。
 
 百度已存趋势和 CSV 导出支持 `device=all|pc|wise`，默认 `all`；抖音忽略此参数。设备筛选只读取已存数据，不发起采集。
+
+百度关联需求支持 `kind=related`，按 `end_date` 获取需求图谱单日快照；`GET /api/v1/insights` 与 `/api/v1/insights/ranges` 可用 `platform=baidu` 读取，省略平台默认为抖音。百度画像尚不支持。
