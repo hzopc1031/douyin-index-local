@@ -10,7 +10,7 @@ async (query) => {
     return {type, keys};
   };
   const typeOf = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
-  const safeKey = key => /^[A-Za-z_][A-Za-z0-9_]{0,31}$/.test(key) ? key : 'masked';
+  const safeKey = key => /^[A-Za-z_][A-Za-z0-9_]{0,40}$/.test(key) ? key : 'masked';
   const pattern = value => Array.from(value, ch => /[0-9]/.test(ch) ? '9' : /[A-Za-z]/.test(ch) ? 'a' : ch.codePointAt(0) > 127 ? 'C' : ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? 'C' : ch).slice(0, 64).join('');
   const shape = (value, depth = 0) => {
     const type = typeOf(value);
@@ -51,7 +51,7 @@ async (query) => {
       decoded_points:Number.isInteger(diag.decoded_points) ? diag.decoded_points : null,
       data_length:Number.isInteger(diag.data_length) ? diag.data_length : null,
       data_type:diag.data_type || null, datelist_sent:query.related_date ? query.related_date.replaceAll('-', '') : 'none',
-      period_returned:diag.period_returned === true, ...(diag.period_shape ? {period_shape:diag.period_shape} : {}), ...(diag.entry_keys ? {entry_keys:diag.entry_keys} : {})}};
+      period_returned:diag.period_returned === true, ...(diag.period_rule ? {period_rule:diag.period_rule, period_days:diag.period_days ?? null} : {}), ...(diag.entry_rule ? {entry_rule:diag.entry_rule} : {}), ...(diag.period_shape ? {period_shape:diag.period_shape} : {}), ...(diag.entry_keys ? {entry_keys:diag.entry_keys} : {})}};
   };
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
@@ -150,9 +150,23 @@ async (query) => {
       };
       const [start, end] = dates ? dates.map(iso) : [null, null];
       const startMs = Date.parse(start + 'T00:00:00Z'), endMs = Date.parse(end + 'T00:00:00Z');
-      if (!start || !end || !Number.isFinite(startMs) || !Number.isFinite(endMs) || new Date(startMs).toISOString().slice(0,10) !== start || new Date(endMs).toISOString().slice(0,10) !== end || (endMs - startMs) / 86400000 < 5 || (endMs - startMs) / 86400000 > 7) return schema(data, {reason:'related_period', data_type:dataType, period_returned:periodReturned, ...(periodReturned ? {period_shape:shape(period)} : {}), entry_keys:keys});
-      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType, period_returned:periodReturned, entry_keys:keys});
-      return {status:'ok', meta:{entry_keys:keys}, data:{period:{start_date:start, end_date:end}, wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
+      const validDates = start && end && Number.isFinite(startMs) && Number.isFinite(endMs) && new Date(startMs).toISOString().slice(0,10) === start && new Date(endMs).toISOString().slice(0,10) === end;
+      const days = validDates ? (endMs - startMs) / 86400000 + 1 : null;
+      const periodRule = !dates ? 'unknown_format' : !validDates ? 'invalid_date' : startMs > endMs ? 'start_after_end' : days > 366 ? 'span_out_of_range' : null;
+      const detail = {data_type:dataType, period_returned:periodReturned, entry_keys:keys};
+      if (periodRule) return schema(data, {...detail, reason:'related_period', period_rule:periodRule, period_days:days, ...(periodReturned ? {period_shape:shape(period)} : {})});
+      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph)) return schema(data, {...detail, reason:'related_wordlist_shape'});
+      const items = data.wordlist[0].wordGraph;
+      if (items.length > 100) return schema(data, {...detail, reason:'too_many_entries'});
+      for (const item of items) {
+        let rule = !item || typeof item !== 'object' || Array.isArray(item) ? 'item_not_object' : typeof item.word !== 'string' || !item.word.trim() ? 'word_missing' : item.word.length > 200 ? 'word_too_long' : null;
+        if (!rule) for (const field of ['pv', 'sim', 'ratio']) {
+          const value = item[field];
+          if (value != null && (typeof value !== 'number' || !Number.isFinite(value) || (field !== 'ratio' && value < 0))) { rule = field + '_invalid'; break; }
+        }
+        if (rule) return schema(data, {...detail, reason:'related_entry_shape', entry_rule:rule});
+      }
+      return {status:'ok', meta:{entry_keys:keys}, data:{period:{start_date:start, end_date:end, days}, wordlist:[{wordGraph:items.map(item => ({word:item.word, pv:item.pv ?? null, sim:item.sim ?? null, ratio:item.ratio ?? null}))}]}};
     }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');
     let signature;

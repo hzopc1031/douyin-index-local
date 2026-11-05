@@ -85,7 +85,12 @@ def project_wordgraph(data):
             word = item['word']
             if type(item) is not dict or not isinstance(word, str) or not word.strip() or len(word) > 200:
                 raise ValueError
-            rows.append({'keyword': word, 'relation_score': None, 'search_index': None})
+            import math
+            for field in ('pv', 'sim', 'ratio'):
+                value = item.get(field)
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or (field != 'ratio' and value < 0)):
+                    raise ValueError
+            rows.append({'keyword': word, 'relation_score': item.get('sim'), 'search_index': item.get('pv'), 'change_ratio': item.get('ratio')})
         return {'search_related': rows, 'content_related': []}
     except (KeyError, TypeError, ValueError):
         raise BaiduError() from None
@@ -372,7 +377,7 @@ def bridge_command(command, payload=None):
         logging.getLogger('index_hub.baidu').warning(
             'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s datelist_sent=%s period_returned=%s',
             job_id, code, sent, since, str(on_index).lower(),
-            query.get('related_date', 'none').replace('-', ''), str(period_returned).lower())
+            'present' if query.get('related_date') else 'none', str(period_returned).lower())
 
     try:
         def run(context):
@@ -388,11 +393,11 @@ def bridge_command(command, payload=None):
             if query.get('kind') == 'related':
                 graph = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
                 period = graph['period']
-                if type(period) is not dict or set(period) != {'start_date', 'end_date'}:
+                if type(period) is not dict or set(period) != {'start_date', 'end_date', 'days'}:
                     raise BaiduError()
                 try:
                     start, end = (dt.date.fromisoformat(period[k]) for k in ('start_date', 'end_date'))
-                    if any(period[k] != d.isoformat() for k, d in zip(('start_date', 'end_date'), (start, end))) or not 5 <= (end - start).days <= 7:
+                    if any(period[k] != d.isoformat() for k, d in zip(('start_date', 'end_date'), (start, end))) or type(period['days']) is not int or period['days'] != (end - start).days + 1 or not 1 <= period['days'] <= 366:
                         raise ValueError
                 except (TypeError, ValueError):
                     raise BaiduError() from None

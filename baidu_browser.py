@@ -213,7 +213,7 @@ def _safe_entry_keys(value):
     if type(value) is not dict or len(value) > 1048576:
         raise ValueError
     for key, kind in value.items():
-        if (type(key) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,31}', key, flags=re.ASCII)
+        if (type(key) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,40}', key, flags=re.ASCII)
                 or type(kind) is not str or kind not in ('string', 'number', 'boolean', 'null', 'array', 'object', 'mixed')):
             raise ValueError
     return dict(sorted(value.items()))
@@ -248,7 +248,7 @@ def _safe_period_shape(value, depth=0):
                 or len(value['keys']) > 8 or type(value['values']) is not dict):
             raise ValueError
         keys = value['keys']
-        if any(type(k) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,31}', k, flags=re.ASCII) for k in keys):
+        if any(type(k) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,40}', k, flags=re.ASCII) for k in keys):
             raise ValueError
         if keys != sorted(set(keys)) or set(keys) != set(value['values']):
             raise ValueError
@@ -262,9 +262,9 @@ def _safe_diag(value):
     import re
     keys = {'reason', 'request_start', 'request_end', 'response_start', 'response_end',
             'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type', 'datelist_sent', 'period_returned'}
-    if type(value) is not dict or set(value) - {'period_shape', 'entry_keys'} != keys or value['reason'] not in {
+    if type(value) is not dict or set(value) - {'period_shape', 'entry_keys', 'period_rule', 'period_days', 'entry_rule'} != keys or value['reason'] not in {
             'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
-            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_shape', 'related_period'}:
+            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_wordlist_shape', 'related_entry_shape', 'too_many_entries', 'related_period'}:
         raise ValueError
     if type(value['period_returned']) is not bool or type(value['datelist_sent']) is not str or not re.fullmatch(r'none|[0-9]{8}', value['datelist_sent'], flags=re.ASCII):
         raise ValueError
@@ -281,12 +281,18 @@ def _safe_diag(value):
         n = value[key]
         if (n is None and key == 'ptbk_length') or (n is not None and (type(n) is not int or not 0 <= n <= 1048576)):
             raise ValueError
+    if 'period_rule' in value or 'period_days' in value:
+        if (value['reason'] != 'related_period' or value.get('period_rule') not in ('invalid_date', 'start_after_end', 'span_out_of_range', 'unknown_format')
+                or 'period_days' not in value or (value['period_days'] is not None and (type(value['period_days']) is not int or not -3652059 <= value['period_days'] <= 3652059))):
+            raise ValueError
+    if 'entry_rule' in value and (value['reason'] != 'related_entry_shape' or value['entry_rule'] not in ('item_not_object', 'word_missing', 'word_too_long', 'pv_invalid', 'sim_invalid', 'ratio_invalid')):
+        raise ValueError
     if 'period_shape' in value:
         if value['reason'] != 'related_period' or not value['period_returned']:
             raise ValueError
         _safe_period_shape(value['period_shape'])
     if 'entry_keys' in value:
-        if value['reason'] not in ('related_period', 'related_shape'):
+        if value['reason'] not in ('related_period', 'related_wordlist_shape', 'related_entry_shape', 'too_many_entries'):
             raise ValueError
         _safe_entry_keys(value['entry_keys'])
     return value
@@ -337,7 +343,10 @@ class PageTransport:
                 try:
                     digest = _safe_digest(result['schema_digest'])
                     diag = _safe_diag(result['schema_diag']) if 'schema_diag' in result else None
-                    logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(diag, separators=(',', ':')))
+                    logged_diag = diag
+                    if diag and query.get('kind') == 'related':
+                        logged_diag = {k: v for k, v in diag.items() if k not in ('request_start', 'request_end', 'response_start', 'response_end', 'datelist_sent', 'entry_keys', 'period_shape')}
+                    logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(logged_diag, separators=(',', ':')))
                 except (TypeError, ValueError, RecursionError):
                     pass
             if query.get('kind') == 'related':
@@ -355,7 +364,7 @@ class PageTransport:
 
     def _log_entry_keys(self, value):
         keys = _safe_entry_keys(value)
-        logging.getLogger('index_hub.baidu').warning('baidu_related_entry_keys job=%s keys=%s', self.job_id, ','.join(f'{key}:{kind}' for key, kind in keys.items()))
+        logging.getLogger('index_hub.baidu').warning('baidu_related_fields job=%s fields %s', self.job_id, ','.join(f'{key}:{kind}' for key, kind in keys.items()))
 
 
 _browser = None
