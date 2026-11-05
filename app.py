@@ -128,9 +128,10 @@ class Api:
             if payload['action'] == 'tags':
                 spec = {'method': 'GET', 'url': TAG_URL}
             else:
+                children = payload.get('child_ids') if isinstance(payload.get('child_ids'), list) else []
                 spec = {'method': 'POST', 'url': BOARD_URL,
                         'body': json.dumps(board_body(payload.get('rank'), payload.get('tag_id') or '',
-                                                     payload.get('parent_id') or ''),
+                                                     payload.get('parent_id') or '', children),
                                            ensure_ascii=False)}
             requested = True
             body, summary = run_page_request(window, spec)

@@ -18,8 +18,8 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
-from topic_board import (category_names, record_topic_result, snapshot_is_fresh, tag_for,
-                         topic_enabled, topic_view, validate_topic_query)
+from topic_board import (apply_empty_mark, category_names, record_topic_result, snapshot_is_fresh,
+                         tag_for, topic_enabled, topic_view, validate_topic_query)
 from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
@@ -951,8 +951,9 @@ def mount(app, hub):
         require(request)
         names = category_names(s.get('topic_categories'))
         category, rank, window = validate_topic_query(request.query, names)
-        return reply(topic_view(s.latest_topics(rank=rank, window=window, category=category),
-                                enabled=topic_enabled(), paused=s.get('topic_paused'), categories=names))
+        snapshot = apply_empty_mark(s, s.latest_topics(rank=rank, window=window, category=category))
+        return reply(topic_view(snapshot, enabled=topic_enabled(), paused=s.get('topic_paused'),
+                                categories=names))
 
     async def topic_once(request):
         require(request, admin=True)
@@ -982,6 +983,7 @@ def mount(app, hub):
         found = tag_for(s, category)
         job = {'action': 'board', 'rank': rank, 'tag_id': '' if found is None else str(found['id']),
                'parent_id': '' if found is None else str(found.get('parent_id') or ''),
+               'child_ids': [] if found is None else [str(item) for item in (found.get('child_ids') or [])],
                'tag_name': category}
         hub._topic_inflight.add(key)
         try:

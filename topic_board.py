@@ -74,13 +74,39 @@ def snapshot_is_fresh(snapshot, now, window=TOPIC_FRESH_SECONDS):
     return 0 <= age < window
 
 
+def empty_mark_key(rank, window, category):
+    return f'{rank}|{window}|{category}'
+
+
+def apply_empty_mark(store, snapshot):
+    """A code-0 empty board has no rows. Remember the fetch so the UI can say so."""
+    if snapshot.get('items') or snapshot.get('fetched_at'):
+        return snapshot
+    marks = store.get('topic_empty') or {}
+    if not isinstance(marks, dict):
+        return snapshot
+    stamp = marks.get(empty_mark_key(snapshot['rank'], snapshot['window'], snapshot['category']))
+    if not isinstance(stamp, str) or not stamp:
+        return snapshot
+    marked = dict(snapshot)
+    marked['fetched_at'] = stamp
+    return marked
+
+
 def topic_view(snapshot, *, enabled, paused=None, categories=None):
+    """On-demand reads stay available when the scheduler is off.
+
+    `enabled` still reports whether INDEX_HUB_TOPIC_ENABLED is exactly 1.
+    An empty saved board is not the same as never collected, and neither is 未启用.
+    """
     if paused:
         status, label = 'paused', '已暂停'
     elif snapshot['items']:
         status, label = 'available', '已保存'
+    elif snapshot.get('fetched_at'):
+        status, label = 'available', '该垂类暂无话题'
     elif not enabled:
-        status, label = 'disabled', '未启用'
+        status, label = 'available', '尚未采集'
     else:
         status, label = 'not_logged_in', '未登录'
     return {'status': status, 'status_label': label, 'window': snapshot['window'],
@@ -91,13 +117,13 @@ def topic_view(snapshot, *, enabled, paused=None, categories=None):
 
 
 def tag_for(store, category):
-    """Return the stored leaf. Lookup failure is a client error, not a paused board."""
+    """Return one stored parent or leaf. Lookup failure is a client error."""
     if category == '全部':
         return None
     saved = store.get('topic_categories') or []
     matches = [item for item in saved if isinstance(item, dict) and item.get('name') == category and item.get('id')]
     if len(matches) != 1:
-        raise HubError('invalid_parameters', '垂类不在已保存的叶子分类中。')
+        raise HubError('invalid_parameters', '垂类不在已保存的分类中。')
     return matches[0]
 
 
@@ -127,13 +153,24 @@ def record_topic_result(store, job, result):
     if job.get('action') == 'tags':
         store.set('topic_categories', result.get('tags') or [])
         store.set('topic_tags_at', time.time())
-    elif result.get('items'):
-        store.save_topic_snapshot({
-            'complete': True, 'rank': job['rank'], 'window': '1d', 'category': job['tag_name'],
-            'source': BOARD_SOURCE,
-            'fetched_at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
-            'items': result['items'],
-        })
+    elif job.get('action') == 'board' and isinstance(result.get('items'), list):
+        key = empty_mark_key(job['rank'], '1d', job['tag_name'])
+        marks = store.get('topic_empty') or {}
+        if not isinstance(marks, dict):
+            marks = {}
+        if result['items']:
+            store.save_topic_snapshot({
+                'complete': True, 'rank': job['rank'], 'window': '1d', 'category': job['tag_name'],
+                'source': BOARD_SOURCE,
+                'fetched_at': datetime.now(ZoneInfo('Asia/Shanghai')).isoformat(),
+                'items': result['items'],
+            })
+            if key in marks:
+                marks.pop(key, None)
+                store.set('topic_empty', marks)
+        else:
+            marks[key] = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
+            store.set('topic_empty', marks)
     return result
 
 
@@ -175,6 +212,7 @@ def probe_main(argv):
                     found = tag_for(store, args.category)
                     job['tag_id'] = '' if found is None else str(found['id'])
                     job['parent_id'] = '' if found is None else str(found.get('parent_id') or '')
+                    job['child_ids'] = [] if found is None else [str(item) for item in (found.get('child_ids') or [])]
                 try:
                     result = call_bridge('topic', job)
                 except OSError:

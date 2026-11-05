@@ -126,6 +126,18 @@ def _child_lists(row):
     return found
 
 
+def _direct_child_ids(children):
+    found = []
+    for rows in children:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            child = _tag_from(row)
+            if child is not None and child['id'] not in found:
+                found.append(child['id'])
+    return found
+
+
 def _walk_tags(rows, tags, seen, parent_id=None, parent_name=None, depth=0):
     if depth > 5 or not isinstance(rows, list):
         return
@@ -134,7 +146,15 @@ def _walk_tags(rows, tags, seen, parent_id=None, parent_name=None, depth=0):
             continue
         item = _tag_from(row)
         children = _child_lists(row)
-        if children:
+        if children and item is not None and item['id'] not in seen:
+            child_ids = _direct_child_ids(children)
+            if child_ids:
+                item['child_ids'] = child_ids
+            seen.add(item['id'])
+            tags.append(item)
+            for child in children:
+                _walk_tags(child, tags, seen, item['id'], item['name'], depth + 1)
+        elif children:
             next_parent = item['id'] if item else parent_id
             next_name = item['name'] if item else parent_name
             for child in children:
@@ -149,7 +169,7 @@ def _walk_tags(rows, tags, seen, parent_id=None, parent_name=None, depth=0):
 
 
 def parse_tags(payload):
-    """Keep only leaves. Parents are remembered so the billboard can nest value/children."""
+    """Keep parents and leaves. The page filters a parent by sending every child id."""
     lists = _candidate_lists(payload)
     tags, seen = [], set()
     for rows in lists:
@@ -259,6 +279,7 @@ def plan_round(tags, cursor, *, include_tags):
         choice = tags[cursor % len(tags)]
         jobs.append({'action': 'board', 'rank': 'total' if cursor % 2 == 0 else 'rising',
                      'tag_id': choice['id'], 'parent_id': choice.get('parent_id') or '',
+                     'child_ids': list(choice.get('child_ids') or []),
                      'tag_name': choice['name']})
     return jobs
 
@@ -270,19 +291,23 @@ def _tag_value(raw):
     return int(text)
 
 
-def board_body(rank, tag_id='', parent_id=''):
-    """Match the page body: tags are {value, children}, not a bare id."""
+def board_body(rank, tag_id='', parent_id='', child_ids=None):
+    """Match douhot TopicTab: tag_version v2, parent value plus child values."""
     if rank not in RANK_SUBTYPE:
         raise TopicFetchError('invalid_params', '榜单只能是总榜或飙升。')
     body = {'sub_type': RANK_SUBTYPE[rank], 'date_window': DATE_WINDOW_HOURS,
-            'page': 1, 'page_size': PAGE_SIZE, 'tags': []}
+            'page': 1, 'page_size': PAGE_SIZE, 'tag_version': 'v2', 'tags': []}
     if not tag_id:
         return body
-    leaf = {'value': _tag_value(tag_id)}
-    if parent_id:
-        body['tags'] = [{'value': _tag_value(parent_id), 'children': [leaf]}]
+    children = [str(item) for item in (child_ids or []) if str(item).strip()]
+    if children:
+        body['tags'] = [{'value': _tag_value(tag_id),
+                         'children': [{'value': _tag_value(item)} for item in children]}]
+    elif parent_id:
+        body['tags'] = [{'value': _tag_value(parent_id),
+                         'children': [{'value': _tag_value(tag_id)}]}]
     else:
-        body['tags'] = [leaf]
+        body['tags'] = [{'value': _tag_value(tag_id)}]
     return body
 
 

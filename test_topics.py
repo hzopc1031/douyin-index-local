@@ -79,14 +79,15 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.temp.cleanup()
 
-    async def test_empty_board_is_disabled_and_does_not_collect(self):
+    async def test_empty_board_is_not_disabled_and_does_not_collect(self):
         self.hub.store.set('daily', {'date': '2026-11-04', 'count': 4})
         self.assertEqual((await self.client.get('/api/v1/topics')).status, 401)
         response = await self.client.get('/api/v1/topics', headers=self.reader)
         self.assertEqual(response.status, 200)
         payload = await response.json()
-        self.assertEqual(payload['status'], 'disabled')
-        self.assertEqual(payload['status_label'], '未启用')
+        self.assertEqual(payload['status'], 'available')
+        self.assertEqual(payload['status_label'], '尚未采集')
+        self.assertFalse(payload['enabled'])
         self.assertEqual(payload['items'], [])
         self.assertEqual(payload['window_label'], '近1天')
         self.assertEqual(payload['rank_label'], '总榜')

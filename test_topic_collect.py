@@ -39,7 +39,10 @@ class ParseTests(unittest.TestCase):
                 {'label': '数码', 'value': 62801, 'children': []},
             ]},
         ]}})
-        self.assertEqual(tags, [{'id': '62801', 'name': '数码', 'parent_id': '628'}])
+        self.assertEqual(tags, [
+            {'id': '628', 'name': '科技', 'child_ids': ['62801']},
+            {'id': '62801', 'name': '数码', 'parent_id': '628'},
+        ])
         items, _ = parse_board({'code': 0, 'data': {'billboard_list': [
             {'challenge_id': '9', 'challenge_name': '词'},
         ]}})
@@ -52,6 +55,9 @@ class ParseTests(unittest.TestCase):
     def test_leaf_tags_are_nested_and_code_five_does_not_pause(self):
         from topic_fetch import board_body
         self.assertEqual(board_body('total', '', '')['tags'], [])
+        self.assertEqual(board_body('total', '', '')['tag_version'], 'v2')
+        self.assertEqual(board_body('total', '628', '', ['62801', '62808'])['tags'],
+                         [{'value': 628, 'children': [{'value': 62801}, {'value': 62808}]}])
         self.assertEqual(board_body('total', '62801', '628')['tags'],
                          [{'value': 628, 'children': [{'value': 62801}]}])
         self.assertEqual(board_body('rising', '7', '')['tags'], [{'value': 7}])
@@ -66,8 +72,9 @@ class ParseTests(unittest.TestCase):
             {'label': '科技', 'value': 1, 'children': [{'label': '数码', 'value': 11}]},
             {'label': '生活', 'value': 2, 'children': [{'label': '数码', 'value': 21}]},
         ]})
-        self.assertEqual([(item['name'], item['parent_id']) for item in same_name],
-                         [('科技 / 数码', '1'), ('生活 / 数码', '2')])
+        self.assertEqual([(item['name'], item.get('parent_id'), item.get('child_ids')) for item in same_name],
+                         [('科技', None, ['11']), ('科技 / 数码', '1', None),
+                          ('生活', None, ['21']), ('生活 / 数码', '2', None)])
 
     def test_non_json_summary_keeps_no_body_text(self):
         from topic_fetch import summarize_response
@@ -185,3 +192,20 @@ class StoreTests(unittest.TestCase):
         record_topic_result(store, {'action': 'board', 'rank': 'total', 'tag_name': '数码'},
                             {'ok': False, 'code': 'not_logged_in', 'requested': False})
         self.assertEqual(store.get('topic_paused')['code'], 'not_logged_in')
+
+    def test_empty_board_is_remembered_without_a_fake_row(self):
+        from topic_board import apply_empty_mark, record_topic_result, topic_view
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = Store(Path(temp.name) / 'hub.sqlite3')
+        self.addCleanup(store.close)
+        record_topic_result(store, {'action': 'board', 'rank': 'total', 'tag_name': '科技'},
+                            {'ok': True, 'requested': True, 'items': []})
+        self.assertIsNone(store.get('topic_paused'))
+        snapshot = apply_empty_mark(store, store.latest_topics(rank='total', window='1d', category='科技'))
+        self.assertEqual(snapshot['items'], [])
+        self.assertIsNotNone(snapshot['fetched_at'])
+        view = topic_view(snapshot, enabled=False)
+        self.assertEqual(view['status'], 'available')
+        self.assertEqual(view['status_label'], '该垂类暂无话题')
+        self.assertFalse(view['enabled'])

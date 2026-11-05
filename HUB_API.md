@@ -182,7 +182,7 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 ## 热点宝·话题采集
 
-话题榜不自动轮询。`INDEX_HUB_TOPIC_ENABLED` 仍默认关闭，即使设为 `1` 也不会启动定时轮次。工作台在选中具体垂类时，或在该垂类上切换总榜/飙升时，调用一次 `POST /api/v1/topics/collect-once`。选「全部」只读已保存快照，这个接口也拒绝 `category=全部`。同一榜（总榜或飙升、垂类、近 1 天）在 10 分钟内，或已有请求在进行时，不再打浏览器。请求仍由 desktop 里的热点宝页面自己 `fetch`，不签名、不读取 Cookie。两次请求至少间隔 15 秒，上海日最多 30 次。垂类只保存 `content_tag` 的叶子。具体垂类的 `tags` 是 `[{"value": 父级数字, "children": [{"value": 叶子数字}]}]`；没有父级时是 `[{"value": 叶子数字}]`；「全部」仍是 `tags: []`。名称对不上已保存叶子时直接返回 400 `invalid_parameters`，不请求浏览器。业务码 5（参数不合法）记为 `invalid_params`，只让这一次失败，不暂停。未登录、验证码、限频、拒绝访问或无法识别的响应仍会暂停，不自动重试。`POST /api/v1/topics/resume` 只清除暂停。
+话题榜不自动轮询。`INDEX_HUB_TOPIC_ENABLED` 仍默认关闭，即使设为 `1` 也不会启动定时轮次。工作台在选中具体垂类时，或在该垂类上切换总榜/飙升时，调用一次 `POST /api/v1/topics/collect-once`。选「全部」只读已保存快照，这个接口也拒绝 `category=全部`。同一榜（总榜或飙升、垂类、近 1 天）在 10 分钟内，或已有请求在进行时，不再打浏览器。请求仍由 desktop 里的热点宝页面自己 `fetch`，不签名、不读取 Cookie。两次请求至少间隔 15 秒，上海日最多 30 次。垂类保存父级和叶子。请求体与热点宝话题页一致，带 `tag_version: "v2"`。「全部」仍是 `tags: []`。父级（例如科技）发送 `[{"value": 父级数字, "children": [{"value": 每个子级数字}]}]`。叶子发送 `[{"value": 父级数字, "children": [{"value": 叶子数字}]}]`。名称对不上已保存分类时直接返回 400 `invalid_parameters`，不请求浏览器。业务码 5（参数不合法）记为 `invalid_params`，只让这一次失败，不暂停。未登录、验证码、限频、拒绝访问或无法识别的响应仍会暂停，不自动重试。`POST /api/v1/topics/resume` 只清除暂停。
 
 手动打一次（不开启调度），在 desktop 服务已经运行、浏览器进程持有 Unix socket 时，用服务账号执行：
 
@@ -192,7 +192,7 @@ sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_D
   .venv/bin/python topic_board.py --probe --rank total --category 全部
 ```
 
-先拉垂类用 `--probe --tags`。输出含 `status`、`item_count`、`fields` 和 `summary`。`summary` 只有 HTTP 状态、最终 URL 的主机和路径、content-type、顶层 code/message，以及 JSON 的键和类型；不包含正文字符串、普通数字、Cookie 或 token。同一份摘要追加到 `topic.log`。`request.through_page_fetch` 表示请求由热点宝页面的 `fetch` 发出；`fetch_hooked` 表示该函数已被页面替换；`extra_query_keys` 只列出实际 URL 比我们多出来的参数名（例如 `a_bogus`），不含参数值。打开页面时先用首页，若 `fetch` 仍是原生函数，再依次试 `/ranking`、`/topic`、`/analysis`，仍不自行签名。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`invalid_params`、`invalid_parameters`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。具体垂类示例：`--probe --rank total --category 科技`。名称必须是已保存的叶子；父级名称不会再出现在列表里，需要先 `--probe --tags` 重拉垂类。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
+先拉垂类用 `--probe --tags`。输出含 `status`、`item_count`、`fields` 和 `summary`。`summary` 只有 HTTP 状态、最终 URL 的主机和路径、content-type、顶层 code/message，以及 JSON 的键和类型；不包含正文字符串、普通数字、Cookie 或 token。同一份摘要追加到 `topic.log`。`request.through_page_fetch` 表示请求由热点宝页面的 `fetch` 发出；`fetch_hooked` 表示该函数已被页面替换；`extra_query_keys` 只列出实际 URL 比我们多出来的参数名（例如 `a_bogus`），不含参数值。打开页面时先用首页，若 `fetch` 仍是原生函数，再依次试 `/ranking`、`/topic`、`/analysis`，仍不自行签名。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`invalid_params`、`invalid_parameters`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。父级示例：`--probe --rank total --category 科技`。叶子用已保存的子级名称。需要先 `--probe --tags` 重拉垂类，父级和叶子都会出现在列表里。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
 
 搜索指数分：同一日历日每个词都有非空搜索指数才计算。当前日取最新的齐全日，基线取最早的齐全日并记为 100。基线合计为 0 时不归一化，搜索分为 null，原始合计仍返回。没有齐全日时搜索分为 null，并列出参考日缺了哪些词。
 
@@ -204,7 +204,7 @@ sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_D
 
 ## 热点宝·话题（待联调）
 
-`GET /topics` 只读 `topic_snapshots`。默认 `window=1d`（近1天）、`rank=total`（总榜，另一值为 `rising` 飙升）、`category=全部`。垂类必须是响应里的 `categories` 之一。没有快照时 `items` 为空：`INDEX_HUB_TOPIC_ENABLED` 不是精确的 `1` 时 `status=disabled`（未启用）；设为 `1` 时 `status=not_logged_in`（未登录）。这个开关不会发起抓取。真实采集要等服务器 Qt 浏览器登录后联调，当前不调用浏览器、不自动重试，也不伪造话题。已存快照里的热度缺失仍是 null，不补 0。话题、热搜榜和搜索指数彼此分开。分类名称待与热点宝页面核对，见 `topic_board.py`。
+`GET /topics` 只读 `topic_snapshots`。默认 `window=1d`（近1天）、`rank=total`（总榜，另一值为 `rising` 飙升）、`category=全部`。垂类必须是响应里的 `categories` 之一。没有快照时 `items` 为空。调度开关 `INDEX_HUB_TOPIC_ENABLED` 仍只表示定时轮次是否允许，`enabled` 照实返回；它不决定按需页面的文案。尚未采集时 `status=available`、`status_label=尚未采集`。已经成功返回空榜时 `status_label=该垂类暂无话题`。已暂停仍是 `paused`。调度开着且从未采集时仍是 `not_logged_in`（未登录）。这个开关不会发起抓取。真实采集要等服务器 Qt 浏览器登录后联调，当前不调用浏览器、不自动重试，也不伪造话题。已存快照里的热度缺失仍是 null，不补 0。话题、热搜榜和搜索指数彼此分开。
 
 ## 扩展数据（试验接入）
 POST /api/v1/insights/queries：与 queries 相同的 Bearer/query 权限及 Idempotency-Key，增加 kind=related 或 audience，keywords 恰好一个；支持 start_date/end_date。每个模块独立任务、一次在线尝试，复用全局 50 次日限额、15 秒间隔与 24 小时缓存。结果通过 jobs/{id} 获取。

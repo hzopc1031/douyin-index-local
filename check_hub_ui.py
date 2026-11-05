@@ -107,7 +107,7 @@ def run(output=None):
                                              substring_hits=[dict(keyword=words[-1], word=words[-1] + '醋鱼')]),
                                     fusion=dict(score=None))
                     elif path == 'topics':
-                        data = dict(status='disabled', status_label='未启用', window='1d', window_label='近1天',
+                        data = dict(status='available', status_label='尚未采集', window='1d', window_label='近1天',
                                     rank=query.get('rank', ['total'])[0],
                                     rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
                                     category=query.get('category', ['全部'])[0],
@@ -408,7 +408,7 @@ def run(output=None):
                 page.locator('[data-source=topic]').click()
                 page.wait_for_function("document.querySelector('#topicCategory').textContent.includes('美食')")
                 assert page.locator('#topicWindow').inner_text() == '近1天'
-                assert '未启用' in page.locator('#topicStatus').inner_text()
+                assert '尚未采集' in page.locator('#topicStatus').inner_text()
                 assert '不是搜索指数' in page.locator('#topicIntro').inner_text()
                 assert '待联调' in page.locator('#topicStatus').inner_text()
                 before_topic = len(writes)
