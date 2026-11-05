@@ -18,7 +18,7 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
-from topic_board import (category_names, record_topic_result, snapshot_is_fresh, tag_id_for,
+from topic_board import (category_names, record_topic_result, snapshot_is_fresh, tag_for,
                          topic_enabled, topic_view, validate_topic_query)
 from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
 from hot_rising import RISING_NOTE, rising_report
@@ -979,7 +979,10 @@ def mount(app, hub):
         gate = request_gate(now, s.get('topic_request_at'), int(counter.get('count') or 0))
         if gate != 'ok':
             raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
-        job = {'action': 'board', 'rank': rank, 'tag_id': tag_id_for(s, category), 'tag_name': category}
+        found = tag_for(s, category)
+        job = {'action': 'board', 'rank': rank, 'tag_id': '' if found is None else str(found['id']),
+               'parent_id': '' if found is None else str(found.get('parent_id') or ''),
+               'tag_name': category}
         hub._topic_inflight.add(key)
         try:
             result = record_topic_result(s, job, await asyncio.to_thread(
@@ -987,8 +990,10 @@ def mount(app, hub):
         finally:
             hub._topic_inflight.discard(key)
         status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')
+        messages = {'invalid_params': '这个垂类的参数不被热点宝接受，采集未暂停。'}
         return reply({'status': status, 'item_count': result.get('item_count') or 0,
                       'fields': result.get('fields') or [], 'rank': rank, 'category': category,
+                      'message': messages.get(status),
                       'live_request': bool(result.get('requested'))})
 
     async def topic_resume(request):

@@ -35,9 +35,11 @@ class ParseTests(unittest.TestCase):
 
     def test_nested_tags_and_billboard_list_are_accepted(self):
         tags = parse_tags({'code': 0, 'data': {'tag_list': [
-            {'id': 1, 'name': '美食', 'children': [{'id': 2, 'label': '火锅'}]},
+            {'label': '科技', 'value': 628, 'children': [
+                {'label': '数码', 'value': 62801, 'children': []},
+            ]},
         ]}})
-        self.assertEqual([item['name'] for item in tags], ['美食', '火锅'])
+        self.assertEqual(tags, [{'id': '62801', 'name': '数码', 'parent_id': '628'}])
         items, _ = parse_board({'code': 0, 'data': {'billboard_list': [
             {'challenge_id': '9', 'challenge_name': '词'},
         ]}})
@@ -46,6 +48,26 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(TopicFetchError) as caught:
             parse_board({'code': 0, 'data': {'unexpected': {'value': 'secret-text'}}})
         self.assertEqual(caught.exception.code, 'schema_mismatch')
+
+    def test_leaf_tags_are_nested_and_code_five_does_not_pause(self):
+        from topic_fetch import board_body
+        self.assertEqual(board_body('total', '', '')['tags'], [])
+        self.assertEqual(board_body('total', '62801', '628')['tags'],
+                         [{'value': 628, 'children': [{'value': 62801}]}])
+        self.assertEqual(board_body('rising', '7', '')['tags'], [{'value': 7}])
+        with self.assertRaises(TopicFetchError) as bad:
+            board_body('total', '科技', '')
+        self.assertEqual(bad.exception.code, 'invalid_params')
+        with self.assertRaises(TopicFetchError) as caught:
+            parse_board({'code': 5, 'message': '参数不合法', 'data': {}})
+        self.assertEqual(caught.exception.code, 'invalid_params')
+        self.assertNotIn('invalid_params', PAUSE_CODES)
+        same_name = parse_tags({'code': 0, 'data': [
+            {'label': '科技', 'value': 1, 'children': [{'label': '数码', 'value': 11}]},
+            {'label': '生活', 'value': 2, 'children': [{'label': '数码', 'value': 21}]},
+        ]})
+        self.assertEqual([(item['name'], item['parent_id']) for item in same_name],
+                         [('科技 / 数码', '1'), ('生活 / 数码', '2')])
 
     def test_non_json_summary_keeps_no_body_text(self):
         from topic_fetch import summarize_response
@@ -149,3 +171,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(item['play_count'], 0)
         self.assertIsNone(item['cover'])
         self.assertEqual(store.get('daily'), None)
+
+    def test_invalid_params_does_not_pause(self):
+        from topic_board import record_topic_result
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = Store(Path(temp.name) / 'hub.sqlite3')
+        self.addCleanup(store.close)
+        record_topic_result(store, {'action': 'board', 'rank': 'total', 'tag_name': '数码'},
+                            {'ok': False, 'code': 'invalid_params', 'requested': True})
+        self.assertIsNone(store.get('topic_paused'))
+        self.assertEqual(store.get('topic_daily')['count'], 1)
+        record_topic_result(store, {'action': 'board', 'rank': 'total', 'tag_name': '数码'},
+                            {'ok': False, 'code': 'not_logged_in', 'requested': False})
+        self.assertEqual(store.get('topic_paused')['code'], 'not_logged_in')

@@ -70,9 +70,13 @@ def _status_code(payload):
     code = payload.get('code', payload.get('status_code'))
     if code == 8:
         raise TopicFetchError('not_logged_in', '热点宝未登录。')
+    if code == 5:
+        raise TopicFetchError('invalid_params', '热点宝参数不合法。')
     if isinstance(code, int) and code not in (0, None):
         message = payload.get('message') if isinstance(payload.get('message'), str) else ''
         message = message or (payload.get('msg') if isinstance(payload.get('msg'), str) else '')
+        if '参数不合法' in message:
+            raise TopicFetchError('invalid_params', '热点宝参数不合法。')
         if any(word in message for word in ('验证', '验证码', 'captcha')):
             raise TopicFetchError('verification_required', '热点宝要求验证。')
         if any(word in message for word in ('频繁', '限流', '稍后')):
@@ -113,27 +117,52 @@ def _tag_from(row):
     return {'id': identifier, 'name': name}
 
 
-def _walk_tags(rows, tags, seen, depth=0):
+def _child_lists(row):
+    found = []
+    for key in _CHILD_KEYS:
+        child = row.get(key)
+        if isinstance(child, list) and child:
+            found.append(child)
+    return found
+
+
+def _walk_tags(rows, tags, seen, parent_id=None, parent_name=None, depth=0):
     if depth > 5 or not isinstance(rows, list):
         return
     for row in rows:
         if not isinstance(row, dict):
             continue
         item = _tag_from(row)
-        if item is not None and item['id'] not in seen:
+        children = _child_lists(row)
+        if children:
+            next_parent = item['id'] if item else parent_id
+            next_name = item['name'] if item else parent_name
+            for child in children:
+                _walk_tags(child, tags, seen, next_parent, next_name, depth + 1)
+        elif item is not None and item['id'] not in seen:
+            if parent_id:
+                item['parent_id'] = parent_id
+            if parent_name:
+                item['parent_name'] = parent_name
             seen.add(item['id'])
             tags.append(item)
-        for key in _CHILD_KEYS:
-            _walk_tags(row.get(key), tags, seen, depth + 1)
 
 
 def parse_tags(payload):
+    """Keep only leaves. Parents are remembered so the billboard can nest value/children."""
     lists = _candidate_lists(payload)
     tags, seen = [], set()
     for rows in lists:
         _walk_tags(rows, tags, seen)
     if not tags:
         raise TopicFetchError('schema_mismatch', '没有识别到垂类。')
+    counts = {}
+    for tag in tags:
+        counts[tag['name']] = counts.get(tag['name'], 0) + 1
+    for tag in tags:
+        parent_name = tag.pop('parent_name', None)
+        if counts[tag['name']] > 1 and parent_name:
+            tag['name'] = parent_name + ' / ' + tag['name']
     return tags
 
 
@@ -229,17 +258,31 @@ def plan_round(tags, cursor, *, include_tags):
     if tags:
         choice = tags[cursor % len(tags)]
         jobs.append({'action': 'board', 'rank': 'total' if cursor % 2 == 0 else 'rising',
-                     'tag_id': choice['id'], 'tag_name': choice['name']})
+                     'tag_id': choice['id'], 'parent_id': choice.get('parent_id') or '',
+                     'tag_name': choice['name']})
     return jobs
 
 
-def board_body(rank, tag_id):
+def _tag_value(raw):
+    text = str(raw).strip()
+    if not text.isdecimal():
+        raise TopicFetchError('invalid_params', '垂类标识不是数字。')
+    return int(text)
+
+
+def board_body(rank, tag_id='', parent_id=''):
+    """Match the page body: tags are {value, children}, not a bare id."""
     if rank not in RANK_SUBTYPE:
-        raise TopicFetchError('invalid_parameters', '榜单只能是总榜或飙升。')
+        raise TopicFetchError('invalid_params', '榜单只能是总榜或飙升。')
     body = {'sub_type': RANK_SUBTYPE[rank], 'date_window': DATE_WINDOW_HOURS,
             'page': 1, 'page_size': PAGE_SIZE, 'tags': []}
-    if tag_id:
-        body['tags'] = [int(tag_id) if str(tag_id).isdecimal() else tag_id]
+    if not tag_id:
+        return body
+    leaf = {'value': _tag_value(tag_id)}
+    if parent_id:
+        body['tags'] = [{'value': _tag_value(parent_id), 'children': [leaf]}]
+    else:
+        body['tags'] = [leaf]
     return body
 
 

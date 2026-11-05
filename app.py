@@ -129,7 +129,8 @@ class Api:
                 spec = {'method': 'GET', 'url': TAG_URL}
             else:
                 spec = {'method': 'POST', 'url': BOARD_URL,
-                        'body': json.dumps(board_body(payload.get('rank'), payload.get('tag_id') or ''),
+                        'body': json.dumps(board_body(payload.get('rank'), payload.get('tag_id') or '',
+                                                     payload.get('parent_id') or ''),
                                            ensure_ascii=False)}
             requested = True
             body, summary = run_page_request(window, spec)

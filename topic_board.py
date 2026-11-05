@@ -90,14 +90,20 @@ def topic_view(snapshot, *, enabled, paused=None, categories=None):
             'paused': paused, 'enabled': enabled, 'live_request': False, 'note': TOPIC_NOTE}
 
 
-def tag_id_for(store, category):
+def tag_for(store, category):
+    """Return the stored leaf. Lookup failure is a client error, not a paused board."""
     if category == '全部':
-        return ''
+        return None
     saved = store.get('topic_categories') or []
-    match = next((item for item in saved if isinstance(item, dict) and item.get('name') == category), None)
-    if match is None or not match.get('id'):
-        raise HubError('invalid_parameters', '垂类尚未采集。')
-    return str(match['id'])
+    matches = [item for item in saved if isinstance(item, dict) and item.get('name') == category and item.get('id')]
+    if len(matches) != 1:
+        raise HubError('invalid_parameters', '垂类不在已保存的叶子分类中。')
+    return matches[0]
+
+
+def tag_id_for(store, category):
+    found = tag_for(store, category)
+    return '' if found is None else str(found['id'])
 
 
 def record_topic_result(store, job, result):
@@ -166,7 +172,9 @@ def probe_main(argv):
                 result = {'ok': False, 'code': gate}
             else:
                 if not args.tags:
-                    job['tag_id'] = tag_id_for(store, args.category)
+                    found = tag_for(store, args.category)
+                    job['tag_id'] = '' if found is None else str(found['id'])
+                    job['parent_id'] = '' if found is None else str(found.get('parent_id') or '')
                 try:
                     result = call_bridge('topic', job)
                 except OSError:
