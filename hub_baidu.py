@@ -86,6 +86,13 @@ def fail(store, job_id, code):
     store.set('baidu.paused', {'code': code, 'since': time.time()})
 
 
+def related_date(store, query):
+    row = store.db.execute("""SELECT max(day) FROM baidu_points WHERE keyword=? AND region=?
+        AND value_status='available' AND day<=?""",
+        (query['keywords'][0], '全国', query['end_date'])).fetchone()
+    return row[0] or min(query['end_date'], (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
+
+
 async def run_one(hub, row, query):
     async with hub._platform_locks.setdefault('baidu', asyncio.Lock()):
         store = hub.store
@@ -120,7 +127,11 @@ async def run_one(hub, row, query):
                 store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, encode(value)))
             store.db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), row['id']))
         try:
-            response = await asyncio.to_thread(hub.bridge, 'baidu_query', {**query, '_budget_day': counter['date'], '_job_id': row['id']}, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
+            selected_date = related_date(store, query) if query.get('kind') == 'related' else None
+            payload = {**query, '_budget_day': counter['date'], '_job_id': row['id']}
+            if selected_date:
+                payload['related_date'] = selected_date
+            response = await asyncio.to_thread(hub.bridge, 'baidu_query', payload, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
             if response.get('ok') is not True:
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')
@@ -128,6 +139,8 @@ async def run_one(hub, row, query):
             if query.get('kind') == 'related':
                 result = {'data': response['data'], 'metadata': response['metadata']}
                 if any(result['metadata'].get(k) != query[k] for k in ('platform', 'kind', 'keywords', 'start_date', 'end_date')):
+                    raise HubError('invalid_result', '百度结果与任务不一致。')
+                if result['metadata'].get('related_date') != selected_date:
                     raise HubError('invalid_result', '百度结果与任务不一致。')
                 if not result['data']['search_related']:
                     result['no_data'] = True

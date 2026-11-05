@@ -17,7 +17,8 @@ async (query) => {
       word_type:Number.isFinite(diag.word_type) ? diag.word_type : null, name_matches:diag.name_matches === true,
       ptbk_length:Number.isInteger(diag.ptbk_length) ? diag.ptbk_length : 0,
       decoded_points:Number.isInteger(diag.decoded_points) ? diag.decoded_points : null,
-      data_length:Number.isInteger(diag.data_length) ? diag.data_length : null}};
+      data_length:Number.isInteger(diag.data_length) ? diag.data_length : null,
+      data_type:diag.data_type || null}};
   };
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
@@ -90,11 +91,13 @@ async (query) => {
   };
   try {
     if (query.kind === 'related') {
-      const params = new URLSearchParams({'wordlist[]':query.keywords[0], datelist:query.end_date.replaceAll('-', '')});
+      const params = new URLSearchParams({'wordlist[]':query.keywords[0], datelist:query.related_date.replaceAll('-', '')});
       const graph = await get('/api/WordGraph/multi?' + params);
       if (graph.status !== 'ok') return graph;
       const data = graph.data;
-      if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data);
+      const dataType = data === null ? 'null' : Array.isArray(data) ? 'array' : typeof data;
+      if (dataType !== 'object') return schema(data, {reason:'related_data_type', data_type:dataType, data_length:dataType === 'string' ? data.length : null});
+      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType});
       return {status:'ok', data:{wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
     }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');

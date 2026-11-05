@@ -212,10 +212,12 @@ def _safe_diag(value):
     import math
     import re
     keys = {'reason', 'request_start', 'request_end', 'response_start', 'response_end',
-            'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length'}
+            'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type'}
     if type(value) is not dict or set(value) != keys or value['reason'] not in {
             'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
-            'end_date', 'point_count', 'token', 'data_length'}:
+            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_shape'}:
+        raise ValueError
+    if value['data_type'] is not None and (type(value['data_type']) is not str or value['data_type'] not in ('string', 'null', 'array', 'number', 'boolean', 'object')):
         raise ValueError
     for key in ('request_start', 'request_end', 'response_start', 'response_end'):
         if value[key] is not None and (type(value[key]) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value[key], flags=re.ASCII)):

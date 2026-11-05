@@ -342,8 +342,17 @@ def bridge_command(command, payload=None):
     job_id = payload.get('_job_id', '-')
     if job_id != '-' and (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)):
         raise BaiduError()
-    body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id')}
+    body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id', 'related_date')}
     query = validate_insight(body) if body.get('kind') == 'related' else validate_query(body)
+    if query.get('kind') == 'related':
+        related_date = payload.get('related_date')
+        try:
+            if (type(related_date) is not str or dt.date.fromisoformat(related_date).isoformat() != related_date
+                    or related_date > query['end_date']):
+                raise ValueError
+        except ValueError:
+            raise BaiduError() from None
+        query['related_date'] = related_date
     instance = baidu_browser.browser()
     import hub_baidu
     import logging
