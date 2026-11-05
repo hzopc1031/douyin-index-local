@@ -111,7 +111,7 @@ def run(output=None):
                                     rank=query.get('rank', ['total'])[0],
                                     rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
                                     category=query.get('category', ['全部'])[0],
-                                    categories=['全部', '美食', '旅行'], items=[], fetched_at=None,
+                                    categories=['全部', '美食', '旅行', '科技', '科技科普', '科技产品'], items=[], fetched_at=None,
                                     live_request=False, note='热点宝话题不是搜索指数，待联调，不伪造话题。')
                     elif path == 'hot/rising':
                         data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
@@ -409,6 +409,19 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#topicCategory').textContent.includes('美食')")
                 assert page.locator('#topicWindow').inner_text() == '近1天'
                 assert '尚未采集' in page.locator('#topicStatus').inner_text()
+                assert page.locator('label[for="topicCategoryQuery"]').inner_text() == '筛选垂类'
+                page.locator('#topicCategoryQuery').fill('科技')
+                page.wait_for_function("()=>[...document.querySelector('#topicCategory').options].map(o=>o.value).filter(Boolean).join(',')==='科技,科技科普,科技产品'&&document.querySelector('#topicCategory').value!=='科技'")
+                page.locator('#topicCategoryQuery').fill('   ')
+                page.wait_for_function("()=>[...document.querySelector('#topicCategory').options].some(o=>o.value==='全部')&&[...document.querySelector('#topicCategory').options].some(o=>o.value==='旅行')")
+                page.locator('#topicCategoryQuery').fill('')
+                page.locator('#topicCategoryQuery').fill('科技')
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicCategoryQuery').press('Enter')
+                page.wait_for_function("!document.querySelector('#topicStatus').textContent.includes('正在采集')")
+                assert writes[-1] == ('topics/collect-once', dict(rank='total', category='科技'))
+                page.locator('#topicCategoryQuery').fill('')
+                page.wait_for_function("()=>[...document.querySelector('#topicCategory').options].some(o=>o.value==='旅行')")
                 assert '不是搜索指数' in page.locator('#topicIntro').inner_text()
                 assert '待联调' in page.locator('#topicStatus').inner_text()
                 before_topic = len(writes)
