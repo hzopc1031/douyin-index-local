@@ -18,7 +18,8 @@ async (query) => {
       ptbk_length:Number.isInteger(diag.ptbk_length) ? diag.ptbk_length : 0,
       decoded_points:Number.isInteger(diag.decoded_points) ? diag.decoded_points : null,
       data_length:Number.isInteger(diag.data_length) ? diag.data_length : null,
-      data_type:diag.data_type || null}};
+      data_type:diag.data_type || null, datelist_sent:query.related_date ? query.related_date.replaceAll('-', '') : 'none',
+      period_returned:diag.period_returned === true}};
   };
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
@@ -91,14 +92,21 @@ async (query) => {
   };
   try {
     if (query.kind === 'related') {
-      const params = new URLSearchParams({'wordlist[]':query.keywords[0], datelist:query.related_date.replaceAll('-', '')});
+      const params = new URLSearchParams({'wordlist[]':query.keywords[0]});
+      if (query.related_date) params.set('datelist', query.related_date.replaceAll('-', ''));
       const graph = await get('/api/WordGraph/multi?' + params);
       if (graph.status !== 'ok') return graph;
       const data = graph.data;
       const dataType = data === null ? 'null' : Array.isArray(data) ? 'array' : typeof data;
       if (dataType !== 'object') return schema(data, {reason:'related_data_type', data_type:dataType, data_length:dataType === 'string' ? data.length : null});
-      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType});
-      return {status:'ok', data:{wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
+      const periodReturned = Object.prototype.hasOwnProperty.call(data, 'period');
+      const match = typeof data.period === 'string' && /^(\d{4})(\d{2})(\d{2})\|(\d{4})(\d{2})(\d{2})$/.exec(data.period);
+      const iso = parts => `${parts[0]}-${parts[1]}-${parts[2]}`;
+      const start = match && iso(match.slice(1, 4)), end = match && iso(match.slice(4, 7));
+      const startMs = Date.parse(start + 'T00:00:00Z'), endMs = Date.parse(end + 'T00:00:00Z');
+      if (!match || match[1] === '0000' || match[4] === '0000' || !Number.isFinite(startMs) || !Number.isFinite(endMs) || new Date(startMs).toISOString().slice(0,10) !== start || new Date(endMs).toISOString().slice(0,10) !== end || (endMs - startMs) / 86400000 < 5 || (endMs - startMs) / 86400000 > 7) return schema(data, {reason:'related_period', data_type:dataType, period_returned:periodReturned});
+      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType, period_returned:periodReturned});
+      return {status:'ok', data:{period:{start_date:start, end_date:end}, wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
     }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');
     let signature;

@@ -344,8 +344,8 @@ def bridge_command(command, payload=None):
         raise BaiduError()
     body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id', 'related_date')}
     query = validate_insight(body) if body.get('kind') == 'related' else validate_query(body)
-    if query.get('kind') == 'related':
-        related_date = payload.get('related_date')
+    if query.get('kind') == 'related' and 'related_date' in payload:
+        related_date = payload['related_date']
         try:
             if (type(related_date) is not str or dt.date.fromisoformat(related_date).isoformat() != related_date
                     or related_date > query['end_date']):
@@ -361,7 +361,7 @@ def bridge_command(command, payload=None):
     page = None
     requests_sent = 'no'
 
-    def failure(code, sent):
+    def failure(code, sent, period_returned=False):
         try:
             url = urlsplit(page.url)
             on_index = (url.scheme, url.netloc) == ('https', 'index.baidu.com')
@@ -370,8 +370,9 @@ def bridge_command(command, payload=None):
         started = getattr(instance, 'started_at', None)
         since = max(0, int(time.monotonic() - started)) if type(started) in (int, float) else -1
         logging.getLogger('index_hub.baidu').warning(
-            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s',
-            job_id, code, sent, since, str(on_index).lower())
+            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s datelist_sent=%s period_returned=%s',
+            job_id, code, sent, since, str(on_index).lower(),
+            query.get('related_date', 'none').replace('-', ''), str(period_returned).lower())
 
     try:
         def run(context):
@@ -385,15 +386,25 @@ def bridge_command(command, payload=None):
                 raise BaiduError(state)
             requests_sent = 'unknown'
             if query.get('kind') == 'related':
-                data = project_wordgraph(baidu_browser.PageTransport(page).query({**query, '_budget_day': day}))
+                graph = baidu_browser.PageTransport(page).query({**query, '_budget_day': day})
+                period = graph['period']
+                if type(period) is not dict or set(period) != {'start_date', 'end_date'}:
+                    raise BaiduError()
+                try:
+                    start, end = (dt.date.fromisoformat(period[k]) for k in ('start_date', 'end_date'))
+                    if any(period[k] != d.isoformat() for k, d in zip(('start_date', 'end_date'), (start, end))) or not 5 <= (end - start).days <= 7:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise BaiduError() from None
+                data = project_wordgraph(graph)
                 return {'ok': True, 'data': data, 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(),
-                        'source': 'index.baidu.com', 'verification': 'pending',
-                        'note': '需求图谱为截止日单日快照，尚未与官方页面核对。'}}
+                        'source': 'index.baidu.com', 'verification': 'pending', 'related_period': period,
+                        'note': '需求图谱周期尚未与官方页面核对。'}}
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:
-        failure(exc.code, requests_sent)
+        failure(exc.code, requests_sent, getattr(exc, 'period_returned', False))
         return {'ok': False, 'code': exc.code}
     except Exception:
         failure('other', 'unknown')

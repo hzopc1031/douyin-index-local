@@ -212,10 +212,12 @@ def _safe_diag(value):
     import math
     import re
     keys = {'reason', 'request_start', 'request_end', 'response_start', 'response_end',
-            'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type'}
+            'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type', 'datelist_sent', 'period_returned'}
     if type(value) is not dict or set(value) != keys or value['reason'] not in {
             'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
-            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_shape'}:
+            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_shape', 'related_period'}:
+        raise ValueError
+    if type(value['period_returned']) is not bool or type(value['datelist_sent']) is not str or not re.fullmatch(r'none|[0-9]{8}', value['datelist_sent'], flags=re.ASCII):
         raise ValueError
     if value['data_type'] is not None and (type(value['data_type']) is not str or value['data_type'] not in ('string', 'null', 'array', 'number', 'boolean', 'object')):
         raise ValueError
@@ -269,6 +271,7 @@ class PageTransport:
             raise baidu_adapter.BaiduError('page_' + category) from None
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
+            diag = None
             if code == 'response_schema' and 'schema_digest' in result:
                 try:
                     digest = _safe_digest(result['schema_digest'])
@@ -276,7 +279,9 @@ class PageTransport:
                     logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(diag, separators=(',', ':')))
                 except (TypeError, ValueError, RecursionError):
                     pass
-            raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
+            error = baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
+            error.period_returned = diag['period_returned'] if diag else False
+            raise error
         return result.get('data') if query.get('kind') == 'related' else result.get('rows')
 
 

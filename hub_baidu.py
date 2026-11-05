@@ -93,6 +93,11 @@ def related_date(store, query):
     return row[0] or min(query['end_date'], (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
 
 
+def previous_sunday(day):
+    date = dt.date.fromisoformat(day)
+    return (date - dt.timedelta(days=(date.weekday() + 1) % 7)).isoformat()
+
+
 async def run_one(hub, row, query):
     async with hub._platform_locks.setdefault('baidu', asyncio.Lock()):
         store = hub.store
@@ -127,7 +132,7 @@ async def run_one(hub, row, query):
                 store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, encode(value)))
             store.db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), row['id']))
         try:
-            selected_date = related_date(store, query) if query.get('kind') == 'related' else None
+            selected_date = previous_sunday(related_date(store, query)) if query.get('kind') == 'related' and os.environ.get('BAIDU_RELATED_SUNDAY_FALLBACK') == '1' else None
             payload = {**query, '_budget_day': counter['date'], '_job_id': row['id']}
             if selected_date:
                 payload['related_date'] = selected_date
