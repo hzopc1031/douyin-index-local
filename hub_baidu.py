@@ -109,7 +109,7 @@ async def run_one(hub, row, query):
         if state not in ('browser_ready', 'browser_idle'):
             fail(store, row['id'], state)
             return True
-        # Reserve both steps before dispatch; timeout/restart never refunds uncertain traffic.
+        # Reserve before dispatch; even readiness failures consume the reservation.
         counter = daily(store)
         with store.db:
             from hub_store import encode
@@ -120,7 +120,7 @@ async def run_one(hub, row, query):
                 store.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', (key, encode(value)))
             store.db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), row['id']))
         try:
-            response = await asyncio.to_thread(hub.bridge, 'baidu_query', {**query, '_budget_day': counter['date']}, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
+            response = await asyncio.to_thread(hub.bridge, 'baidu_query', {**query, '_budget_day': counter['date'], '_job_id': row['id']}, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
             if response.get('ok') is not True:
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')

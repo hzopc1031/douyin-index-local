@@ -26,6 +26,13 @@ ERRORS = {
     'http_error': '百度 HTTP 请求失败，已停止。',
     'business_error': '百度业务请求失败，已停止。',
     'network_error': '百度浏览器取数失败，已停止。',
+    'navigation': '百度页面跳转到非预期来源，已停止。',
+    'page_not_ready': '百度页面尚未就绪，已停止。',
+    'page_context_destroyed': '百度页面在取数时跳转（冷启动未就绪），已暂停，不会自动重试。',
+    'page_closed': '百度页面在取数时关闭，已暂停，不会自动重试。',
+    'page_timeout': '百度页面取数超时，已暂停，不会自动重试。',
+    'page_navigation': '百度页面在取数时跳转，已暂停，不会自动重试。',
+    'page_other': '百度页面取数失败，已暂停，不会自动重试。',
     'baidu_daily_limit': '百度查询跨越预算日，已停止。',
 }
 
@@ -304,22 +311,50 @@ def bridge_command(command, payload=None):
             raise ValueError
     except ValueError:
         raise BaiduError('baidu_daily_limit') from None
-    query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
+    job_id = payload.get('_job_id', '-')
+    if job_id != '-' and (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)):
+        raise BaiduError()
+    query = validate_query({k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id')})
     instance = baidu_browser.browser()
     import hub_baidu
+    import logging
+    import time
+    from urllib.parse import urlsplit
+    page = None
+    requests_sent = 'no'
+
+    def failure(code, sent):
+        try:
+            url = urlsplit(page.url)
+            on_index = (url.scheme, url.netloc) == ('https', 'index.baidu.com')
+        except Exception:
+            on_index = False
+        started = getattr(instance, 'started_at', None)
+        since = max(0, int(time.monotonic() - started)) if type(started) in (int, float) else -1
+        logging.getLogger('index_hub.baidu').warning(
+            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s',
+            job_id, code, sent, since, str(on_index).lower())
+
     try:
         def run(context):
+            nonlocal page, requests_sent
             page = baidu_browser._page(context)
+            baidu_browser.wait_ready(page, ORIGIN)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
             instance.login_checked = True
             if state != 'browser_ready':
                 raise BaiduError(state)
+            requests_sent = 'unknown'
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:
+        failure(exc.code, requests_sent)
         return {'ok': False, 'code': exc.code}
+    except Exception:
+        failure('other', 'unknown')
+        return {'ok': False, 'code': 'page_other'}
 
 
 class BaiduAdapter:
