@@ -365,6 +365,39 @@ class ReadOnlyStatusTests(unittest.TestCase):
             status.assert_called_once_with(context)
             self.assertEqual(worker.last_state, 'login_required')
 
+    def test_fresh_browser_status_and_cold_query_checks_cookie(self):
+        import datetime
+        from unittest.mock import Mock
+        import baidu_adapter
+        import baidu_browser
+        from test_baidu_adapter import query
+        day = datetime.datetime.now(baidu_adapter.TZ).date().isoformat()
+        for cookies in ([{'name': 'BDUSS', 'expires': -1}], []):
+            with self.subTest(logged_in=bool(cookies)):
+                worker = baidu_browser.BaiduBrowser(root='.')
+                page = Mock(url='https://index.baidu.com/')
+                page.evaluate.return_value = True
+                context = Mock(pages=[page])
+                context.cookies.return_value = cookies
+                try:
+                    with patch.object(baidu_browser, 'browser', return_value=worker), \
+                         patch.object(worker, 'call', side_effect=lambda action, **kwargs: action(context)) as call, \
+                         patch.object(baidu_adapter, 'collect_page', return_value={'rows': []}) as collect:
+                        self.assertEqual(baidu_adapter.bridge_command('baidu_status')['state'], 'browser_idle')
+                        self.assertFalse(worker.started)
+                        call.assert_not_called()
+                        answer = baidu_adapter.bridge_command('baidu_query', {**query(), '_budget_day': day})
+                        self.assertTrue(worker.login_checked)
+                        if cookies:
+                            self.assertTrue(answer['ok'])
+                            collect.assert_called_once()
+                        else:
+                            self.assertEqual(answer['code'], 'login_required')
+                            collect.assert_not_called()
+                            self.assertEqual(baidu_adapter.bridge_command('baidu_status')['state'], 'login_required')
+                finally:
+                    worker.close()
+
     def test_status_exception_clears_ready(self):
         from unittest.mock import Mock
         import baidu_browser

@@ -282,7 +282,7 @@ def bridge_command(command, payload=None):
     if command == 'baidu_status':
         instance = baidu_browser.browser()
         if not instance.started or instance.busy:
-            state = 'browser_idle' if not instance.started and instance.last_state == 'browser_ready' else instance.last_state
+            state = instance.last_state if instance.started or (instance.login_checked and instance.last_state == 'login_required') else 'browser_idle'
             return {'ok': True, 'state': state, 'live_enabled': True}
         return instance.call(baidu_browser.status, touch='status')
     if command == 'baidu_login_open':
@@ -300,14 +300,13 @@ def bridge_command(command, payload=None):
     body = {k: v for k, v in payload.items() if k != '_budget_day'}
     query = validate_insight(body) if body.get('kind') == 'related' else validate_query(body)
     instance = baidu_browser.browser()
-    if not instance.started and instance.last_state == 'login_required':
-        return {'ok': False, 'code': 'login_required'}
     import hub_baidu
     try:
         def run(context):
             page = baidu_browser._page(context)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
+            instance.login_checked = True
             if state != 'browser_ready' and not (query.get('kind') == 'related' and state == 'signature_unavailable'):
                 raise BaiduError(state)
             if query.get('kind') == 'related':
