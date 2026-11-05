@@ -219,11 +219,16 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         import hub_bridge
         api = Mock()
         socket_path = Path(self.temp.name) / 'synthetic.sock'
-        with patch.object(hub_bridge, '_socket_path', return_value=socket_path):
+        context = Mock(pages=[Mock(url='https://index.baidu.com/')])
+        context.cookies.return_value = []
+        worker = Mock(started=False, busy=False, last_state='browser_idle', login_checked=False)
+        worker.call.side_effect = lambda action, **kw: action(context)
+        with patch.object(hub_bridge, '_socket_path', return_value=socket_path), \
+                patch('baidu_browser.browser', return_value=worker):
             server = hub_bridge.start_bridge(api)
             try:
                 state = await asyncio.to_thread(hub_bridge.call_bridge, 'baidu_status')
-                self.assertEqual(state['state'], 'login_required')
+                self.assertEqual(state['state'], 'browser_idle')
                 answer = await asyncio.to_thread(hub_bridge.call_bridge, 'baidu_query', {**query(), '_budget_day': dt.datetime.now(b.TZ).date().isoformat()})
                 self.assertEqual(answer['code'], 'login_required')
                 rejected = await asyncio.to_thread(hub_bridge.call_bridge, 'query', query())

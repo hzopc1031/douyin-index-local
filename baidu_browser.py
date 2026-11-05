@@ -76,7 +76,8 @@ class BaiduBrowser:
         self._queue = queue.Queue()
         self.started = False
         self.busy = False
-        self.last_state = 'login_required'
+        self.last_state = 'browser_idle'
+        self.login_checked = False
         self._thread = threading.Thread(target=self._run, name='baidu-browser', daemon=True)
         self._thread.start()
 
@@ -147,6 +148,7 @@ class BaiduBrowser:
                 now = time.monotonic()
                 if touch == 'status':
                     self.last_state = value['state']
+                    self.login_checked = True
                     if self.last_state == 'browser_ready':
                         hold_until = 0
                     else:
@@ -159,6 +161,7 @@ class BaiduBrowser:
             except Exception as exc:
                 if touch == 'status':
                     self.last_state = 'login_required'
+                    self.login_checked = False
                 if context is None:
                     try:
                         stop()
