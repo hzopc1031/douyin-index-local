@@ -616,11 +616,17 @@ def mount(app, hub):
         return reply({'job': job_view(s.job(request.match_info['job_id']), request)})
 
     def get_series(request):
-        unknown = set(request.query) - {'platform', 'keyword', 'start_date', 'end_date'}
+        unknown = set(request.query) - {'platform', 'keyword', 'start_date', 'end_date', 'device'}
         if unknown:
             raise HubError('invalid_parameters', '包含不支持的查询参数。')
-        return s.series(request.query.get('platform', 'douyin'), request.query.get('keyword'),
-                        request.query.get('start_date'), request.query.get('end_date'))
+        device = request.query.get('device')
+        if device is not None and device not in ('all', 'pc', 'wise'):
+            raise HubError('invalid_parameters', '不支持的设备。')
+        platform = request.query.get('platform', 'douyin')
+        args = (s, request.query.get('keyword'), request.query.get('start_date'), request.query.get('end_date'))
+        if platform == 'baidu' and device is not None:
+            return require_platform(platform).series(*args, device=device)
+        return s.series(platform, *args[1:])
 
     async def series(request):
         require(request)

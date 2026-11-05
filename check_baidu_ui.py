@@ -1,4 +1,5 @@
 """Offline Baidu dashboard check: every request is fulfilled or aborted locally."""
+import argparse
 import datetime as dt
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from test_baidu_adapter import query
 import baidu_adapter as b
 
 
-def run():
+def run(output=None):
     q = query()
     raw = b.public_result(b.page_absence(q, 'low_volume'))
     with sync_playwright() as pw:
@@ -45,9 +46,11 @@ def run():
                     elif path == 'jobs': data = {'jobs': []}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'series':
-                        assert parse_qs(url.query)['platform'] == ['baidu']
-                        data = {**b.DIMENSIONS, 'keyword': q['keywords'][0], 'points': [
-                            dict(date=row['date'], value=None, composite_index=None, value_status=row['value_status']) for row in raw['rows'] if row['device'] == 'all']}
+                        params = parse_qs(url.query)
+                        platform = params['platform'][0]
+                        device = params.get('device', ['all'])[0]
+                        data = {**b.DIMENSIONS, 'platform': platform, 'device': device, 'keyword': q['keywords'][0], 'points': [
+                            dict(date=row['date'], value=(100 + i * 20 + {'all': 0, 'pc': 30, 'wise': 60}[device]), composite_index=200+i*10 if platform == 'douyin' else None, value_status='available') for i, row in enumerate(raw['rows']) if row['device'] == 'all']}
                     else:
                         unexpected.append(path)
                         return r.abort()
@@ -55,19 +58,43 @@ def run():
                 page.route('**/*', route)
                 page.goto('http://baidu-ui.invalid/')
                 page.wait_for_function('!refreshing && platforms.length===3')
-                assert 'login_in_progress' in page.locator('#baiduBudgetStatus').inner_text()
+                assert '登录中' in page.locator('#baiduBudgetStatus').inner_text()
+                page.locator('#insightStart').fill(q['start_date'])
+                page.locator('#insightEnd').fill(q['end_date'])
+                page.locator('#resultTab-trend').click()
+                page.evaluate('loadSeries()')
+                page.wait_for_selector('#chart svg', timeout=5000)
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'hub-douyin-desktop.png'))
+                    page.locator('#chartMeta .info-button').hover()
+                    page.screenshot(path=str(output/'hub-douyin-tips-desktop.png'))
+                    page.keyboard.press('Escape')
                 page.locator('[data-platform=baidu]').click()
                 page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
                 page.locator('#insightEnd').fill(q['end_date'])
                 page.evaluate('loadSeries()')
-                page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('低量')")
+                page.wait_for_selector('#chart svg')
+                assert page.locator('#chart svg polyline').count() > 0
+                for device in ('all', 'pc', 'wise'):
+                    page.locator(f'[data-device={device}]').click()
+                    page.wait_for_function('(device) => document.querySelector("#exportLink").href.includes("device="+device)', device)
+                    assert page.locator('#chart svg circle').count() > 0
+                    if output and width == 1280:
+                        page.screenshot(path=str(output/f'baidu-trend-{device}-desktop.png'))
+                if output and width == 1280:
+                    page.locator('#baiduDevices .info-button').hover()
+                    page.screenshot(path=str(output/'baidu-tips-desktop.png'))
+                    page.keyboard.press('Escape')
                 assert '综合指数' not in page.locator('#trendSummary').inner_text()
                 assert 'platform=baidu' in page.locator('#exportLink').get_attribute('href')
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
                 assert '远程桌面扫码登录' in page.locator('#baiduQueryNote').inner_text()
+                assert page.locator('#submitButton').inner_text() == '查询 →'
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'baidu-query-desktop.png'))
                 page.locator('#queryWords').fill(q['keywords'][0])
                 page.locator('#queryRange').evaluate('(node)=>node.open=true')
                 page.locator('#queryStart').fill(q['start_date'])
@@ -84,4 +111,9 @@ def run():
 
 
 if __name__ == '__main__':
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--screenshots", type=Path)
+    args = parser.parse_args()
+    if args.screenshots:
+        args.screenshots.mkdir(parents=True, exist_ok=True)
+    run(args.screenshots)

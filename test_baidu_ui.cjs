@@ -1,12 +1,18 @@
 // Synthetic deferred responses: switching platforms must not draw an old response.
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8');
-const code=html.slice(html.indexOf('async function loadSeries()'),html.indexOf("$('#keywordSelect').onchange"));
+const code=html.slice(html.indexOf('async function loadSeries()'),html.indexOf("document.querySelectorAll('[data-device]')"));
 const nodes={};const $=id=>nodes[id]??={value:'',style:{},dataset:{},textContent:'',innerHTML:''};
 $('#keywordSelect').value='合成词';
+const modulesCode=html.slice(html.indexOf('function platformInfo('),html.indexOf('function drawPlatforms('));
+const modulesCtx=vm.createContext({platforms:[{id:'douyin',modules:['related','audience']},{id:'baidu',modules:['audience']},{id:'empty'}],chosenPlatform:'douyin'});
+vm.runInContext(modulesCode,modulesCtx);
+assert.deepEqual(Array.from(modulesCtx.platformModules('douyin')),['related','audience']);
+assert.deepEqual(Array.from(modulesCtx.platformModules('baidu')),['audience']);
+assert.deepEqual(Array.from(modulesCtx.platformModules('empty')),[]);
 const calls=[],drawn=[];
 const ctx=vm.createContext({$,chosenPlatform:'douyin',platforms:[{id:'douyin',available:true},{id:'baidu',available:true}],
- rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
+ baiduDevice:'all',rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
  api:path=>new Promise(resolve=>calls.push({path,resolve}))});
 vm.runInContext(code,ctx);
 (async()=>{

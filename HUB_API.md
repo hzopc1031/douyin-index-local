@@ -263,3 +263,5 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 `platform=baidu` 接受 1–5 个唯一词、全国、最近两年内最多 731 天；默认七天。整体/PC/移动日序列在私有表分开存储，趋势和 CSV 默认整体；缺失不视为零。关联词和画像不支持。
 
 管理员使用 `POST /api/v1/login/baidu/open` 打开或聚焦官方登录窗口，再通过远程桌面扫码；`GET /api/v1/status` 的 `platform_status.baidu.browser` 显示浏览器状态。处理登录、验证或风控后，管理员通过 `POST /api/v1/collection/resume` 指定 `{"platform":"baidu"}` 人工恢复；限频至少冷却一小时，失败任务不自动重试。接口不接收或返回百度 Cookie。配置、凭据边界、部署与七日独立页面验收见 [BAIDU.md](BAIDU.md)。离线测试不代表线上验收。
+
+百度已存趋势和 CSV 导出支持 `device=all|pc|wise`，默认 `all`；抖音忽略此参数。设备筛选只读取已存数据，不发起采集。

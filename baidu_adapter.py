@@ -333,7 +333,7 @@ class BaiduAdapter:
                     ('baidu', 'search_index', row['device'], '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['search_index']), row['value_status'], stamp, identifier))
         return identifier
 
-    def series(self, store, keyword, start=None, end=None):
+    def series(self, store, keyword, start=None, end=None, device="all"):
         from hub_store import HubError
         if not isinstance(keyword, str) or not 1 <= len(keyword) <= 100:
             raise HubError('invalid_keyword', '请指定关键词。')
@@ -346,8 +346,10 @@ class BaiduAdapter:
                     raise ValueError
         except (ValueError, TypeError):
             raise HubError('invalid_dates', '最多查询连续 731 天的已存储数据。') from None
-        sql = "SELECT * FROM baidu_points WHERE keyword=? AND device='all'"
-        args = [keyword]
+        if device not in ('all', 'pc', 'wise'):
+            raise HubError('invalid_parameters', '不支持的设备。')
+        sql = 'SELECT * FROM baidu_points WHERE keyword=? AND device=?'
+        args = [keyword, device]
         if start:
             sql += ' AND day BETWEEN ? AND ?'
             args += [start, end]
@@ -361,7 +363,7 @@ class BaiduAdapter:
                       'value': None, 'composite_index': None, 'value_status': 'missing', 'fetched_at': None, 'dataset_id': None})
                       for i in range((b-a).days+1)]
         return {'platform': 'baidu', 'metric': 'search_index', 'metric_name': '整体搜索指数', 'keyword': keyword,
-                'region': '全国', 'device': 'all', 'granularity': 'day', 'unit': '指数', 'points': points,
+                'region': '全国', 'device': device, 'granularity': 'day', 'unit': '指数', 'points': points,
                 'source': 'index.baidu.com', 'live_request': False, 'note': '仅返回已保存数据。'}
 
     def csv_rows(self, data):
@@ -369,7 +371,7 @@ class BaiduAdapter:
         yield ['platform', 'metric', 'region', 'keyword', 'date', 'search_index', 'composite_index', 'fetched_at', 'device', 'granularity', 'source', 'value_status']
         for p in data['points']:
             yield ['baidu', 'search_index', '全国', _csv_keyword(data['keyword']), p['date'],
-                   '' if p['value'] is None else p['value'], '', p['fetched_at'], 'all', 'day', 'index.baidu.com', p['value_status']]
+                   '' if p['value'] is None else p['value'], '', p['fetched_at'], data['device'], 'day', 'index.baidu.com', p['value_status']]
 
     def status_counts(self, store):
         words = {r[0] for r in store.db.execute('SELECT DISTINCT keyword FROM baidu_points')}

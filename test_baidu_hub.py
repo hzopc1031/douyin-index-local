@@ -260,6 +260,18 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('device,granularity,source,value_status', export)
             self.assertIn('baidu,search_index,全国', export)
             self.assertIn('all,day,index.baidu.com,available', export)
+            with self.s.db:
+                self.s.db.execute("UPDATE baidu_points SET value='42' WHERE device='pc'")
+                self.s.db.execute("UPDATE baidu_points SET value='84' WHERE device='wise'")
+            for device in ('all', 'pc', 'wise'):
+                result = await (await client.get('/api/v1/series?'+args+'&device='+device)).json()
+                self.assertEqual(result['device'], device)
+                self.assertEqual(result['points'][0]['value'], {'all': 12, 'pc': 42, 'wise': 84}[device])
+                self.assertEqual(len(result['points']), 7)
+                csv_text = await (await client.get('/api/v1/export.csv?'+args+'&device='+device)).text()
+                self.assertIn(device+',day,index.baidu.com,available', csv_text)
+            self.assertEqual((await client.get('/api/v1/series?'+args+'&device=phone')).status, 400)
+            self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&device=pc')).status, 200)
             schema = await (await client.get('/api/v1/openapi.json')).json()
             self.assertIn('/api/v1/login/baidu/open', schema['paths'])
             platforms = await (await client.get('/api/v1/platforms')).json()
