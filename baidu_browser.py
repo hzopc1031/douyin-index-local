@@ -75,6 +75,7 @@ class BaiduBrowser:
         self.hold_seconds = hold_seconds
         self._queue = queue.Queue()
         self.started = False
+        self.started_at = None
         self.busy = False
         self.last_state = 'browser_idle'
         self.login_checked = False
@@ -112,6 +113,7 @@ class BaiduBrowser:
                         lock.release()
                     context = playwright = lock = None
                     self.started = False
+                    self.started_at = None
 
         while True:
             try:
@@ -144,6 +146,7 @@ class BaiduBrowser:
                     finally:
                         os.umask(previous_mask)
                     self.started = True
+                    self.started_at = time.monotonic()
                 value = action(context)
                 now = time.monotonic()
                 if touch == 'status':
@@ -245,7 +248,23 @@ class PageTransport:
         if (current.scheme, current.netloc) != (expected.scheme, expected.netloc):
             raise baidu_adapter.BaiduError('network_error')
         script = Path(__file__).with_name('baidu_page.js').read_text(encoding='utf-8')
-        result = self.page.evaluate(script, {**query, '_origin': self.origin})
+        try:
+            result = self.page.evaluate(script, {**query, '_origin': self.origin})
+        except Exception as exc:
+            if not _playwright_error(exc):
+                raise
+            message = str(exc).lower()
+            if 'execution context was destroyed' in message or 'cannot find context' in message:
+                category = 'context_destroyed'
+            elif 'target closed' in message or 'has been closed' in message:
+                category = 'closed'
+            elif type(exc).__name__ == 'TimeoutError' or 'timeout' in message:
+                category = 'timeout'
+            elif 'navigat' in message:
+                category = 'navigation'
+            else:
+                category = 'other'
+            raise baidu_adapter.BaiduError('page_' + category) from None
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
             if code == 'response_schema' and 'schema_digest' in result:
@@ -261,6 +280,64 @@ class PageTransport:
 
 _browser = None
 _browser_guard = threading.Lock()
+
+
+def _playwright_error(exc):
+    try:
+        from playwright.sync_api import Error, TimeoutError
+        if isinstance(exc, (Error, TimeoutError)):
+            return True
+    except ImportError:
+        pass
+    return any(cls.__name__ in ('Error', 'TimeoutError') for cls in type(exc).__mro__)
+
+
+def wait_ready(page, origin, timeout=15):
+    from urllib.parse import urlsplit
+    from baidu_adapter import BaiduError
+
+    deadline = time.monotonic() + min(timeout, 15)
+
+    def check_url():
+        url = urlsplit(page.url)
+        path = url.path.lower()
+        if 'verify' in path or 'captcha' in path:
+            raise BaiduError('verification_required')
+        if url.hostname == 'passport.baidu.com' or 'login' in path:
+            raise BaiduError('login_required')
+        expected = urlsplit(origin)
+        if (url.scheme, url.netloc) != (expected.scheme, expected.netloc):
+            raise BaiduError('navigation')
+
+    for state in ('domcontentloaded', 'load'):
+        check_url()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BaiduError('page_not_ready')
+        try:
+            page.wait_for_load_state(state, timeout=max(1, int(remaining * 1000)))
+        except Exception as exc:
+            check_url()
+            if not _playwright_error(exc):
+                raise
+            if 'context' not in str(exc).lower() and 'navigat' not in str(exc).lower():
+                raise BaiduError('page_not_ready') from None
+
+    while time.monotonic() < deadline:
+        check_url()
+        try:
+            ready = page.evaluate("origin => location.origin === origin && document.readyState === 'complete' && !!window.Paris && typeof window.Paris.getAcsInstance === 'function' && !/login|verify|captcha/i.test(location.pathname)", origin)
+            check_url()
+            if ready and time.monotonic() < deadline:
+                return
+        except Exception as exc:
+            if isinstance(exc, BaiduError):
+                raise
+            if not _playwright_error(exc) or not any(s in str(exc).lower() for s in ('execution context was destroyed', 'cannot find context')):
+                raise
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    check_url()
+    raise BaiduError('page_not_ready')
 
 
 def browser():
@@ -281,15 +358,16 @@ def _page(context):
     url = urlsplit(page.url)
     if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
         page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
-    url = urlsplit(page.url)
-    if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
-        raise ProfileError('Unsafe Baidu page origin')
     return page
 
 
 def login_open(context):
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from urllib.parse import urlsplit
     page = _page(context)
+    url = urlsplit(page.url)
+    if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
+        raise ProfileError('Unsafe Baidu page origin')
     page.bring_to_front()
     login = page.get_by_text('登录', exact=True).first
     if login.is_visible(timeout=1000):
