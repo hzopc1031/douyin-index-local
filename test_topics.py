@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from desktop_gateway import HUB_KEY, create_app
 from hub_store import HubError, Store
-from topic_board import TOPIC_NOTE
+from topic_board import TOPIC_NOTE, snapshot_is_fresh
 
 
 class StoreTests(unittest.TestCase):
@@ -118,3 +118,39 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored['items'][0]['title'], '已存话题')
         self.assertIsNone(stored['items'][0]['hot_value'])
         self.assertEqual(self.hub.store.db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 0)
+        self.assertIsNone(self.hub.topic_task)
+
+    async def test_collect_once_reuses_a_fresh_snapshot_and_rejects_all(self):
+        self.hub.store.set('topic_categories', [{'id': '11', 'name': '美食'}])
+        self.hub.store.save_topic_snapshot({
+            'complete': True, 'rank': 'total', 'window': '1d', 'category': '美食',
+            'source': 'https://douhot.douyin.com/douhot/v1/material/challenge_billboard',
+            'fetched_at': '2026-11-05T12:00:00+08:00',
+            'items': [{'title': '已存话题', 'position': 1, 'hot_value': None, 'publish_count': None}]})
+        calls = []
+
+        def bridge(*_args):
+            calls.append(True)
+            return {'ok': True, 'requested': True, 'items': [], 'item_count': 0, 'fields': []}
+
+        self.hub.bridge = bridge
+        admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(),
+                 'X-Hub-Request': '1'}
+        with patch('hub_web.snapshot_is_fresh', return_value=True):
+            cached = await self.client.post('/api/v1/topics/collect-once', headers=admin,
+                                            json={'rank': 'total', 'category': '美食'})
+        self.assertEqual(cached.status, 200)
+        self.assertEqual((await cached.json())['status'], 'cached')
+        self.assertEqual((await cached.json())['live_request'], False)
+        self.assertEqual(calls, [])
+        self.hub._topic_inflight.add(('total', '美食', '1d'))
+        with patch('hub_web.snapshot_is_fresh', return_value=False):
+            busy = await self.client.post('/api/v1/topics/collect-once', headers=admin,
+                                          json={'rank': 'total', 'category': '美食'})
+        self.assertEqual((await busy.json())['status'], 'in_flight')
+        self.assertEqual(calls, [])
+        self.hub._topic_inflight.clear()
+        refused = await self.client.post('/api/v1/topics/collect-once', headers=admin,
+                                         json={'rank': 'total', 'category': '全部'})
+        self.assertEqual(refused.status, 400)
+        self.assertEqual(calls, [])

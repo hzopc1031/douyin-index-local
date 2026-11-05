@@ -18,7 +18,8 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
-from topic_board import category_names, record_topic_result, tag_id_for, topic_enabled, topic_view, validate_topic_query
+from topic_board import (category_names, record_topic_result, snapshot_is_fresh, tag_id_for,
+                         topic_enabled, topic_view, validate_topic_query)
 from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
@@ -147,6 +148,7 @@ class Hub:
         self.worker_task = None
         self.hotlist_task = None
         self.topic_task = None
+        self._topic_inflight = set()
         self.hot_client_factory = HotListClient
 
     def _sms_pause(self, snapshot):
@@ -461,8 +463,8 @@ class Hub:
         self.worker_task = asyncio.create_task(self.worker(), name='index-hub-worker')
         if hotlist_enabled():
             self.hotlist_task = asyncio.create_task(self.hotlist_worker(), name='index-hub-hotlist')
-        if topic_enabled():
-            self.topic_task = asyncio.create_task(self.topic_worker(), name='index-hub-topic')
+        # Topic boards are collected only when the workbench asks for one vertical.
+        # INDEX_HUB_TOPIC_ENABLED does not start this loop.
 
     async def close(self, app):
         for task in (self.worker_task, self.hotlist_task, self.topic_task):
@@ -960,17 +962,30 @@ def mount(app, hub):
         rank = body.get('rank', 'total')
         category = body.get('category', '全部')
         names = category_names(s.get('topic_categories'))
-        if rank not in ('total', 'rising') or category not in names:
-            raise HubError('invalid_parameters', '榜单或垂类无效。')
+        if rank not in ('total', 'rising') or category not in names or category == '全部':
+            raise HubError('invalid_parameters', '请选择一个具体垂类的总榜或飙升。')
         now = time.time()
-        counter = s.get('topic_daily') or {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 0}
-        gate = request_gate(now, s.get('topic_request_at'), int(counter.get('count') or 0))
+        key = (rank, category, '1d')
+        if key in hub._topic_inflight:
+            return reply({'status': 'in_flight', 'item_count': 0, 'fields': [], 'rank': rank,
+                          'category': category, 'live_request': False})
+        stored = s.latest_topics(rank=rank, window='1d', category=category)
+        if snapshot_is_fresh(stored, now):
+            return reply({'status': 'cached', 'item_count': len(stored['items']), 'fields': [],
+                          'rank': rank, 'category': category, 'live_request': False})
         if s.get('topic_paused'):
             raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
+        counter = s.get('topic_daily') or {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 0}
+        gate = request_gate(now, s.get('topic_request_at'), int(counter.get('count') or 0))
         if gate != 'ok':
             raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
         job = {'action': 'board', 'rank': rank, 'tag_id': tag_id_for(s, category), 'tag_name': category}
-        result = record_topic_result(s, job, await asyncio.to_thread(hub.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT))
+        hub._topic_inflight.add(key)
+        try:
+            result = record_topic_result(s, job, await asyncio.to_thread(
+                hub.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT))
+        finally:
+            hub._topic_inflight.discard(key)
         status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')
         return reply({'status': status, 'item_count': result.get('item_count') or 0,
                       'fields': result.get('fields') or [], 'rank': rank, 'category': category,

@@ -19,6 +19,7 @@ TOPIC_NOTE = (
 )
 TOPIC_RANKS = {'total': '总榜', 'rising': '飙升'}
 TOPIC_WINDOW = '1d'
+TOPIC_FRESH_SECONDS = 600
 
 
 def topic_enabled():
@@ -55,6 +56,22 @@ def validate_topic_query(query, categories):
     if window != TOPIC_WINDOW:
         raise HubError('invalid_parameters', '当前只支持近1天。')
     return category, rank, window
+
+
+def snapshot_is_fresh(snapshot, now, window=TOPIC_FRESH_SECONDS):
+    """True when this rank/category/window was stored recently enough to reuse."""
+    fetched = snapshot.get('fetched_at') if isinstance(snapshot, dict) else None
+    if not isinstance(fetched, str) or not fetched:
+        return False
+    try:
+        from datetime import datetime
+        stamp = datetime.fromisoformat(fetched)
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        return False
+    age = now - stamp.timestamp()
+    return 0 <= age < window
 
 
 def topic_view(snapshot, *, enabled, paused=None, categories=None):

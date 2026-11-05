@@ -59,6 +59,10 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif request.method == 'POST' and path == 'topics/collect-once':
+                            body = request.post_data_json or {}
+                            data = dict(status='ok', item_count=0, fields=[], live_request=True,
+                                        rank=body.get('rank'), category=body.get('category'))
                         elif request.method == 'PUT' and path.startswith('groups/') and path.count('/') == 1:
                             body = request.post_data_json or {}
                             gid = path.split('/', 1)[1]
@@ -407,9 +411,16 @@ def run(output=None):
                 assert '未启用' in page.locator('#topicStatus').inner_text()
                 assert '不是搜索指数' in page.locator('#topicIntro').inner_text()
                 assert '待联调' in page.locator('#topicStatus').inner_text()
-                page.locator('#topicCategory').select_option('旅行')
-                page.locator('#topicRankRising').click()
+                before_topic = len(writes)
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicCategory').select_option('旅行')
+                page.wait_for_function("!document.querySelector('#topicStatus').textContent.includes('正在采集')")
+                assert writes[before_topic][0] == 'topics/collect-once'
+                assert writes[before_topic][1] == dict(rank='total', category='旅行')
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicRankRising').click()
                 page.wait_for_function("document.querySelector('#topicRankRising').getAttribute('aria-pressed')==='true'")
+                assert writes[before_topic + 1][1] == dict(rank='rising', category='旅行')
                 assert '合成话题' not in page.locator('#topicRows').inner_text()
                 assert '0' not in page.locator('#topicRows').inner_text()
                 page.locator('[data-platform=douyin]').click()
@@ -421,9 +432,9 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 page.locator('#submitButton').click()
                 page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
-                assert len(writes)==4
-                assert [path for path,_ in writes]==['groups/'+'a'*32,'queries','insights/queries','insights/queries']
-                assert writes[1][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
+                assert len(writes)==6
+                assert [path for path,_ in writes]==['groups/'+'a'*32,'topics/collect-once','topics/collect-once','queries','insights/queries','insights/queries']
+                assert writes[3][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
                 assert not page.locator('#queryDialog').is_visible()
                 page.wait_for_function('!refreshing')
                 fixture.update(login='expired', paused=dict(code='authentication_required'))
@@ -439,7 +450,7 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#historyRows').textContent.includes('暂无结果')")
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
-                assert len(writes)==4
+                assert len(writes)==6
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
