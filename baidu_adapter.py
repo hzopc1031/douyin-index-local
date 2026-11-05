@@ -26,6 +26,13 @@ ERRORS = {
     'http_error': '百度 HTTP 请求失败，已停止。',
     'business_error': '百度业务请求失败，已停止。',
     'network_error': '百度浏览器取数失败，已停止。',
+    'navigation': '百度页面跳转到非预期来源，已停止。',
+    'page_not_ready': '百度页面尚未就绪，已停止。',
+    'page_context_destroyed': '百度页面在取数时跳转（冷启动未就绪），已暂停，不会自动重试。',
+    'page_closed': '百度页面在取数时关闭，已暂停，不会自动重试。',
+    'page_timeout': '百度页面取数超时，已暂停，不会自动重试。',
+    'page_navigation': '百度页面在取数时跳转，已暂停，不会自动重试。',
+    'page_other': '百度页面取数失败，已暂停，不会自动重试。',
     'baidu_daily_limit': '百度查询跨越预算日，已停止。',
 }
 
@@ -125,9 +132,23 @@ def decrypt(ptbk, encrypted):
 
 
 def make_result(query, rows, *, fetched_at=None):
+    keys = {(r['keyword'], r['device'], r['date']) for r in rows}
+    returned = []
+    for chunk in chunks(query):
+        for word in query['keywords']:
+            group = [r for r in rows if r['keyword'] == word and chunk['start_date'] <= r['date'] <= chunk['end_date']]
+            if any(r['value_status'] == 'available' for r in group):
+                returned.extend(r['date'] for r in group)
+    data_end = max(returned, default=None)
+    start = dt.date.fromisoformat(query['start_date'])
+    days = (dt.date.fromisoformat(query['end_date']) - start).days + 1
+    gaps = any((word, device, (start + dt.timedelta(days=i)).isoformat()) not in keys
+               for word in query['keywords'] for device in ('all', 'pc', 'wise') for i in range(days))
+    lagged = data_end is not None and data_end < query['end_date']
     return {'rows': rows, 'metadata': {**DIMENSIONS, **query,
         'fetched_at': fetched_at or dt.datetime.now(TZ).isoformat(),
-        'complete': all(r['value_status'] == 'available' for r in rows)}}
+        'data_end_date': data_end, 'lagged': lagged,
+        'complete': not gaps and not lagged and all(r['value_status'] == 'available' for r in rows)}}
 
 
 def parse_index(data, ptbk, query):
@@ -149,25 +170,32 @@ def parse_index(data, ptbk, query):
         rows = []
         start = dt.date.fromisoformat(query['start_date'])
         for word in query['keywords']:
+            word_rows = []
             for device in ('all', 'pc', 'wise'):
                 item = by_word.get(word)
                 if item is None:
                     tokens = [''] * days
                 else:
                     series = item[device]
-                    if (series['startDate'] != query['start_date'] or series['endDate'] != query['end_date']
-                            or series.get('type', 'day') != 'day'):
+                    end = dt.date.fromisoformat(series['endDate'])
+                    if (series['startDate'] != query['start_date'] or end.isoformat() != series['endDate']
+                            or not start <= end <= dt.date.fromisoformat(query['end_date']) or series.get('type', 'day') != 'day'):
                         raise BaiduError()
                     plain = decrypt(ptbk, series['data'])
                     tokens = plain.split(',')
-                    if len(tokens) != days:
+                    if len(tokens) != (end - start).days + 1:
                         raise BaiduError()
+                    while tokens and not tokens[-1]:
+                        tokens.pop()
                 for i, token in enumerate(tokens):
                     if token and not re.fullmatch(r'[0-9]{1,15}', token):
                         raise BaiduError()
-                    rows.append(dict(keyword=word, device=device, date=(start+dt.timedelta(days=i)).isoformat(),
+                    word_rows.append(dict(keyword=word, device=device, date=(start+dt.timedelta(days=i)).isoformat(),
                                      search_index=int(token) if token else None,
                                      value_status='available' if token else 'missing'))
+            counts = [sum(r['device'] == device for r in word_rows) for device in ('all', 'pc', 'wise')]
+            cutoff = start + dt.timedelta(days=min(counts))
+            rows.extend(r for r in word_rows if dt.date.fromisoformat(r['date']) < cutoff)
         return make_result(query, rows)
     except (KeyError, TypeError, ValueError):
         raise BaiduError() from None
@@ -239,11 +267,25 @@ def public_result(result):
             if state not in ('available', 'missing', 'unindexed', 'low_volume') or (state == 'available' and (type(value) is not int or not 0 <= value < 10**15)) or (state != 'available' and value is not None):
                 raise ValueError
             clean.append(dict(keyword=key[0], device=key[1], date=key[2], search_index=value, value_status=state))
-        if expected or type(m.get('complete')) is not bool or m['complete'] != all(r['value_status'] == 'available' for r in clean):
+        present = {(r['keyword'], r['device'], r['date']) for r in clean}
+        for word in q['keywords']:
+            for chunk in chunks(q):
+                first, last = (dt.date.fromisoformat(chunk[k]) for k in ('start_date', 'end_date'))
+                dates = [(first + dt.timedelta(days=i)).isoformat() for i in range((last-first).days+1)]
+                flags = [((word, 'all', day) in present) for day in dates]
+                if flags != sorted(flags, reverse=True) or any(((word, device, day) in present) != flag for day, flag in zip(dates, flags) for device in ('pc', 'wise')):
+                    raise ValueError
+        derived = make_result(q, clean, fetched_at=m['fetched_at'])['metadata']
+        if any(m.get(k, derived[k]) != derived[k] or type(m.get(k, derived[k])) is not type(derived[k]) for k in ('data_end_date', 'lagged')) or type(m.get('complete')) is not bool or m['complete'] != derived['complete']:
             raise ValueError
+        note = '指数不等于搜索次数。'
+        if derived['lagged'] and derived['data_end_date']:
+            note += f"百度数据截至 {derived['data_end_date']}（滞后）"
+        if derived['data_end_date'] and any(key[2] < derived['data_end_date'] for key in expected):
+            note += '部分日期段数据未返回。'
         return {'rows': clean, 'metadata': {**DIMENSIONS, **q, 'fetched_at': stamp.isoformat(),
             'complete': m['complete'], 'verification': 'pending', 'metric_name': '整体搜索指数', 'unit': '指数',
-            'timezone': 'Asia/Shanghai', 'note': '指数不等于搜索次数。',
+            'timezone': 'Asia/Shanghai', 'data_end_date': derived['data_end_date'], 'lagged': derived['lagged'], 'note': note,
             'missing_search_dates': {w: [r['date'] for r in clean if r['keyword'] == w and r['device'] == 'all' and r['search_index'] is None] for w in q['keywords']}}}
     except (KeyError, TypeError, ValueError, OverflowError):
         raise HubError('invalid_result', '百度结果未通过严格校验。', 502) from None
@@ -269,22 +311,50 @@ def bridge_command(command, payload=None):
             raise ValueError
     except ValueError:
         raise BaiduError('baidu_daily_limit') from None
-    query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
+    job_id = payload.get('_job_id', '-')
+    if job_id != '-' and (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)):
+        raise BaiduError()
+    query = validate_query({k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id')})
     instance = baidu_browser.browser()
     import hub_baidu
+    import logging
+    import time
+    from urllib.parse import urlsplit
+    page = None
+    requests_sent = 'no'
+
+    def failure(code, sent):
+        try:
+            url = urlsplit(page.url)
+            on_index = (url.scheme, url.netloc) == ('https', 'index.baidu.com')
+        except Exception:
+            on_index = False
+        started = getattr(instance, 'started_at', None)
+        since = max(0, int(time.monotonic() - started)) if type(started) in (int, float) else -1
+        logging.getLogger('index_hub.baidu').warning(
+            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s',
+            job_id, code, sent, since, str(on_index).lower())
+
     try:
         def run(context):
+            nonlocal page, requests_sent
             page = baidu_browser._page(context)
+            baidu_browser.wait_ready(page, ORIGIN)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
             instance.login_checked = True
             if state != 'browser_ready':
                 raise BaiduError(state)
+            requests_sent = 'unknown'
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:
+        failure(exc.code, requests_sent)
         return {'ok': False, 'code': exc.code}
+    except Exception:
+        failure('other', 'unknown')
+        return {'ok': False, 'code': 'page_other'}
 
 
 class BaiduAdapter:
