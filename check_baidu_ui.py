@@ -94,7 +94,7 @@ def run(output=None):
                 assert '综合指数' not in page.locator('#trendSummary').inner_text()
                 assert 'platform=baidu' in page.locator('#exportLink').get_attribute('href')
                 assert page.locator('#resultTab-related').is_visible()
-                assert page.locator('#resultTab-audience').is_hidden()
+                assert page.locator('#resultTab-audience').is_visible()
                 low_volume[0] = True
                 page.evaluate('loadSeries()')
                 page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('低量')")
@@ -112,7 +112,7 @@ def run(output=None):
                 page.locator('#queryEnd').fill(q['end_date'])
                 page.locator('#submitButton').click()
                 page.wait_for_function('reportBatch?.entries.every(e=>e.jobId)')
-                assert writes == [('queries', q), ('insights/queries', {**q, 'kind': 'related'})], writes
+                assert writes == [('queries', q), ('insights/queries', {**q, 'kind': 'related'}), ('insights/queries', {**q, 'kind': 'audience'})], writes
                 assert not errors, errors
                 assert not unexpected, unexpected
                 print(f'PASS Baidu {width}px: selectable, pending login, null/low-volume, source, trend and related tasks')

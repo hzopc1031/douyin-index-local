@@ -5,10 +5,10 @@ const code=html.slice(html.indexOf('async function loadSeries()'),html.indexOf("
 const nodes={};const $=id=>nodes[id]??={value:'',style:{},dataset:{},textContent:'',innerHTML:''};
 $('#keywordSelect').value='合成词';
 const modulesCode=html.slice(html.indexOf('function platformInfo('),html.indexOf('function drawPlatforms('));
-const modulesCtx=vm.createContext({platforms:[{id:'douyin',modules:['related','audience']},{id:'baidu',modules:['related']},{id:'empty'}],chosenPlatform:'douyin'});
+const modulesCtx=vm.createContext({platforms:[{id:'douyin',modules:['related','audience']},{id:'baidu',modules:['related','audience']},{id:'empty'}],chosenPlatform:'douyin'});
 vm.runInContext(modulesCode,modulesCtx);
 assert.deepEqual(Array.from(modulesCtx.platformModules('douyin')),['related','audience']);
-assert.deepEqual(Array.from(modulesCtx.platformModules('baidu')),['related']);
+assert.deepEqual(Array.from(modulesCtx.platformModules('baidu')),['related','audience']);
 assert.deepEqual(Array.from(modulesCtx.platformModules('empty')),[]);
 const calls=[],drawn=[];
 const ctx=vm.createContext({$,chosenPlatform:'douyin',platforms:[{id:'douyin',available:true},{id:'baidu',available:true}],

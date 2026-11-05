@@ -766,3 +766,20 @@ class LifetimeClockTests(unittest.TestCase):
         self.assertEqual(timeouts, [None, 900, 800, 700, 200])
         self.assertEqual(worker.last_state, 'browser_ready')
         context.close.assert_called_once()
+
+
+class AudienceDiagnosticSyntheticTests(unittest.TestCase):
+    def test_audience_period_diagnostic_redaction(self):
+        from hub_logging import redact
+        from baidu_browser import PageTransport
+        from unittest.mock import Mock
+        diag = dict(reason='audience_period', request_start='2026-10-01', request_end='2027-10-02', response_start=None, response_end=None, word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None, data_type=None, datelist_sent='none', period_returned=True, period_rule='span_out_of_range', period_days=367)
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'object', 'keys':{}}, 'schema_diag':diag}
+        with self.assertLogs('index_hub.baidu') as logs, self.assertRaises(adapter.BaiduError):
+            PageTransport(page).query({'kind':'audience'})
+        output = redact(str(logs.output))
+        self.assertIn('audience_period', output)
+        self.assertIn('span_out_of_range', output)
+        self.assertNotIn('2026-10-01', output)
+        self.assertNotIn('2027-10-02', output)

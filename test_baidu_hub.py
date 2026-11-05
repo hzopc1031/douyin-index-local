@@ -76,6 +76,18 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.submit()['cache_hit'], True)
         self.assertIsNone(self.s.latest_available_date())  # Douyin date source must stay isolated.
 
+    async def test_audience_budget_and_storage_synthetic(self):
+        q = b.validate_insight({**query(), 'kind': 'audience'})
+        data = b.project_audience({'gender': [{'desc': '男', 'rate': 0.6, 'tgi': 120}], 'age': [{'desc': '青年', 'rate': 0.4, 'tgi': 90}], 'interest': [], 'prov': {'917': 1000}, 'city': {'138': 800}})
+        self.response = {'ok': True, 'data': data, 'metadata': {**q, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
+        job = self.submit(q)
+        with patch('hub_baidu.browser_status', return_value='signature_unavailable'):
+            await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertEqual(self.s.insight(q)['data'], data)
+        self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 3)
+        self.assertEqual(hub_baidu.daily(self.s)['attempts'], 1)
+
     async def test_related_budget_cache_empty_and_failure(self):
         q = b.validate_insight({**query(), 'kind': 'related'})
         data = b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成词'}]}]})
@@ -381,8 +393,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             insight = await (await client.get('/api/v1/insights?' + insight_args)).json()
             self.assertEqual(insight['status'], 'available')
             self.assertEqual(insight['result']['data']['search_related'][0], {'keyword': '合成', 'relation_score': 0.5, 'search_index': 12, 'change_ratio': -0.2})
-            response = await client.post('/api/v1/insights/queries', headers=headers, json=query() | {'kind': 'audience'})
-            self.assertEqual(response.status, 422)
+            response = await client.post('/api/v1/insights/queries', headers={**headers, 'Idempotency-Key': 'synthetic-audience'}, json=query() | {'kind': 'audience'})
+            self.assertIn(response.status, (200, 201, 202))
             self.ready = False
             self.s.set('baidu.paused', {'code': 'login_required'})
             response = await client.post('/api/v1/collection/resume', headers=headers, json={'platform': 'baidu'})

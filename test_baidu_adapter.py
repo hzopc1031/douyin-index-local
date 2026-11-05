@@ -276,11 +276,13 @@ class WordGraphTests(unittest.TestCase):
         from hub_store import HubError
         q = b.validate_insight({**query(), 'kind': 'related'}, latest_related_date='2000-01-01')
         self.assertEqual(q['end_date'], query()['end_date'])
-        for body in ({**query(), 'kind': 'audience'}, {**query(), 'kind': 'related', 'keywords': ['a', 'b']}):
+        self.assertEqual(b.validate_insight({**query(), 'kind': 'audience'})['kind'], 'audience')
+        self.assertIn('audience', b.BaiduAdapter.description['modules'])
+        for body in ({**query(), 'kind': 'unknown'}, {**query(), 'kind': 'audience', 'keywords': ['a', 'b']}, {**query(), 'kind': 'related', 'keywords': ['a', 'b']}):
             with self.assertRaises(HubError):
                 b.validate_insight(body)
         with self.assertRaises(HubError) as caught:
-            b.validate_insight({**query(), 'kind': 'audience'})
+            b.validate_insight({**query(), 'kind': 'unknown'})
         self.assertEqual(caught.exception.status, 422)
         graph = {'wordlist': [{'wordGraph': [{'word': '合成', 'unknown': 4}] * 100}]}
         data = b.project_wordgraph(graph)
@@ -297,3 +299,18 @@ class WordGraphTests(unittest.TestCase):
                         {'wordlist': [{'wordGraph': [{'word': '合成'}] * 101}]}):
             with self.assertRaises(b.BaiduError):
                 b.project_wordgraph(invalid)
+
+
+class AudienceSyntheticTests(unittest.TestCase):
+    def test_projection_and_unknown_codes(self):
+        fixture = {'gender': [{'desc': '男', 'rate': 0.6, 'tgi': 120}], 'age': [{'desc': '青年', 'rate': 0.5, 'tgi': None}], 'interest': [], 'prov': {'917': 1000, '999999': 12}, 'city': {'138': 800}}
+        with self.assertLogs('index_hub.baidu') as logs:
+            result = b.project_audience(fixture)
+        self.assertEqual(result['dimensions'][0]['labels'][0], {'name': '男', 'value': 0.6, 'tgi': 120})
+        self.assertEqual(result['dimensions'][3]['labels'], [{'name': '浙江', 'value': 1000, 'tgi': None}])
+        self.assertEqual(result['dimensions'][4]['labels'][0]['name'], '杭州')
+        self.assertIn('region_code_unknown', str(logs.output))
+        with self.assertLogs('index_hub.baidu') as logs, self.assertRaises(b.BaiduError):
+            b.project_audience({**fixture, 'city': {'999999': 42}})
+        self.assertIn('all_unknown', str(logs.output))
+        self.assertNotIn('999999', str(logs.output))

@@ -20,6 +20,31 @@ async function run(mode) {
   return vm.runInNewContext(script, context)(query);
 }
 (async () => {
+  // Synthetic fixtures only: exercise request shapes and validation offline.
+  async function audience(overrides = {}) {
+    const paths = [];
+    const social = {result:[{word:'synthetic-word', gender:[{desc:'男',rate:0.6,tgi:120}], age:[{desc:'青年',rate:0.4,tgi:90}]}]};
+    const interest = {result:[{word:'synthetic-word', interest:[]}]};
+    const region = {region:[{key:'synthetic-word',period:'20261001|20261007',prov:{917:1000},city:{138:800}}]};
+    const fetch = async url => { paths.push(url); const data = url.includes('baseAttributes') ? social : url.includes('interest') ? interest : (overrides.region || region); return new Response(JSON.stringify({status:0,data}), {headers:{'content-type':'application/json'}}); };
+    const context = {location:{origin:query._origin}, fetch, URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout, clearTimeout};
+    const result = await vm.runInNewContext(script, context)({...query,kind:'audience'});
+    assert.equal(paths.length, 3);
+    const urls = paths.map(p => new URL(p, query._origin));
+    assert.equal(urls[0].pathname, '/api/SocialApi/baseAttributes');
+    assert.equal(urls[1].pathname, '/api/SocialApi/interest');
+    assert.equal(urls[1].searchParams.get('typeid'), '');
+    assert.equal(urls[0].searchParams.get('datelist'), null);
+    assert.equal(urls[2].pathname, '/api/SearchApi/region');
+    assert.equal(urls[2].searchParams.get('startDate'), query.start_date);
+    assert.equal(urls[2].searchParams.get('endDate'), query.end_date);
+    return result;
+  }
+  const audienceResult = await audience();
+  assert.equal(audienceResult.status, 'ok');
+  assert.equal(audienceResult.data.period.days, 7);
+  const badPeriod = await audience({region:{region:[{period:'20261001|20271002',prov:{917:1000},city:{138:800}}]}});
+  assert.equal(badPeriod.schema_diag.period_rule, 'span_out_of_range');
   const relatedQuery = {...query, kind:'related', end_date:'2026-11-04'};
   async function related(data, fallback = false) {
     let path;
