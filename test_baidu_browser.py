@@ -39,7 +39,7 @@ class ReadinessTests(unittest.TestCase):
 
         worker = Mock()
         worker.call.side_effect = lambda action: action(Mock())
-        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01'}, 'wordlist': [{'wordGraph': []}]}
+        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01', 'days': 7}, 'wordlist': [{'wordGraph': []}]}
         body = {**query(), 'kind': 'related', 'related_date': query()['end_date'], '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat(), '_job_id': 'a' * 32}
         with patch.object(baidu_browser, 'browser', return_value=worker), \
              patch.object(baidu_browser, '_page'), patch.object(baidu_browser, 'wait_ready') as ready, \
@@ -134,7 +134,7 @@ class ReadinessTests(unittest.TestCase):
             answer = adapter.bridge_command('baidu_query', body)
         self.assertEqual(answer['code'], 'response_schema')
         line = next(line for line in logs.output if 'baidu_failure' in line)
-        self.assertIn('datelist_sent=20260927 period_returned=true', line)
+        self.assertIn('datelist_sent=present period_returned=true', line)
         self.assertNotIn('synthetic-secret', str(logs.output))
 
     def test_readiness_deadline(self):
@@ -628,25 +628,50 @@ class ReadOnlyStatusTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 _safe_period_shape(bad)
         page = Mock(url='https://index.baidu.com/')
-        keys = {'word': 'string', 'masked': 'mixed', 'score': 'number'}
+        keys = {'word': 'string', 'masked': 'mixed', 'score': 'number', 'keyword': 'object'}
         page.evaluate.return_value = {'status': 'ok', 'data': {}, 'meta': {'entry_keys': keys}}
         with self.assertLogs('index_hub.baidu', level='WARNING') as logs:
             PageTransport(page, job_id='a' * 32).query({'kind': 'related'})
-        self.assertIn('baidu_related_entry_keys job=' + 'a' * 32 + ' keys=masked:mixed,score:number,word:string', str(logs.output))
+        self.assertIn('baidu_related_fields job=' + 'a' * 32 + ' fields keyword:object,masked:mixed,score:number,word:string', str(logs.output))
         diag = dict(reason='related_period', request_start=None, request_end=None, response_start=None, response_end=None,
                     word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
                     data_type='object', datelist_sent='none', period_returned=True, period_shape=shape, entry_keys=keys)
         page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'object', 'keys': {}}, 'schema_diag': diag}
         with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
             PageTransport(page, job_id='a' * 32).query({'kind': 'related'})
-        self.assertIn('"period_shape"', str(logs.output))
-        self.assertIn('keys=masked:mixed,score:number,word:string', str(logs.output))
+        self.assertNotIn('"period_shape"', str(logs.output))
+        self.assertIn('fields keyword:object,masked:mixed,score:number,word:string', str(logs.output))
         self.assertNotIn('secret', str(logs.output))
+        from hub_logging import redact
+        redacted = redact(' '.join(logs.output))
+        self.assertIn('keyword:', redacted)
+        self.assertNotIn('20261026', redacted)
+        self.assertNotIn('synthetic-word', redacted)
         page.evaluate.return_value['schema_diag'] = diag | {'period_shape': {'type': 'string', 'length': 6, 'pattern': 'secret'}}
         with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
             PageTransport(page).query({'kind': 'related'})
         self.assertNotIn('secret', str(logs.output))
         self.assertNotIn('schema_digest=', str(logs.output))
+
+    def test_related_period_diagnostics_survive_redaction_without_dates(self):
+        from unittest.mock import Mock
+        from baidu_adapter import BaiduError
+        from baidu_browser import PageTransport
+        from hub_logging import redact
+        diag = dict(reason='related_period', request_start='2026-10-01', request_end='2027-10-02', response_start=None, response_end=None,
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
+                    data_type='object', datelist_sent='20261001', period_returned=True, period_rule='span_out_of_range', period_days=367,
+                    entry_keys={'keyword': 'object', 'pv': 'number'})
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'object', 'keys': {}}, 'schema_diag': diag}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page).query({'kind': 'related'})
+        output = redact(' '.join(logs.output))
+        self.assertIn('span_out_of_range', output)
+        self.assertIn('"period_days":367', output)
+        self.assertIn('keyword:', output)
+        for secret in ('2026-10-01', '2027-10-02', '20261001'):
+            self.assertNotIn(secret, output)
 
     def test_hold_bounds(self):
         from baidu_browser import BaiduBrowser

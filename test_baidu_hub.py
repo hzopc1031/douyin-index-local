@@ -111,7 +111,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         with self.s.db:
             self.s.db.execute("DELETE FROM baidu_points WHERE day<>(SELECT max(day) FROM baidu_points)")
             self.s.db.execute("UPDATE baidu_points SET day='2026-11-03' WHERE day=(SELECT max(day) FROM baidu_points)")
-        self.response = {'ok': True, 'data': {'search_related': [{'keyword': '合成'}], 'content_related': []},
+        self.response = {'ok': True, 'data': b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', 'sim': 0.5, 'pv': 12, 'ratio': -0.2}]}]}),
                          'metadata': {**q, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
         job = self.submit(q)
         async def immediate(func, *args):
@@ -370,7 +370,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 21))
             self.assertEqual(state['platform_status']['baidu']['limits']['http_daily'], 400)
             related = b.validate_insight(query() | {'kind': 'related'})
-            self.s.save_insight(related, {'data': {'search_related': [{'keyword': '合成'}], 'content_related': []},
+            self.s.save_insight(related, {'data': b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', 'sim': 0.5, 'pv': 12, 'ratio': -0.2}]}]}),
                                           'metadata': {**related, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}})
             args = urlencode({'keyword': related['keywords'][0], 'kind': 'related'})
             self.assertEqual((await (await client.get('/api/v1/insights/ranges?' + args)).json())['ranges'], [])
@@ -378,7 +378,9 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(baidu_ranges['ranges']), 1)
             insight_args = urlencode({'platform': 'baidu', 'keyword': related['keywords'][0], 'kind': 'related',
                                       'start_date': related['start_date'], 'end_date': related['end_date']})
-            self.assertEqual((await (await client.get('/api/v1/insights?' + insight_args)).json())['status'], 'available')
+            insight = await (await client.get('/api/v1/insights?' + insight_args)).json()
+            self.assertEqual(insight['status'], 'available')
+            self.assertEqual(insight['result']['data']['search_related'][0], {'keyword': '合成', 'relation_score': 0.5, 'search_index': 12, 'change_ratio': -0.2})
             response = await client.post('/api/v1/insights/queries', headers=headers, json=query() | {'kind': 'audience'})
             self.assertEqual(response.status, 422)
             self.ready = False

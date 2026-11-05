@@ -45,7 +45,7 @@ class AdapterTests(unittest.TestCase):
         worker.call.side_effect = lambda action: action(Mock())
         page = Mock(url='https://index.baidu.com/')
         body = {**query(), 'kind': 'related', '_budget_day': dt.datetime.now(b.TZ).date().isoformat(), '_job_id': 'a' * 32}
-        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01'}, 'wordlist': [{'wordGraph': []}]}
+        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01', 'days': 7}, 'wordlist': [{'wordGraph': []}]}
         diag = dict(reason='related_period', request_start=None, request_end=None, response_start=None, response_end=None,
                     word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
                     data_type='object', datelist_sent='none', period_returned=True,
@@ -58,7 +58,7 @@ class AdapterTests(unittest.TestCase):
                  self.assertLogs('index_hub.baidu', level='WARNING') as logs:
                 answer = b.bridge_command('baidu_query', body)
             self.assertEqual(answer['ok'], ok)
-            self.assertIn('baidu_related_entry_keys job=' + 'a' * 32 + ' keys=word:string', str(logs.output))
+            self.assertIn('baidu_related_fields job=' + 'a' * 32 + ' fields word:string', str(logs.output))
 
     def test_lagged_series_and_device_cutoff(self):
         for trailing in (False, True):
@@ -285,8 +285,13 @@ class WordGraphTests(unittest.TestCase):
         graph = {'wordlist': [{'wordGraph': [{'word': '合成', 'unknown': 4}] * 100}]}
         data = b.project_wordgraph(graph)
         self.assertEqual(len(data['search_related']), 100)
-        self.assertEqual(data['search_related'][0], {'keyword': '合成', 'relation_score': None, 'search_index': None})
+        self.assertEqual(data['search_related'][0], {'keyword': '合成', 'relation_score': None, 'search_index': None, 'change_ratio': None})
         self.assertEqual(data['content_related'], [])
+        row = b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', 'keyword': {'secret': 'x'}, 'sim': 0.5, 'pv': 12, 'ratio': -0.2}]}]})['search_related'][0]
+        self.assertEqual(row, {'keyword': '合成', 'relation_score': 0.5, 'search_index': 12, 'change_ratio': -0.2})
+        for field in ('pv', 'sim', 'ratio'):
+            with self.assertRaises(b.BaiduError):
+                b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', field: '12'}]}]})
         self.assertEqual(b.project_wordgraph({'wordlist': [{'wordGraph': []}]})['search_related'], [])
         for invalid in ({}, {'wordlist': []}, {'wordlist': [{'wordGraph': [{}]}]},
                         {'wordlist': [{'wordGraph': [{'word': '合成'}] * 101}]}):

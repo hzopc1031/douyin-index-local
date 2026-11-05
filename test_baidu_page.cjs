@@ -35,11 +35,27 @@ async function run(mode) {
   assert.equal(good.data.period.start_date, '2026-10-26');
   assert.equal(good.data.period.end_date, '2026-11-01');
   assert.equal((await related(valid, true)).status, 'ok');
-  for (const period of [undefined, '', '20260230|20260306', '00000101|00000107', '20261001|20261020', '20261101|20261026']) {
+  for (const period of [undefined, '', '20260230|20260306', '00000101|00000107', '20261001|20271002', '20261101|20261026']) {
     const result = await related({...valid, period});
     assert.equal(result.schema_diag.reason, 'related_period');
     assert.equal(result.schema_diag.period_returned, period !== undefined);
   }
+  assert.equal((await related({...valid, period:'20261001|20261030'})).data.period.days, 30);
+  for (const [period, rule, days] of [['20261001|20271002','span_out_of_range',367], ['20261101|20261026','start_after_end',-5], ['20261332|20270101','invalid_date',null], ['bad','unknown_format',null]]) {
+    const diag = (await related({...valid, period})).schema_diag;
+    assert.equal(diag.period_rule, rule); assert.equal(diag.period_days, days);
+  }
+  for (const keyword of [null, 'private-word', {}, [], 5]) {
+    const result = await related({...valid, wordlist:[{keyword:'query', wordGraph:[{word:'result', keyword, pv:123, sim:0.7, ratio:-2}]}]});
+    assert.equal(result.status, 'ok');
+    assert.equal(JSON.stringify(result.data.wordlist[0].wordGraph[0]), JSON.stringify({word:'result', pv:123, sim:0.7, ratio:-2}));
+    assert(!JSON.stringify(result.data).includes('private-word'));
+  }
+  for (const [item, rule] of [[{word:'x',pv:'12'},'pv_invalid'], [{word:'x',sim:-1},'sim_invalid'], [{word:'x',ratio:true},'ratio_invalid'], [{},'word_missing'], [{word:'x'.repeat(201)},'word_too_long'], [null,'item_not_object']]) {
+    const diag = (await related({...valid, wordlist:[{wordGraph:[item]}]})).schema_diag;
+    assert.equal(diag.reason, 'related_entry_shape'); assert.equal(diag.entry_rule, rule);
+  }
+  assert.equal((await related({...valid, wordlist:[{wordGraph:Array(101).fill({word:'x'})}]})).schema_diag.reason, 'too_many_entries');
   for (const sep of ['|', '~', ',', ' - ', '至']) for (const a of ['20261026', '2026-10-26']) for (const b of ['20261101', '2026-11-01']) {
     const result = await related({...valid, period:a + sep + b});
     assert.equal(result.status, 'ok');
@@ -64,7 +80,7 @@ async function run(mode) {
   assert.equal(badType.schema_diag.data_type, 'string');
   assert.equal(badType.schema_diag.data_length, secret.length);
   assert(!JSON.stringify(badType).includes(secret));
-  assert.equal((await related({period:'20261026|20261101', wordlist:[]})).schema_diag.reason, 'related_shape');
+  assert.equal((await related({period:'20261026|20261101', wordlist:[]})).schema_diag.reason, 'related_wordlist_shape');
   for (const mode of ['truncated_end', 'trailing_empty']) {
     const result = await run(mode);
     assert.equal(result.status, 'ok');
