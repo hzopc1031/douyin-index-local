@@ -254,7 +254,7 @@ def bridge_command(command, payload=None):
     if command == 'baidu_status':
         instance = baidu_browser.browser()
         if not instance.started or instance.busy:
-            state = 'browser_idle' if not instance.started and instance.last_state == 'browser_ready' else instance.last_state
+            state = instance.last_state if instance.started or (instance.login_checked and instance.last_state == 'login_required') else 'browser_idle'
             return {'ok': True, 'state': state, 'live_enabled': True}
         return instance.call(baidu_browser.status, touch='status')
     if command == 'baidu_login_open':
@@ -271,14 +271,13 @@ def bridge_command(command, payload=None):
         raise BaiduError('baidu_daily_limit') from None
     query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
     instance = baidu_browser.browser()
-    if not instance.started and instance.last_state == 'login_required':
-        return {'ok': False, 'code': 'login_required'}
     import hub_baidu
     try:
         def run(context):
             page = baidu_browser._page(context)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
+            instance.login_checked = True
             if state != 'browser_ready':
                 raise BaiduError(state)
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
