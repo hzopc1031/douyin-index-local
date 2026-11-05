@@ -83,6 +83,23 @@ class BrowserPageTests(unittest.TestCase):
                 self.assertEqual([r['search_index'] for r in rows[:2]], [1, 2])
                 self.assertNotIn('secret', repr(rows))
                 from baidu_adapter import BaiduError, collect_page
+                from baidu_adapter import public_result
+                lag_query = dict(platform='baidu', keywords=['a'], start_date='2026-09-26', end_date='2026-10-02')
+                for mode in ('truncated_end', 'trailing_empty'):
+                    server.mode = mode
+                    result = public_result(collect_page(lag_query, PageTransport(page, origin=origin, allow_loopback=True)))
+                    self.assertEqual(len(result['rows']), 15)
+                    self.assertTrue(result['metadata']['lagged'])
+                    self.assertIn('（滞后）', result['metadata']['note'])
+                    self.assertTrue(all(row['search_index'] != 0 for row in result['rows']))
+                for mode, reason in [('end_after', 'end_date'), ('start_mismatch', 'start_date'), ('bad_word_type', 'word_type'), ('wrong_name', 'word')]:
+                    server.mode = mode
+                    with self.subTest(mode=mode), self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+                        PageTransport(page, origin=origin, allow_loopback=True).query({**lag_query, '_budget_day':today})
+                    self.assertIn('"reason":"' + reason + '"', str(logs.output))
+                    for secret in ('fake-cookie-secret', 'synthetic-cookie-secret', 'fake-signature-secret', 'abc1,2', 'synthetic-value-secret'):
+                        self.assertNotIn(secret, str(logs.output))
+                server.mode = ''
                 before = server.index_calls
                 page.evaluate("day => { window.realNow = Date.now; Date.now = () => Date.parse(day + 'T15:59:31Z'); }", today)
                 with self.assertRaises(BaiduError) as caught:
@@ -382,6 +399,24 @@ class ReadOnlyStatusTests(unittest.TestCase):
         with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
             PageTransport(page).query({})
         logger.assert_not_called()
+
+    def test_untrusted_diagnostics_are_not_logged(self):
+        from unittest.mock import Mock
+        from baidu_adapter import BaiduError
+        from baidu_browser import PageTransport
+        diag = dict(reason='word', request_start=None, request_end=None, response_start=None, response_end=None,
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None)
+        page = Mock(url='https://index.baidu.com/')
+        for change in ({'secret':'synthetic-secret'}, {'name_matches':1}, {'request_start':'synthetic-secret'}, {'reason':'synthetic-secret'}, {'ptbk_length':True}):
+            page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag | change}
+            with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
+                PageTransport(page).query({})
+            logger.assert_not_called()
+        page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page).query({})
+        self.assertIn('"reason":"word"', str(logs.output))
+        self.assertIn('schema_digest=', str(logs.output))
 
     def test_hold_bounds(self):
         from baidu_browser import BaiduBrowser

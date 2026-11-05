@@ -203,6 +203,17 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.job(job['id'])['status'], 'failed')
         self.assertEqual(self.s.series('baidu', 'other')['points'], [])
 
+    async def test_lagged_result_is_stored_as_partial(self):
+        raw = fixture('12,23,34,45,56,,')
+        self.response = {'ok': True, **b.parse_index(raw, PTBK, query())}
+        job = self.submit()
+        await self.hub.run_one()
+        saved = self.s.job(job['id'])
+        self.assertEqual(saved['status'], 'partial')
+        self.assertTrue(saved['result']['metadata']['lagged'])
+        self.assertEqual(len(self.s.series('baidu', query()['keywords'][0])['points']), 5)
+        self.assertIsNone(self.s.cached(query()))
+
     async def test_restart_retains_budget_and_pauses_interrupted(self):
         job = self.submit()
         self.s.update_job(job['id'], 'running')
