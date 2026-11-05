@@ -87,6 +87,14 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.job(dy['id'])['status'], 'succeeded')
         self.assertEqual(self.s.get('daily')['count'], 1)
 
+    async def test_readiness_failure_keeps_reservation(self):
+        self.response = {'ok': False, 'code': 'page_not_ready'}
+        job = self.submit()
+        await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['error']['code'], 'page_not_ready')
+        self.assertEqual(hub_baidu.daily(self.s)['attempts'], 1)
+        self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 2)
+
     async def test_idle_dispatch_and_resume(self):
         original = self.hub.bridge
         def idle_bridge(command, *args):
@@ -352,7 +360,7 @@ class SyntheticWorkerTests(unittest.IsolatedAsyncioTestCase):
         def bridge(command, payload=None, timeout=None):
             if command == 'baidu_status':
                 return {'ok': True, 'state': 'browser_ready', 'live_enabled': True}
-            return {'ok': True, **b.collect({k:v for k,v in payload.items() if k != '_budget_day'}, Transport(), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], sleep=waits.append)}
+            return {'ok': True, **b.collect({k:v for k,v in payload.items() if k not in ('_budget_day', '_job_id')}, Transport(), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], sleep=waits.append)}
         with tempfile.TemporaryDirectory() as directory:
             hub = Hub(directory, bridge)
             try:

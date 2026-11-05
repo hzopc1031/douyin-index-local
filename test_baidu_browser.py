@@ -8,6 +8,74 @@ from baidu_browser import prepare_profile
 from browser_profile import ProfileError
 
 
+class ReadinessTests(unittest.TestCase):
+    def test_query_readiness_and_safe_failures(self):
+        import datetime
+        import time
+        from unittest.mock import Mock
+        import baidu_adapter as adapter
+        import baidu_browser
+        from test_baidu_adapter import query
+
+        class Error(Exception):
+            pass
+
+        class TimeoutError(Error):
+            pass
+
+        day = datetime.datetime.now(adapter.TZ).date().isoformat()
+        for mode in ('navigation', 'closed', 'timeout', 'login', 'unexpected'):
+            with self.subTest(mode=mode):
+                page = Mock(url='https://index.baidu.com/?fake-cookie-secret=synthetic')
+                worker = Mock(started_at=time.monotonic() - 2)
+                worker.call.side_effect = lambda action: action(Mock())
+                if mode == 'navigation':
+                    page.evaluate.side_effect = [Error('Execution context was destroyed synthetic'), Error('Cannot find context'), True, {'status': 'ok', 'rows': []}]
+                elif mode in ('closed', 'timeout'):
+                    error = Error('Target page, context or browser has been closed fake-cookie-secret') if mode == 'closed' else TimeoutError('Timeout synthetic')
+                    page.evaluate.side_effect = [True, error]
+                elif mode == 'login':
+                    page.url = 'https://passport.baidu.com/login?fake-cookie-secret=synthetic'
+                else:
+                    page.evaluate.side_effect = RuntimeError('exception message fake-cookie-secret synthetic')
+                with patch.object(baidu_browser, 'browser', return_value=worker), \
+                     patch.object(baidu_browser, '_page', return_value=page), \
+                     patch.object(baidu_browser, 'status', return_value={'state': 'browser_ready'}), \
+                     patch.object(adapter, 'collect_page', side_effect=lambda q, transport, **kw: {'rows': transport.query(q)}), \
+                     patch('baidu_browser.time.sleep'):
+                    if mode == 'navigation':
+                        answer = adapter.bridge_command('baidu_query', {**query(), '_budget_day': day})
+                    else:
+                        with self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+                            answer = adapter.bridge_command('baidu_query', {**query(), '_budget_day': day, '_job_id': 'a' * 32})
+                if mode == 'navigation':
+                    self.assertTrue(answer['ok'])
+                    self.assertEqual(page.evaluate.call_count, 4)
+                else:
+                    code = {'closed': 'page_closed', 'timeout': 'page_timeout', 'login': 'login_required', 'unexpected': 'page_other'}[mode]
+                    self.assertEqual(answer['code'], code)
+                    self.assertEqual(page.evaluate.call_count, 0 if mode == 'login' else 1 if mode == 'unexpected' else 2)
+                    line = logs.output[0]
+                    self.assertIn('job=' + 'a' * 32, line)
+                    category = 'other' if mode == 'unexpected' else code
+                    sent = 'no' if mode == 'login' else 'unknown'
+                    self.assertIn(f'category={category} requests_sent={sent} since_start=', line)
+                    self.assertIn('on_index=' + ('false' if mode == 'login' else 'true'), line)
+                    for secret in ('fake-cookie-secret', 'synthetic', '?', 'Target', 'exception message'):
+                        self.assertNotIn(secret, line)
+
+    def test_readiness_deadline(self):
+        from unittest.mock import Mock
+        from baidu_adapter import BaiduError
+        from baidu_browser import wait_ready
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.return_value = False
+        with self.assertRaises(BaiduError) as caught:
+            wait_ready(page, 'https://index.baidu.com', timeout=0.01)
+        self.assertEqual(caught.exception.code, 'page_not_ready')
+        page.evaluate.assert_called_once()
+
+
 class ProfileTests(unittest.TestCase):
     def test_profile_permissions_and_rejected_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -39,7 +107,7 @@ class PageTransportTests(unittest.TestCase):
         from unittest.mock import Mock
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from baidu_browser import login_open
-        page = Mock()
+        page = Mock(url='https://index.baidu.com/')
         login = page.get_by_text.return_value.first
         login.is_visible.return_value = True
         login.click.side_effect = PlaywrightTimeoutError('synthetic timeout')
@@ -205,6 +273,7 @@ class BridgeLeakTests(unittest.TestCase):
             worker = baidu_browser.BaiduBrowser(root=tmp, idle_seconds=30)
             worker.last_state = 'browser_ready'
             transport = baidu_browser.PageTransport
+            wait_ready = baidu_browser.wait_ready
             def page_for(context):
                 page = context.pages[0]
                 if not page.url.startswith(origin):
@@ -213,6 +282,7 @@ class BridgeLeakTests(unittest.TestCase):
             sock = Path(tmp) / 'bridge.sock'
             with patch.object(baidu_browser, '_browser', worker), patch.object(baidu_browser, '_page', page_for), \
                  patch.object(baidu_browser, 'status', return_value={'state':'browser_ready'}), \
+                 patch.object(baidu_browser, 'wait_ready', side_effect=lambda page, _: wait_ready(page, origin)), \
                  patch.object(baidu_browser, 'PageTransport', side_effect=lambda page: transport(page, origin=origin, allow_loopback=True)), \
                  patch.object(hub_bridge, '_socket_path', return_value=sock):
                 bridge = hub_bridge.start_bridge(Mock())
@@ -336,7 +406,7 @@ class ReadOnlyStatusTests(unittest.TestCase):
             result = baidu_adapter.bridge_command('baidu_status')
             self.assertEqual(result['state'], 'browser_idle')
             self.assertEqual(asyncio.run(hub_baidu.browser_status(Mock(bridge=Mock(return_value=result)))), 'browser_idle')
-            with patch.object(baidu_browser, '_page') as page, patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}) as status:
+            with patch.object(baidu_browser, '_page') as page, patch.object(baidu_browser, 'wait_ready'), patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}) as status:
                 day = datetime.datetime.now(baidu_adapter.TZ).date().isoformat()
                 answer = baidu_adapter.bridge_command('baidu_query', {**query(), '_budget_day': day})
             self.assertEqual(answer['code'], 'login_required')
