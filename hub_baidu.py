@@ -93,7 +93,7 @@ async def run_one(hub, row, query):
             return False
         cached = store.cached(query)
         if cached:
-            store.update_job(row['id'], 'succeeded', result=cached)
+            store.update_job(row['id'], 'no_data' if cached.get('no_data') else 'succeeded', result=cached)
             with store.db:
                 store.db.execute('UPDATE jobs SET cache_hit=1 WHERE id=?', (row['id'],))
             return True
@@ -101,15 +101,15 @@ async def run_one(hub, row, query):
         if time.time() < store.get('baidu.next_attempt_at', 0):
             return False
         counter = daily(store)
-        http_reserved = 2 * len(list(adapter.chunks(query)))
+        http_reserved = 1 if query.get('kind') == 'related' else 2 * len(list(adapter.chunks(query)))
         if counter['attempts'] >= config['logical_daily'] or counter['http_reserved'] + http_reserved > config['http_daily']:
             fail(store, row['id'], 'baidu_daily_limit')
             return True
         state = await browser_status(hub)
-        if state not in ('browser_ready', 'browser_idle'):
+        if state not in (('browser_ready', 'browser_idle', 'signature_unavailable') if query.get('kind') == 'related' else ('browser_ready', 'browser_idle')):
             fail(store, row['id'], state)
             return True
-        # Reserve both steps before dispatch; timeout/restart never refunds uncertain traffic.
+        # Reserve traffic before dispatch; timeout/restart never refunds uncertain traffic.
         counter = daily(store)
         with store.db:
             from hub_store import encode
@@ -124,6 +124,15 @@ async def run_one(hub, row, query):
             if response.get('ok') is not True:
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')
+                return True
+            if query.get('kind') == 'related':
+                result = {'data': response['data'], 'metadata': response['metadata']}
+                if any(result['metadata'].get(k) != query[k] for k in ('platform', 'kind', 'keywords', 'start_date', 'end_date')):
+                    raise HubError('invalid_result', '百度结果与任务不一致。')
+                if not result['data']['search_related']:
+                    result['no_data'] = True
+                store.save_insight(query, result)
+                store.update_job(row['id'], 'no_data' if result.get('no_data') else 'succeeded', result=result)
                 return True
             result = adapter.public_result(response)
             if any(result['metadata'][k] != query[k] for k in ('platform', 'keywords', 'start_date', 'end_date')):

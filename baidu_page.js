@@ -1,6 +1,6 @@
 async (query) => {
   const fail = status => ({status});
-  const schemaKeys = new Set(['status','data','uniqid','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio']);
+  const schemaKeys = new Set(['status','data','uniqid','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio','wordlist','wordGraph']);
   const digest = (value, depth = 0) => {
     const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
     if (type === 'array') return {type, length:value.length, ...(value.length && depth < 3 ? {items:digest(value[0], depth)} : {})};
@@ -80,6 +80,14 @@ async (query) => {
     } finally { clearTimeout(timer); }
   };
   try {
+    if (query.kind === 'related') {
+      const params = new URLSearchParams({'wordlist[]':query.keywords[0], datelist:query.end_date.replaceAll('-', '')});
+      const graph = await get('/api/WordGraph/multi?' + params);
+      if (graph.status !== 'ok') return graph;
+      const data = graph.data;
+      if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data);
+      return {status:'ok', data:{wordlist:[{wordGraph:data.wordlist[0].wordGraph.slice(0,100).map(item => ({word:item.word}))}]}};
+    }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');
     let signature;
     try {

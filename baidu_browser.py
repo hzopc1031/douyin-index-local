@@ -177,7 +177,7 @@ class BaiduBrowser:
 
 def _safe_digest(value, depth=0):
     keys = {'status', 'data', 'uniqid', 'userIndexes', 'word', 'name', 'wordType',
-            'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio'}
+            'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio', 'wordlist', 'wordGraph'}
     if type(value) is not dict or value.get('type') not in ('string', 'number', 'boolean', 'null', 'array', 'object'):
         raise ValueError
     kind = value['type']
@@ -229,7 +229,7 @@ class PageTransport:
                 except (TypeError, ValueError, RecursionError):
                     pass
             raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
-        return result.get('rows')
+        return result.get('data') if query.get('kind') == 'related' else result.get('rows')
 
 
 _browser = None

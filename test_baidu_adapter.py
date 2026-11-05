@@ -194,3 +194,25 @@ class ExpandedScopeTests(unittest.TestCase):
         raw['userIndexes'][0]['wise']['type'] = 'week'
         with self.assertRaises(b.BaiduError):
             b.parse_index(raw, PTBK, query())
+
+
+class WordGraphTests(unittest.TestCase):
+    def test_validation_and_projection(self):
+        from hub_store import HubError
+        q = b.validate_insight({**query(), 'kind': 'related'}, latest_related_date='2000-01-01')
+        self.assertEqual(q['end_date'], query()['end_date'])
+        for body in ({**query(), 'kind': 'audience'}, {**query(), 'kind': 'related', 'keywords': ['a', 'b']}):
+            with self.assertRaises(HubError):
+                b.validate_insight(body)
+        with self.assertRaises(HubError) as caught:
+            b.validate_insight({**query(), 'kind': 'audience'})
+        self.assertEqual(caught.exception.status, 422)
+        graph = {'wordlist': [{'wordGraph': [{'word': '合成', 'unknown': 4}] * 101}]}
+        data = b.project_wordgraph(graph)
+        self.assertEqual(len(data['search_related']), 100)
+        self.assertEqual(data['search_related'][0], {'keyword': '合成', 'relation_score': None, 'search_index': None})
+        self.assertEqual(data['content_related'], [])
+        self.assertEqual(b.project_wordgraph({'wordlist': [{'wordGraph': []}]})['search_related'], [])
+        for invalid in ({}, {'wordlist': []}, {'wordlist': [{'wordGraph': [{}]}]}):
+            with self.assertRaises(b.BaiduError):
+                b.project_wordgraph(invalid)

@@ -74,6 +74,33 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.submit()['cache_hit'], True)
         self.assertIsNone(self.s.latest_available_date())  # Douyin date source must stay isolated.
 
+    async def test_related_budget_cache_empty_and_failure(self):
+        q = b.validate_insight({**query(), 'kind': 'related'})
+        data = b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成词'}]}]})
+        self.response = {'ok': True, 'data': data, 'metadata': {**q, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
+        job = self.submit(q)
+        await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 1)
+        self.assertEqual(hub_baidu.daily(self.s)['attempts'], 1)
+        self.assertTrue(self.submit(q)['cache_hit'])
+        self.assertEqual(self.s.insight_ranges(q['keywords'][0], 'related', 'baidu')['ranges'][0]['status'], 'available')
+        self.assertEqual(self.s.insight_ranges(q['keywords'][0], 'related')['ranges'], [])
+        self.s.set('baidu.next_attempt_at', 0)
+        empty = {**q, 'keywords': ['空词']}
+        self.response = {'ok': True, 'data': {'search_related': [], 'content_related': []}, 'metadata': {**empty, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
+        job = self.submit(empty)
+        await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'no_data')
+        self.assertEqual(self.submit(empty)['status'], 'no_data')
+        self.s.set('baidu.next_attempt_at', 0)
+        self.response = {'ok': False, 'code': 'response_schema'}
+        job = self.submit({**q, 'keywords': ['失败词']})
+        await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'failed')
+        self.assertEqual(self.s.get('baidu.paused')['code'], 'response_schema')
+        self.assertFalse(await self.hub.run_one())
+
     async def test_login_preflight_no_budget_and_pause_only_baidu(self):
         self.ready = False
         baidu = self.submit()
@@ -281,9 +308,18 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
             self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 21))
             self.assertEqual(state['platform_status']['baidu']['limits']['http_daily'], 400)
-            for kind in ('related', 'audience'):
-                response = await client.post('/api/v1/insights/queries', headers=headers, json=query() | {'kind': kind})
-                self.assertEqual(response.status, 422)
+            related = b.validate_insight(query() | {'kind': 'related'})
+            self.s.save_insight(related, {'data': {'search_related': [{'keyword': '合成'}], 'content_related': []},
+                                          'metadata': {**related, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}})
+            args = urlencode({'keyword': related['keywords'][0], 'kind': 'related'})
+            self.assertEqual((await (await client.get('/api/v1/insights/ranges?' + args)).json())['ranges'], [])
+            baidu_ranges = await (await client.get('/api/v1/insights/ranges?' + args + '&platform=baidu')).json()
+            self.assertEqual(len(baidu_ranges['ranges']), 1)
+            insight_args = urlencode({'platform': 'baidu', 'keyword': related['keywords'][0], 'kind': 'related',
+                                      'start_date': related['start_date'], 'end_date': related['end_date']})
+            self.assertEqual((await (await client.get('/api/v1/insights?' + insight_args)).json())['status'], 'available')
+            response = await client.post('/api/v1/insights/queries', headers=headers, json=query() | {'kind': 'audience'})
+            self.assertEqual(response.status, 422)
             self.ready = False
             self.s.set('baidu.paused', {'code': 'login_required'})
             response = await client.post('/api/v1/collection/resume', headers=headers, json={'platform': 'baidu'})

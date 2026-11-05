@@ -643,15 +643,17 @@ def mount(app, hub):
 
     async def insight_ranges(request):
         require(request)
-        if set(request.query) - {'keyword', 'kind'} or any(len(request.query.getall(k)) != 1 for k in request.query):
-            raise HubError('invalid_parameters', '仅接受单个 keyword 和 kind。')
+        if set(request.query) - {'keyword', 'kind', 'platform'} or any(len(request.query.getall(k)) != 1 for k in request.query):
+            raise HubError('invalid_parameters', '仅接受单个 keyword、kind 和 platform。')
         word, kind = request.query.get('keyword'), request.query.get('kind')
         if kind not in {'audience', 'related'}:
             raise HubError('invalid_kind', 'kind 须为 related 或 audience。')
         if (not isinstance(word, str) or not 1 <= len(word) <= 100 or word != word.strip()
                 or any(ord(c) < 32 or ord(c) == 127 for c in word)):
             raise HubError('invalid_keywords', '请输入一个有效关键词，每词 1—100 字。')
-        return reply(s.insight_ranges(word, kind))
+        platform = request.query.get('platform', 'douyin')
+        require_platform(platform)
+        return reply(s.insight_ranges(word, kind, platform))
 
     async def insights(request):
         require(request)

@@ -82,6 +82,21 @@ class BrowserPageTests(unittest.TestCase):
                 self.assertEqual(len(rows), 30)
                 self.assertEqual([r['search_index'] for r in rows[:2]], [1, 2])
                 self.assertNotIn('secret', repr(rows))
+                related = {**query, 'keywords': ['a'], 'kind': 'related'}
+                page.evaluate('window.Paris = null')
+                graph = PageTransport(page, origin=origin, allow_loopback=True).query(related)
+                self.assertEqual(graph['wordlist'][0]['wordGraph'][0]['word'], '合成关联词')
+                self.assertEqual(server.graph_calls, 1)
+                self.assertEqual(server.index_calls, 1)
+                from baidu_adapter import BaiduError
+                server.mode = 'graph_schema'
+                with self.assertLogs('index_hub.baidu', level='WARNING'), self.assertRaises(BaiduError):
+                    PageTransport(page, origin=origin, allow_loopback=True).query(related)
+                server.mode = 'graph_empty'
+                self.assertEqual(PageTransport(page, origin=origin, allow_loopback=True).query(related)['wordlist'][0]['wordGraph'], [])
+                server.mode = ''
+                page.evaluate("window.Paris={getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'fake-signature-secret')})}")
+
                 from baidu_adapter import BaiduError, collect_page
                 before = server.index_calls
                 page.evaluate("day => { window.realNow = Date.now; Date.now = () => Date.parse(day + 'T15:59:31Z'); }", today)
@@ -205,8 +220,15 @@ class BridgeLeakTests(unittest.TestCase):
                     day = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
                     answer = hub_bridge.call_bridge('baidu_query', {**query, '_budget_day':day})
                     self.assertTrue(answer['ok'])
+                    related = {**query, 'kind': 'related'}
+                    related_answer = hub_bridge.call_bridge('baidu_query', {**related, '_budget_day':day})
+                    self.assertTrue(related_answer['ok'])
+                    self.assertEqual(related_answer['data']['search_related'][0]['keyword'], '合成关联词')
+                    self.assertEqual(server.graph_calls, 1)
                     store = Store(Path(tmp) / 'test.sqlite')
                     store.ingest(answer)
+                    store.save_insight(related, {k: related_answer[k] for k in ('data', 'metadata')})
+                    self.assertEqual(store.insight(related)['data'], related_answer['data'])
                     dump = '\n'.join(store.db.iterdump())
                     store.close()
                     result_file = Path(tmp) / 'synthetic-result.json'

@@ -308,11 +308,11 @@ class Store:
     def latest_real_insight(self, query):
         return self.insight(query, real_only=True)
 
-    def insight_ranges(self, keyword, kind):
+    def insight_ranges(self, keyword, kind, platform='douyin'):
         """Read all saved ranges and latest task metadata; never return raw results."""
         ranges, attempts = {}, {}
         def matches(meta):
-            return (meta.get('platform') == 'douyin' and meta.get('kind') == kind
+            return (meta.get('platform', 'douyin') == platform and meta.get('kind') == kind
                     and meta.get('keywords') == [keyword])
         for row in self.db.execute('SELECT result FROM insights ORDER BY fetched DESC, id DESC'):
             result = json.loads(row['result'])

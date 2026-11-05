@@ -15,6 +15,9 @@ ctx.query={platform:'douyin',keywords:['合成词'],start_date:'2026-09-28',end_
 let batch=vm.runInContext("makeReportBatch(query,'fixture')",ctx);
 assert.deepEqual(Array.from(batch.entries,e=>e.body.end_date),['2026-10-27','2026-10-25','2026-10-27']);
 assert(batch.entries.every(e=>e.body.start_date==='2026-09-28'));
+ctx.query.platform='baidu';batch=vm.runInContext("makeReportBatch(query,'baidu')",ctx);
+assert(batch.entries.every(e=>e.body.end_date==='2026-10-27'));
+ctx.query.platform='douyin';
 for(const end of ['2026-10-24','2026-10-25']){
  ctx.query.end_date=end;batch=vm.runInContext("makeReportBatch(query,'early')",ctx);
  assert(batch.entries.every(e=>e.body.end_date===end));
@@ -34,7 +37,7 @@ vm.runInContext("let insightRevision=1;function insightContext(){return 'fixture
 (async()=>{
  await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);
  assert.deepEqual(calls.map(p=>p.get('end_date')),['2026-10-27','2026-10-25']);
- assert(calls.every(p=>p.get('start_date')==='2026-09-28'));
+ assert(calls.every(p=>p.get('start_date')==='2026-09-28'&&p.get('platform')==='douyin'));
  assert($('#relatedData').innerHTML.includes('关联词查询使用 2026-09-28 至 2026-10-25'));
  calls.length=0;$('#insightEnd').value='2026-10-24';
  await vm.runInContext("loadInsight('related','#relatedData',1,'fixture')",ctx);

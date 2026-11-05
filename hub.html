@@ -398,8 +398,8 @@ function allDataTable(rows,columns,key){
  return '<details class="all-data" data-detail="'+esc(key)+'"><summary>展开全部 '+rows.length+' 条与原始指标</summary><div class="tablewrap"><table><thead><tr>'+columns.map(c=>'<th>'+c[1]+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+columns.map(([field,,isText])=>'<td>'+(isText?esc(r[field]):numberLabel(r[field]))+'</td>').join('')+'</tr>').join('')+'</tbody></table></div></details>';
 }
 function insightMessage(kind,target,message){$(target).textContent=message;$('#'+kind+'Summary').textContent=message}
-function insightDates(kind,start,end){
- return {start_date:start,end_date:kind==='related'&&relatedLatestDate&&end>relatedLatestDate?relatedLatestDate:end};
+function insightDates(kind,start,end,platform=chosenPlatform){
+ return {start_date:start,end_date:platform==='douyin'&&kind==='related'&&relatedLatestDate&&end>relatedLatestDate?relatedLatestDate:end};
 }
 function renderInsight(kind,target,result){
  const meta=result.metadata,sort=$('#relatedSort').value;
@@ -414,7 +414,7 @@ function renderInsight(kind,target,result){
    html+='<section class="insight-block"><h3>'+name+' <small class="tiny">'+rows.length+' 条</small></h3><p class="tiny">'+metric+' · 前 5 条</p>'+(rows.length?rankBars(rows,'keyword',sort)+allDataTable(rows,[['keyword','关联词',true],['relation_score','关联分（原值）'],['search_index','搜索指数'],['composite_index','综合指数']],key):'<p>官方返回空列表。</p>')+'</section>';
    if(key==='search_related')summary=(rows.length?rankBars(rows,'keyword',sort,3):'<p>暂无搜索关联词</p>');
   }
-  html+='</div>';explanation='关联词数据截至 '+meta.end_date+'，使用 '+meta.start_date+' 至 '+meta.end_date+'。搜索关联与内容关联分开呈现。概要显示搜索关联前 3 条，详情默认前 5 条；当前排序：'+metric+'。关联分不是概率。条形按当前排序指标相对最大值绘制，原始指标完整保留；关联不代表因果。';
+  html+='</div>';explanation=meta.platform==='baidu'?'百度需求图谱为截止日 '+meta.end_date+' 的单日快照，不套用抖音截止日限制；唯一列表显示为搜索关联词，内容关联词为空。指数不等于搜索次数，尚未与官方页面核对。':'关联词数据截至 '+meta.end_date+'，使用 '+meta.start_date+' 至 '+meta.end_date+'。搜索关联与内容关联分开呈现。概要显示搜索关联前 3 条，详情默认前 5 条；当前排序：'+metric+'。关联分不是概率。条形按当前排序指标相对最大值绘制，原始指标完整保留；关联不代表因果。';
  }else{
   const dimensions=result.data.dimensions||[];
   for(const [i,dimension] of dimensions.entries()){
@@ -447,7 +447,7 @@ function knownAudienceJobs(keyword){
 async function audienceHistory(keyword){
  const pending=(reportBatch?.entries||[]).filter(e=>!e.jobId&&e.body.kind==='audience'&&e.body.keywords[0]===keyword).map(e=>({...e.body,status:'not_submitted',unconfirmed:Boolean(e.error)}));
  if(audienceRangesSupported){
-  try{const history=await api('insights/ranges?'+new URLSearchParams({keyword,kind:'audience'}));return {...history,attempts:[...pending,...history.attempts],complete:true}}
+  try{const history=await api('insights/ranges?'+new URLSearchParams({platform:chosenPlatform,keyword,kind:'audience'}));return {...history,attempts:[...pending,...history.attempts],complete:true}}
   catch(e){if(e.status===404)audienceRangesSupported=false;else return {ranges:[],attempts:pending,complete:false,unavailable:true}}
  }
  const known=knownAudienceJobs(keyword);
@@ -493,12 +493,12 @@ async function loadInsight(kind,target,revision,context){
  if(rangeError('insight')){insightMessage(kind,target,rangeError('insight'));return}
  try{
   const dates=insightDates(kind,$('#insightStart').value,end);
-  let [d,history]=await Promise.all([api('insights?'+new URLSearchParams({keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
-  if(d.status!=='available'&&dates.end_date!==end&&dates.start_date<=dates.end_date)d=await api('insights?'+new URLSearchParams({keyword,kind,...dates}));
-  if(kind==='related'&&d.status!=='available'){
-   const saved=await api('insights/ranges?'+new URLSearchParams({keyword,kind}));
+  let [d,history]=await Promise.all([api('insights?'+new URLSearchParams({platform:chosenPlatform,keyword,kind,start_date:$('#insightStart').value,end_date:end})),kind==='audience'?audienceHistory(keyword):null]);
+  if(d.status!=='available'&&dates.end_date!==end&&dates.start_date<=dates.end_date)d=await api('insights?'+new URLSearchParams({platform:chosenPlatform,keyword,kind,...dates}));
+  if(chosenPlatform==='douyin'&&kind==='related'&&d.status!=='available'){
+   const saved=await api('insights/ranges?'+new URLSearchParams({platform:chosenPlatform,keyword,kind}));
    const range=saved.ranges.find(r=>r.status==='available'&&r.start_date===dates.start_date&&r.end_date<=dates.end_date);
-   if(range)d=await api('insights?'+new URLSearchParams({keyword,kind,start_date:range.start_date,end_date:range.end_date}));
+   if(range)d=await api('insights?'+new URLSearchParams({platform:chosenPlatform,keyword,kind,start_date:range.start_date,end_date:range.end_date}));
   }
   if(revision!==insightRevision||context!==insightContext()||readingInfo())return;
   if(kind==='audience')renderAudienceRanges(history,d);
@@ -528,7 +528,7 @@ function saveBatch(){try{sessionStorage.setItem('index-report-batch',JSON.string
 function makeReportBatch(query,id){
  const entries=[{path:'queries',label:'指数趋势 · '+query.keywords.join('、'),body:{...query}}];
  for(const word of query.keywords)for(const [kind,label] of [['related','关联词'],['audience','人群画像']].filter(([kind])=>(typeof platformModules==='undefined'||platformModules(query.platform).includes(kind)))){
-  const dates=insightDates(kind,query.start_date,query.end_date);
+  const dates=insightDates(kind,query.start_date,query.end_date,query.platform);
   if(dates.start_date>dates.end_date)throw Error('关联词可用截止日为 '+dates.end_date+'，开始日须不晚于该日。');
   entries.push({path:'insights/queries',label:label+' · '+word,body:{...query,...dates,keywords:[word],kind}});
  }

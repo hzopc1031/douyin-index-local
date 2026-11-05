@@ -37,7 +37,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         params = parse_qs(path.query)
-        if path.path == '/api/SearchApi/index':
+        if path.path == '/api/WordGraph/multi':
+            self.server.graph_calls = getattr(self.server, 'graph_calls', 0) + 1
+            assert self.headers.get('Cipher-Text') is None
+            assert len(params['wordlist[]']) == 1 and len(params['datelist'][0]) == 8
+            graph = [] if mode == 'graph_empty' else [{'word': '合成关联词'}]
+            data = {'status': 0, 'data': {'wordlist': [{'wordGraph': graph}]}}
+            if mode == 'graph_schema':
+                data['data'] = {}
+        elif path.path == '/api/SearchApi/index':
             assert self.headers.get('Cipher-Text') == 'fake-signature-secret'
             words = json.loads(params['word'][0])
             from datetime import date

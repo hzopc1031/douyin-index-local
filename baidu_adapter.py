@@ -56,6 +56,35 @@ def validate_query(body, *, historical=False):
     return {**q, 'platform': 'baidu'}
 
 
+def validate_insight(body, *, historical=False, **kwargs):
+    from hub_store import HubError
+    if body.get('kind') != 'related':
+        raise HubError('platform_unavailable', '百度未接入人群画像。', 422)
+    query = validate_query({k: v for k, v in body.items() if k != 'kind'}, historical=historical)
+    if len(query['keywords']) != 1:
+        raise HubError('invalid_keywords', '关联分析每次仅支持一个关键词。')
+    return {**query, 'kind': 'related'}
+
+
+def project_wordgraph(data):
+    try:
+        if type(data) is not dict or type(data.get('wordlist')) is not list or len(data['wordlist']) != 1:
+            raise ValueError
+        graph = data['wordlist'][0]['wordGraph']
+        if type(graph) is not list:
+            raise ValueError
+        rows = []
+        for item in graph:
+            word = item['word']
+            if type(item) is not dict or not isinstance(word, str) or not word.strip() or len(word) > 200:
+                raise ValueError
+            if len(rows) < 100:
+                rows.append({'keyword': word, 'relation_score': None, 'search_index': None})
+        return {'search_related': rows, 'content_related': []}
+    except (KeyError, TypeError, ValueError):
+        raise BaiduError() from None
+
+
 def chunks(query):
     start, end = (dt.date.fromisoformat(query[k]) for k in ('start_date', 'end_date'))
     while start <= end:
@@ -269,7 +298,8 @@ def bridge_command(command, payload=None):
             raise ValueError
     except ValueError:
         raise BaiduError('baidu_daily_limit') from None
-    query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
+    body = {k: v for k, v in payload.items() if k != '_budget_day'}
+    query = validate_insight(body) if body.get('kind') == 'related' else validate_query(body)
     instance = baidu_browser.browser()
     if not instance.started and instance.last_state == 'login_required':
         return {'ok': False, 'code': 'login_required'}
@@ -279,8 +309,13 @@ def bridge_command(command, payload=None):
             page = baidu_browser._page(context)
             state = baidu_browser.status(context)['state']
             instance.last_state = state
-            if state != 'browser_ready':
+            if state != 'browser_ready' and not (query.get('kind') == 'related' and state == 'signature_unavailable'):
                 raise BaiduError(state)
+            if query.get('kind') == 'related':
+                data = project_wordgraph(baidu_browser.PageTransport(page).query({**query, '_budget_day': day}))
+                return {'ok': True, 'data': data, 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(),
+                        'source': 'index.baidu.com', 'verification': 'pending',
+                        'note': '需求图谱为截止日单日快照，尚未与官方页面核对。'}}
             result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day)
             return {'ok': True, **result}
         return instance.call(run)
@@ -291,7 +326,7 @@ def bridge_command(command, payload=None):
 class BaiduAdapter:
     description = {'id': 'baidu', 'name': '百度指数', 'available': True, 'live_enabled': True,
                    'metric': 'search_index', 'metric_name': '整体搜索指数', 'unit': '指数',
-                   'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': [],
+                   'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': ['related'],
                    'description': '全国百度搜索指数；指数不等于搜索次数。'}
 
     bridge_commands = ('baidu_status', 'baidu_query', 'baidu_login_open')
@@ -307,9 +342,7 @@ class BaiduAdapter:
     validate_query = staticmethod(validate_query)
     project = staticmethod(lambda result, verification='pending': public_result(result))
 
-    def validate_insight(self, body, **kwargs):
-        from hub_store import HubError
-        raise HubError('platform_unavailable', '百度未接入关联词或画像。', 422)
+    validate_insight = staticmethod(validate_insight)
 
     def ingest(self, store, result, dataset_id=None):
         import time
@@ -418,4 +451,4 @@ class BaiduAdapter:
         return bridge_command('baidu_query', query)
 
     def collect_insight(self, api, query):
-        return self.validate_insight(query)
+        return bridge_command('baidu_query', query)
