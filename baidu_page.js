@@ -9,7 +9,16 @@ async (query) => {
     for (const key of Object.keys(value)) if (schemaKeys.has(key)) keys[key] = digest(value[key], depth + 1);
     return {type, keys};
   };
-  const schema = value => ({status:'response_schema', schema_digest:digest(value)});
+  const schema = (value, diag = {}) => {
+    const date = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+    return {status:'response_schema', schema_digest:digest(value), schema_diag:{
+      reason:diag.reason || 'index_shape', request_start:date(query.start_date), request_end:date(query.end_date),
+      response_start:date(diag.response_start), response_end:date(diag.response_end),
+      word_type:Number.isFinite(diag.word_type) ? diag.word_type : null, name_matches:diag.name_matches === true,
+      ptbk_length:Number.isInteger(diag.ptbk_length) ? diag.ptbk_length : 0,
+      decoded_points:Number.isInteger(diag.decoded_points) ? diag.decoded_points : null,
+      data_length:Number.isInteger(diag.data_length) ? diag.data_length : null}};
+  };
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
     let i = 0;
@@ -98,35 +107,51 @@ async (query) => {
     const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}));
     if (table.status !== 'ok') return table;
     const ptbk = table.data;
-    if (typeof ptbk !== 'string' || !ptbk.length || ptbk.length > 256 || ptbk.length % 2) return schema(data);
+    const info = {ptbk_length:typeof ptbk === 'string' ? ptbk.length : 0};
+    if (typeof ptbk !== 'string' || !ptbk.length || ptbk.length > 256 || ptbk.length % 2) return schema(data, {...info, reason:'ptbk'});
     const half = ptbk.length / 2, left = ptbk.slice(0, half), right = ptbk.slice(half);
-    if (new Set(left).size !== half || new Set(right).size !== half) return schema(data);
+    if (new Set(left).size !== half || new Set(right).size !== half) return schema(data, {...info, reason:'ptbk'});
     const byWord = new Map();
     for (const item of data.userIndexes) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return schema(data);
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return schema(data, {...info, reason:'word'});
       let word;
-      try { word = typeof item.word === 'string' ? parse(item.word) : item.word; } catch (_) { return schema(data); }
-      if (!Array.isArray(word) || word.length !== 1 || !word[0] || typeof word[0] !== 'object' || Array.isArray(word[0]) || typeof word[0].name !== 'string' || !word[0].name || word[0].wordType !== 1 || !query.keywords.includes(word[0].name) || byWord.has(word[0].name)) return schema(data);
+      try { word = typeof item.word === 'string' ? parse(item.word) : item.word; } catch (_) { return schema(data, {...info, reason:'word'}); }
+      if (!Array.isArray(word) || word.length !== 1 || !word[0] || typeof word[0] !== 'object' || Array.isArray(word[0])) return schema(data, {...info, reason:'word'});
+      const wordInfo = {...info, word_type:word[0].wordType, name_matches:query.keywords.includes(word[0].name)};
+      if (typeof word[0].name !== 'string' || !word[0].name || !wordInfo.name_matches || byWord.has(word[0].name)) return schema(data, {...wordInfo, reason:'word'});
+      if (word[0].wordType !== 1) return schema(data, {...wordInfo, reason:'word_type'});
       byWord.set(word[0].name, item);
     }
     const start = Date.parse(query.start_date + 'T00:00:00Z'), end = Date.parse(query.end_date + 'T00:00:00Z');
     const days = (end - start) / 86400000 + 1, rows = [];
-    for (const word of query.keywords) for (const device of ['all','pc','wise']) {
+    for (const word of query.keywords) {
+      const wordRows = [];
+      for (const device of ['all','pc','wise']) {
       let tokens = Array(days).fill('');
       if (byWord.has(word)) {
         const series = byWord.get(word)[device];
+        const detail = {...info, word_type:1, name_matches:true, response_start:series?.startDate, response_end:series?.endDate,
+          data_length:typeof series?.data === 'string' ? series.data.length : null};
         // Long daily series can exceed the former seven-day-sized bound.
-        if (!series || typeof series !== 'object' || Array.isArray(series) || series.startDate !== query.start_date || series.endDate !== query.end_date || (series.type === undefined ? 'day' : series.type) !== 'day' || typeof series.data !== 'string' || series.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(data);
+        if (!series || typeof series !== 'object' || Array.isArray(series) || (series.type === undefined ? 'day' : series.type) !== 'day' || typeof series.data !== 'string') return schema(data, {...detail, reason:'series_shape'});
+        if (series.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(data, {...detail, reason:'data_length'});
+        if (series.startDate !== query.start_date) return schema(data, {...detail, reason:'start_date'});
+        const responseEnd = typeof series.endDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(series.endDate) ? Date.parse(series.endDate + 'T00:00:00Z') : NaN;
+        if (!Number.isFinite(responseEnd) || new Date(responseEnd).toISOString().slice(0,10) !== series.endDate || responseEnd < start || responseEnd > end) return schema(data, {...detail, reason:'end_date'});
         let plain = '';
-        for (const char of series.data) { const n = left.indexOf(char); if (n < 0) return schema(data); plain += right[n]; }
+        for (const char of series.data) { const n = left.indexOf(char); if (n < 0) return schema(data, {...detail, reason:'token'}); plain += right[n]; }
         tokens = plain.split(',');
-        if (tokens.length !== days) return schema(data);
+        if (tokens.length !== (responseEnd - start) / 86400000 + 1) return schema(data, {...detail, reason:'point_count', decoded_points:tokens.length});
+        while (tokens.length && tokens[tokens.length - 1] === '') tokens.pop();
       }
-      for (let i = 0; i < days; i++) {
+      for (let i = 0; i < tokens.length; i++) {
         const token = tokens[i];
-        if (token && !/^[0-9]{1,15}$/.test(token)) return schema(data);
-        rows.push({keyword:word,device,date:new Date(start + i * 86400000).toISOString().slice(0,10),search_index:token ? Number(token) : null,value_status:token ? 'available' : 'missing'});
+        if (token && !/^[0-9]{1,15}$/.test(token)) return schema(data, {...info, reason:'token', word_type:1, name_matches:true, decoded_points:tokens.length});
+        wordRows.push({keyword:word,device,date:new Date(start + i * 86400000).toISOString().slice(0,10),search_index:token ? Number(token) : null,value_status:token ? 'available' : 'missing'});
       }
+      }
+      const count = Math.min(...['all','pc','wise'].map(device => wordRows.filter(row => row.device === device).length));
+      rows.push(...wordRows.filter(row => Date.parse(row.date + 'T00:00:00Z') < start + count * 86400000));
     }
     return {status:'ok', rows};
   } catch (_) { return fail('network_error'); }

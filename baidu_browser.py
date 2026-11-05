@@ -205,6 +205,29 @@ def _safe_digest(value, depth=0):
     return value
 
 
+def _safe_diag(value):
+    import math
+    import re
+    keys = {'reason', 'request_start', 'request_end', 'response_start', 'response_end',
+            'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length'}
+    if type(value) is not dict or set(value) != keys or value['reason'] not in {
+            'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
+            'end_date', 'point_count', 'token', 'data_length'}:
+        raise ValueError
+    for key in ('request_start', 'request_end', 'response_start', 'response_end'):
+        if value[key] is not None and (type(value[key]) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value[key], flags=re.ASCII)):
+            raise ValueError
+    if value['word_type'] is not None and (type(value['word_type']) not in (int, float) or not math.isfinite(value['word_type'])):
+        raise ValueError
+    if type(value['name_matches']) is not bool:
+        raise ValueError
+    for key in ('ptbk_length', 'decoded_points', 'data_length'):
+        n = value[key]
+        if (n is None and key == 'ptbk_length') or (n is not None and (type(n) is not int or not 0 <= n <= 1048576)):
+            raise ValueError
+    return value
+
+
 class PageTransport:
     def __init__(self, page, *, origin='https://index.baidu.com', allow_loopback=False):
         from urllib.parse import urlsplit
@@ -228,7 +251,8 @@ class PageTransport:
             if code == 'response_schema' and 'schema_digest' in result:
                 try:
                     digest = _safe_digest(result['schema_digest'])
-                    logging.getLogger('index_hub.baidu').warning('schema_digest=%s', json.dumps(digest, separators=(',', ':')))
+                    diag = _safe_diag(result['schema_diag']) if 'schema_diag' in result else None
+                    logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(diag, separators=(',', ':')))
                 except (TypeError, ValueError, RecursionError):
                     pass
             raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
