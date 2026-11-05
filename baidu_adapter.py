@@ -65,12 +65,12 @@ def validate_query(body, *, historical=False):
 
 def validate_insight(body, *, historical=False, **kwargs):
     from hub_store import HubError
-    if body.get('kind') != 'related':
-        raise HubError('platform_unavailable', '百度未接入人群画像。', 422)
+    if body.get('kind') not in ('related', 'audience'):
+        raise HubError('platform_unavailable', '百度不支持此分析类型。', 422)
     query = validate_query({k: v for k, v in body.items() if k != 'kind'}, historical=historical)
     if len(query['keywords']) != 1:
         raise HubError('invalid_keywords', '关联分析每次仅支持一个关键词。')
-    return {**query, 'kind': 'related'}
+    return {**query, 'kind': body['kind']}
 
 
 def project_wordgraph(data):
@@ -92,6 +92,48 @@ def project_wordgraph(data):
                     raise ValueError
             rows.append({'keyword': word, 'relation_score': item.get('sim'), 'search_index': item.get('pv'), 'change_ratio': item.get('ratio')})
         return {'search_related': rows, 'content_related': []}
+    except (KeyError, TypeError, ValueError):
+        raise BaiduError() from None
+
+
+def project_audience(data):
+    import logging
+    import math
+    from baidu_area_codes import CITY_NAMES, PROVINCE_NAMES
+    dimensions = []
+    try:
+        for field, name in [('gender', '性别'), ('age', '年龄'), ('interest', '兴趣')]:
+            items = data[field]
+            if type(items) is not list or len(items) > 1000 or (field != 'interest' and not items):
+                raise ValueError
+            labels = []
+            for item in items:
+                desc, rate, tgi = item['desc'], item['rate'], item['tgi']
+                if (type(desc) is not str or not desc.strip() or len(desc) > 200 or
+                    type(rate) not in (int, float) or not math.isfinite(rate) or rate < 0 or
+                    (tgi is not None and (type(tgi) not in (int, float) or not math.isfinite(tgi) or tgi < 0))):
+                    raise ValueError
+                labels.append({'name': desc, 'value': rate, 'tgi': tgi})
+            dimensions.append({'dimension': field, 'name': name, 'labels': labels})
+        for field, dimension, name, names in [('prov', 'province', '省份', PROVINCE_NAMES), ('city', 'city', '城市', CITY_NAMES)]:
+            values = data[field]
+            if type(values) is not dict or not values or len(values) > 1000:
+                raise ValueError
+            labels = []
+            unknown = False
+            for code, value in values.items():
+                if type(code) is not str or not re.fullmatch(r'[0-9]{1,10}', code, flags=re.ASCII) or type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                    raise ValueError
+                if code not in names:
+                    unknown = True
+                    continue
+                labels.append({'name': names[code], 'value': value, 'tgi': None})
+            if unknown:
+                logging.getLogger('index_hub.baidu').warning('schema_diag reason=region_code_unknown dimension=%s rule=%s', dimension, 'skipped' if labels else 'all_unknown')
+            if not labels:
+                raise ValueError
+            dimensions.append({'dimension': dimension, 'name': name, 'labels': labels})
+        return {'dimensions': dimensions, 'value_unit': 'upstream_raw', 'note': '比率及热度单位尚未核实；TGI 来自百度；省份和城市为相对热度。'}
     except (KeyError, TypeError, ValueError):
         raise BaiduError() from None
 
@@ -348,7 +390,7 @@ def bridge_command(command, payload=None):
     if job_id != '-' and (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)):
         raise BaiduError()
     body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id', 'related_date')}
-    query = validate_insight(body) if body.get('kind') == 'related' else validate_query(body)
+    query = validate_insight(body) if body.get('kind') in ('related', 'audience') else validate_query(body)
     if query.get('kind') == 'related' and 'related_date' in payload:
         related_date = payload['related_date']
         try:
@@ -387,9 +429,22 @@ def bridge_command(command, payload=None):
             state = baidu_browser.status(context)['state']
             instance.last_state = state
             instance.login_checked = True
-            if state != 'browser_ready' and not (query.get('kind') == 'related' and state == 'signature_unavailable'):
+            if state != 'browser_ready' and not (query.get('kind') in ('related', 'audience') and state == 'signature_unavailable'):
                 raise BaiduError(state)
             requests_sent = 'unknown'
+            if query.get('kind') == 'audience':
+                audience = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
+                period = audience.get('period')
+                if period is not None:
+                    try:
+                        if type(period) is not dict or set(period) != {'start_date', 'end_date', 'days'}:
+                            raise ValueError
+                        start, end = (dt.date.fromisoformat(period[k]) for k in ('start_date', 'end_date'))
+                        if any(period[k] != d.isoformat() for k, d in zip(('start_date', 'end_date'), (start, end))) or type(period['days']) is not int or period['days'] != (end - start).days + 1 or not 1 <= period['days'] <= 366:
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        raise BaiduError() from None
+                return {'ok': True, 'data': project_audience(audience), 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(), 'source': 'index.baidu.com', 'verification': 'pending', **({'audience_period': period} if period is not None else {})}}
             if query.get('kind') == 'related':
                 graph = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
                 period = graph['period']
@@ -419,7 +474,7 @@ def bridge_command(command, payload=None):
 class BaiduAdapter:
     description = {'id': 'baidu', 'name': '百度指数', 'available': True, 'live_enabled': True,
                    'metric': 'search_index', 'metric_name': '整体搜索指数', 'unit': '指数',
-                   'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': ['related'],
+                   'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': ['related', 'audience'],
                    'description': '全国百度搜索指数；指数不等于搜索次数。'}
 
     bridge_commands = ('baidu_status', 'baidu_query', 'baidu_login_open')

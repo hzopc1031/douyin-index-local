@@ -113,12 +113,12 @@ async def run_one(hub, row, query):
         if time.time() < store.get('baidu.next_attempt_at', 0):
             return False
         counter = daily(store)
-        http_reserved = 1 if query.get('kind') == 'related' else 2 * len(list(adapter.chunks(query)))
+        http_reserved = 1 if query.get('kind') == 'related' else 3 if query.get('kind') == 'audience' else 2 * len(list(adapter.chunks(query)))
         if counter['attempts'] >= config['logical_daily'] or counter['http_reserved'] + http_reserved > config['http_daily']:
             fail(store, row['id'], 'baidu_daily_limit')
             return True
         state = await browser_status(hub)
-        if state not in (('browser_ready', 'browser_idle', 'signature_unavailable') if query.get('kind') == 'related' else ('browser_ready', 'browser_idle')):
+        if state not in (('browser_ready', 'browser_idle', 'signature_unavailable') if query.get('kind') in ('related', 'audience') else ('browser_ready', 'browser_idle')):
             fail(store, row['id'], state)
             return True
         # Reserve traffic before dispatch; timeout/restart never refunds uncertain traffic.
@@ -141,13 +141,13 @@ async def run_one(hub, row, query):
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')
                 return True
-            if query.get('kind') == 'related':
+            if query.get('kind') in ('related', 'audience'):
                 result = {'data': response['data'], 'metadata': response['metadata']}
                 if any(result['metadata'].get(k) != query[k] for k in ('platform', 'kind', 'keywords', 'start_date', 'end_date')):
                     raise HubError('invalid_result', '百度结果与任务不一致。')
-                if result['metadata'].get('related_date') != selected_date:
+                if query.get('kind') == 'related' and result['metadata'].get('related_date') != selected_date:
                     raise HubError('invalid_result', '百度结果与任务不一致。')
-                if not result['data']['search_related']:
+                if query.get('kind') == 'related' and not result['data']['search_related']:
                     result['no_data'] = True
                 store.save_insight(query, result)
                 store.update_job(row['id'], 'no_data' if result.get('no_data') else 'succeeded', result=result)

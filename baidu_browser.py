@@ -264,7 +264,7 @@ def _safe_diag(value):
             'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type', 'datelist_sent', 'period_returned'}
     if type(value) is not dict or set(value) - {'period_shape', 'entry_keys', 'period_rule', 'period_days', 'entry_rule'} != keys or value['reason'] not in {
             'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
-            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_wordlist_shape', 'related_entry_shape', 'too_many_entries', 'related_period'}:
+            'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_wordlist_shape', 'related_entry_shape', 'too_many_entries', 'related_period', 'audience_data_type', 'audience_result_shape', 'audience_entry_rule', 'region_shape', 'audience_period'}:
         raise ValueError
     if type(value['period_returned']) is not bool or type(value['datelist_sent']) is not str or not re.fullmatch(r'none|[0-9]{8}', value['datelist_sent'], flags=re.ASCII):
         raise ValueError
@@ -282,7 +282,7 @@ def _safe_diag(value):
         if (n is None and key == 'ptbk_length') or (n is not None and (type(n) is not int or not 0 <= n <= 1048576)):
             raise ValueError
     if 'period_rule' in value or 'period_days' in value:
-        if (value['reason'] != 'related_period' or value.get('period_rule') not in ('invalid_date', 'start_after_end', 'span_out_of_range', 'unknown_format')
+        if (value['reason'] not in ('related_period', 'audience_period') or value.get('period_rule') not in ('invalid_date', 'start_after_end', 'span_out_of_range', 'unknown_format')
                 or 'period_days' not in value or (value['period_days'] is not None and (type(value['period_days']) is not int or not -3652059 <= value['period_days'] <= 3652059))):
             raise ValueError
     if 'entry_rule' in value and (value['reason'] != 'related_entry_shape' or value['entry_rule'] not in ('item_not_object', 'word_missing', 'word_too_long', 'pv_invalid', 'sim_invalid', 'ratio_invalid')):
@@ -344,7 +344,7 @@ class PageTransport:
                     digest = _safe_digest(result['schema_digest'])
                     diag = _safe_diag(result['schema_diag']) if 'schema_diag' in result else None
                     logged_diag = diag
-                    if diag and query.get('kind') == 'related':
+                    if diag and query.get('kind') in ('related', 'audience'):
                         logged_diag = {k: v for k, v in diag.items() if k not in ('request_start', 'request_end', 'response_start', 'response_end', 'datelist_sent', 'entry_keys', 'period_shape')}
                     logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(logged_diag, separators=(',', ':')))
                 except (TypeError, ValueError, RecursionError):
@@ -359,6 +359,8 @@ class PageTransport:
                 self._log_entry_keys(result['meta']['entry_keys'])
             except (KeyError, TypeError, ValueError):
                 raise baidu_adapter.BaiduError('response_schema') from None
+            return result.get('data')
+        if query.get('kind') == 'audience':
             return result.get('data')
         return result.get('rows')
 

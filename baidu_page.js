@@ -122,7 +122,73 @@ async (query) => {
       return {status:'ok', data:body.data};
     } finally { clearTimeout(timer); }
   };
+  const parsePeriod = period => {
+    let dates;
+    if (typeof period === 'string') {
+      const match = /^(\d{4}(?:\d{4}|-\d{2}-\d{2}))(?:\||~|,| - |至)(\d{4}(?:\d{4}|-\d{2}-\d{2}))$/.exec(period);
+      if (match) dates = match.slice(1);
+    } else if (Array.isArray(period) && period.length === 2) dates = period;
+    else if (period && typeof period === 'object') {
+      for (const [first, last] of [['startDate','endDate'], ['start','end'], ['beginDate','endDate'], ['start_date','end_date'], ['begin','end']]) {
+        if (Object.keys(period).length === 2 && Object.hasOwn(period, first) && Object.hasOwn(period, last)) { dates = [period[first], period[last]]; break; }
+      }
+    }
+    const iso = date => {
+      if (typeof date !== 'string') return null;
+      const match = /^(\d{4})(?:(\d{2})(\d{2})|-(\d{2})-(\d{2}))$/.exec(date);
+      return match && match[1] !== '0000' ? `${match[1]}-${match[2] || match[4]}-${match[3] || match[5]}` : null;
+    };
+    const [start, end] = dates ? dates.map(iso) : [null, null];
+    const startMs = Date.parse(start + 'T00:00:00Z'), endMs = Date.parse(end + 'T00:00:00Z');
+    const validDates = start && end && Number.isFinite(startMs) && Number.isFinite(endMs) && new Date(startMs).toISOString().slice(0,10) === start && new Date(endMs).toISOString().slice(0,10) === end;
+    const days = validDates ? (endMs - startMs) / 86400000 + 1 : null;
+    const periodRule = !dates ? 'unknown_format' : !validDates ? 'invalid_date' : startMs > endMs ? 'start_after_end' : days > 366 ? 'span_out_of_range' : null;
+    return {start, end, days, periodRule};
+  };
   try {
+    if (query.kind === 'audience') {
+      const socialParams = new URLSearchParams({'wordlist[]':query.keywords[0]});
+      const base = await get('/api/SocialApi/baseAttributes?' + socialParams);
+      if (base.status !== 'ok') return base;
+      const interestParams = new URLSearchParams({'wordlist[]':query.keywords[0], typeid:''});
+      const interest = await get('/api/SocialApi/interest?' + interestParams);
+      if (interest.status !== 'ok') return interest;
+      const regionParams = new URLSearchParams({region:'0', word:query.keywords[0], startDate:query.start_date, endDate:query.end_date, days:''});
+      const region = await get('/api/SearchApi/region?' + regionParams);
+      if (region.status !== 'ok') return region;
+      const select = (data, fields) => {
+        if (typeOf(data) !== 'object') return {error:'audience_data_type'};
+        if (!Array.isArray(data.result) || data.result.length > 100) return {error:'audience_result_shape'};
+        const matches = data.result.filter(x => typeOf(x) === 'object' && x.word === query.keywords[0]);
+        const fallback = data.result.filter(x => typeOf(x) === 'object' && x.word === '全网分布');
+        const selected = matches.length === 1 ? matches[0] : matches.length === 0 && fallback.length === 1 ? fallback[0] : null;
+        if (!selected) return {error:'audience_entry_rule'};
+        const output = {};
+        for (const field of fields) {
+          const items = selected[field];
+          if (!Array.isArray(items) || items.length > 1000 || (field !== 'interest' && !items.length)) return {error:'audience_entry_rule'};
+          if (items.some(x => typeOf(x) !== 'object' || typeof x.desc !== 'string' || !x.desc.trim() || x.desc.length > 200 || typeof x.rate !== 'number' || !Number.isFinite(x.rate) || x.rate < 0 || (x.tgi != null && (typeof x.tgi !== 'number' || !Number.isFinite(x.tgi) || x.tgi < 0)))) return {error:'audience_entry_rule'};
+          output[field] = items.map(x => ({desc:x.desc, rate:x.rate, tgi:x.tgi ?? null}));
+        }
+        return {output};
+      };
+      const a = select(base.data, ['gender','age']), b = select(interest.data, ['interest']);
+      if (a.error || b.error) return schema(a.error ? base.data : interest.data, {reason:a.error || b.error});
+      const data = region.data;
+      if (typeOf(data) !== 'object' || !Array.isArray(data.region) || data.region.length !== 1 || typeOf(data.region[0]) !== 'object') return schema(data, {reason:'region_shape'});
+      const item = data.region[0];
+      for (const field of ['prov','city']) {
+        const values = item[field];
+        if (typeOf(values) !== 'object' || !Object.keys(values).length || Object.keys(values).length > 1000 || Object.entries(values).some(([key, value]) => !/^[0-9]{1,10}$/.test(key) || typeof value !== 'number' || !Number.isFinite(value) || value < 0)) return schema(data, {reason:'region_shape'});
+      }
+      let period = null;
+      if (Object.hasOwn(item, 'period')) {
+        const parsed = parsePeriod(item.period);
+        if (parsed.periodRule) return schema(data, {reason:'audience_period', period_returned:true, period_rule:parsed.periodRule, period_days:parsed.days});
+        period = {start_date:parsed.start, end_date:parsed.end, days:parsed.days};
+      }
+      return {status:'ok', data:{...a.output, ...b.output, prov:item.prov, city:item.city, period}};
+    }
     if (query.kind === 'related') {
       const params = new URLSearchParams({'wordlist[]':query.keywords[0]});
       if (query.related_date) params.set('datelist', query.related_date.replaceAll('-', ''));
@@ -133,26 +199,7 @@ async (query) => {
       if (dataType !== 'object') return schema(data, {reason:'related_data_type', data_type:dataType, data_length:dataType === 'string' ? data.length : null});
       const periodReturned = Object.prototype.hasOwnProperty.call(data, 'period');
       const keys = entryKeys(data), period = data.period;
-      let dates;
-      if (typeof period === 'string') {
-        const match = /^(\d{4}(?:\d{4}|-\d{2}-\d{2}))(?:\||~|,| - |至)(\d{4}(?:\d{4}|-\d{2}-\d{2}))$/.exec(period);
-        if (match) dates = match.slice(1);
-      } else if (Array.isArray(period) && period.length === 2) dates = period;
-      else if (period && typeof period === 'object') {
-        for (const [first, last] of [['startDate','endDate'], ['start','end'], ['beginDate','endDate'], ['start_date','end_date'], ['begin','end']]) {
-          if (Object.keys(period).length === 2 && Object.hasOwn(period, first) && Object.hasOwn(period, last)) { dates = [period[first], period[last]]; break; }
-        }
-      }
-      const iso = date => {
-        if (typeof date !== 'string') return null;
-        const match = /^(\d{4})(?:(\d{2})(\d{2})|-(\d{2})-(\d{2}))$/.exec(date);
-        return match && match[1] !== '0000' ? `${match[1]}-${match[2] || match[4]}-${match[3] || match[5]}` : null;
-      };
-      const [start, end] = dates ? dates.map(iso) : [null, null];
-      const startMs = Date.parse(start + 'T00:00:00Z'), endMs = Date.parse(end + 'T00:00:00Z');
-      const validDates = start && end && Number.isFinite(startMs) && Number.isFinite(endMs) && new Date(startMs).toISOString().slice(0,10) === start && new Date(endMs).toISOString().slice(0,10) === end;
-      const days = validDates ? (endMs - startMs) / 86400000 + 1 : null;
-      const periodRule = !dates ? 'unknown_format' : !validDates ? 'invalid_date' : startMs > endMs ? 'start_after_end' : days > 366 ? 'span_out_of_range' : null;
+      const {start, end, days, periodRule} = parsePeriod(period);
       const detail = {data_type:dataType, period_returned:periodReturned, entry_keys:keys};
       if (periodRule) return schema(data, {...detail, reason:'related_period', period_rule:periodRule, period_days:days, ...(periodReturned ? {period_shape:shape(period)} : {})});
       if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph)) return schema(data, {...detail, reason:'related_wordlist_shape'});
