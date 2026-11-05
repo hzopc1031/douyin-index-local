@@ -328,9 +328,14 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
                 page.locator('[data-platform=douyin]').click()
-                page.locator('[data-tab=hot]').click()
+                assert page.locator('[data-tab=hot]').count() == 0
+                assert '热榜' not in page.locator('.nav').inner_text()
+                page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
                 assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '热点宝' in page.locator('#hotIntro').inner_text()
+                assert page.locator('#hotResume').is_hidden()
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(0).inner_text() == '1'
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
                 assert page.locator('#hotRows tr').nth(1).locator('td').nth(0).inner_text() == '2'
@@ -378,9 +383,10 @@ def run(output=None):
                 assert writes[group_writes] == ('groups/' + 'a' * 32, dict(name='合成组', keywords=['杭州', '灵隐寺']))
                 assert all(item[0] not in ('queries', 'insights/queries') for item in writes[group_writes:])
                 page.locator('[data-source=hot_search]').click()
-                page.wait_for_function("document.querySelector('#overviewHotRows').textContent.includes('合成话题甲')")
-                assert '—' in page.locator('#overviewHotRows').inner_text()
-                assert '不是搜索指数' in page.locator('#overviewHotIntro').inner_text()
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert '—' in page.locator('#hotRows').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
+                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
                 assert page.locator('#keywordSelect').is_hidden()
                 assert page.locator('#resultTab-summary').is_hidden()
                 page.locator('[data-source=topic]').click()

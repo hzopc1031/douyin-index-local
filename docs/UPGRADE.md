@@ -57,7 +57,7 @@
 3. 取出本分支并安装已有依赖。不要新开服务账号，不要跑会打印 `access.json` 的脚本。
 4. 先不要设置 `INDEX_HUB_HOTLIST_ENABLED`。
 5. 启动 gateway。确认进程起来后，用只读请求看 `/api/v1/hot/latest`、`/api/v1/hot/rising`、`/api/v1/groups`。此时热榜应为空或只有以后抓到的数据，搜索指数的 `daily_online_attempts` 不应因这次升级增加。
-6. 浏览器强制刷新工作台，确认热榜页和关键词组页能打开。
+6. 浏览器强制刷新工作台，确认趋势总览能打开，热搜榜和关键词组都在这一页。
 7. 需要自动抓热榜时，再打开上面的开关并重启 gateway。429、403 或非 JSON 会暂停热榜，要用 `POST /api/v1/hot/resume` 人工恢复。
 
 ## 回滚
