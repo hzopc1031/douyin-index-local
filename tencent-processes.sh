@@ -12,6 +12,19 @@ start_child() {
   children+=("$!")
 }
 
+# Sets vnc_auth_args. Only the exact value 0 skips the password file.
+# Any other value, including unset or empty, keeps the current fail-closed check.
+prepare_vnc_auth() {
+  vnc_auth_args=()
+  if [[ "${INDEX_HUB_VNC_AUTH:-1}" == 0 ]]; then
+    printf '%s\n' 'WARNING VNC authentication disabled (INDEX_HUB_VNC_AUTH is 0); x11vnc listens on localhost without a password' >>"$LOG_DIR/desktop.log"
+    vnc_auth_args=(-nopw)
+    return 0
+  fi
+  bash ./tencent-vnc-check.sh "$STATE_DIR"
+  vnc_auth_args=(-rfbauth "$STATE_DIR/vnc.passwd")
+}
+
 start_session_bus() {
   # Bash must remain systemd's MainPID: dbus-run-session does not forward TERM
   # to its command. Own the foreground daemon and its private filesystem socket.
