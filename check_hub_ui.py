@@ -26,7 +26,8 @@ AUDIENCE = [dict(dimension=key, name=key, labels=[dict(name=name, value=620-i*67
            for i, name in enumerate(names + ([f'其他分组 {j}' for j in range(20)] if key in ('province','city','interest') else []))]) for key,names in DIMENSIONS]
 META = dict(start_date=START, end_date=END, source='离线合成样例', fetched_at='2026-11-01T10:00:00+08:00',
             keywords=['杭州'], complete=True, verification='pending')
-PLATFORMS = [dict(id=key, name=name, available=key=='douyin', metric_name='搜索指数', description='离线合成数据')
+PLATFORMS = [dict(id=key, name=name, available=key=='douyin', metric_name='搜索指数', description='离线合成数据',
+                    modules=(['related','audience'] if key=='douyin' else []))
              for key,name in [('douyin','抖音'),('baidu','百度指数'),('google_trends','Google Trends')]]
 
 
