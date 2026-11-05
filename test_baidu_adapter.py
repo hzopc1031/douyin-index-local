@@ -38,6 +38,28 @@ class Browser:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_related_entry_keys_logged_with_job_on_success_and_failure(self):
+        from unittest.mock import Mock, patch
+        import baidu_browser
+        worker = Mock()
+        worker.call.side_effect = lambda action: action(Mock())
+        page = Mock(url='https://index.baidu.com/')
+        body = {**query(), 'kind': 'related', '_budget_day': dt.datetime.now(b.TZ).date().isoformat(), '_job_id': 'a' * 32}
+        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01'}, 'wordlist': [{'wordGraph': []}]}
+        diag = dict(reason='related_period', request_start=None, request_end=None, response_start=None, response_end=None,
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
+                    data_type='object', datelist_sent='none', period_returned=True,
+                    period_shape={'type': 'string', 'length': 3, 'pattern': '9Ca'}, entry_keys={'word': 'string'})
+        for result, ok in [({'status': 'ok', 'data': graph, 'meta': {'entry_keys': {'word': 'string'}}}, True),
+                           ({'status': 'response_schema', 'schema_digest': {'type': 'object', 'keys': {}}, 'schema_diag': diag}, False)]:
+            page.evaluate.return_value = result
+            with patch.object(baidu_browser, 'browser', return_value=worker), patch.object(baidu_browser, '_page', return_value=page), \
+                 patch.object(baidu_browser, 'wait_ready'), patch.object(baidu_browser, 'status', return_value={'state': 'browser_ready'}), \
+                 self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+                answer = b.bridge_command('baidu_query', body)
+            self.assertEqual(answer['ok'], ok)
+            self.assertIn('baidu_related_entry_keys job=' + 'a' * 32 + ' keys=word:string', str(logs.output))
+
     def test_lagged_series_and_device_cutoff(self):
         for trailing in (False, True):
             raw = fixture('12,,34,45,56,,' if trailing else '12,,34,45,56')

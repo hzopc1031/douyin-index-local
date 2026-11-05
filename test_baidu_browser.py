@@ -611,6 +611,43 @@ class ReadOnlyStatusTests(unittest.TestCase):
         self.assertIn(f'"data_length":{len(secret)}', str(logs.output))
         self.assertNotIn(secret, str(logs.output))
 
+    def test_period_shape_validation_and_related_key_logs(self):
+        from unittest.mock import Mock
+        from baidu_adapter import BaiduError
+        from baidu_browser import PageTransport, _safe_period_shape
+        shape = {'type': 'object', 'keys': ['masked', 'start'], 'values': {
+            'masked': {'type': 'array', 'length': 2, 'items': [{'type': 'object'}, {'type': 'null'}]},
+            'start': {'type': 'string', 'length': 5, 'pattern': '99Caa'}}}
+        self.assertEqual(_safe_period_shape(shape), shape)
+        for bad in ({'type': 'string', 'length': 1, 'pattern': '1'},
+                    {'type': 'string', 'length': 1, 'pattern': 'x'},
+                    {'type': 'string', 'length': 1, 'pattern': '中'},
+                    {'type': 'string', 'length': 1, 'pattern': '\n'},
+                    {'type': 'object', 'keys': ['bad-name'], 'values': {'bad-name': {'type': 'null'}}},
+                    {'type': 'array', 'length': 1, 'items': [{'type': 'string', 'length': 3, 'pattern': 'aaa', 'secret': 'x'}]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                _safe_period_shape(bad)
+        page = Mock(url='https://index.baidu.com/')
+        keys = {'word': 'string', 'masked': 'mixed', 'score': 'number'}
+        page.evaluate.return_value = {'status': 'ok', 'data': {}, 'meta': {'entry_keys': keys}}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+            PageTransport(page, job_id='a' * 32).query({'kind': 'related'})
+        self.assertIn('baidu_related_entry_keys job=' + 'a' * 32 + ' keys=masked:mixed,score:number,word:string', str(logs.output))
+        diag = dict(reason='related_period', request_start=None, request_end=None, response_start=None, response_end=None,
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
+                    data_type='object', datelist_sent='none', period_returned=True, period_shape=shape, entry_keys=keys)
+        page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'object', 'keys': {}}, 'schema_diag': diag}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page, job_id='a' * 32).query({'kind': 'related'})
+        self.assertIn('"period_shape"', str(logs.output))
+        self.assertIn('keys=masked:mixed,score:number,word:string', str(logs.output))
+        self.assertNotIn('secret', str(logs.output))
+        page.evaluate.return_value['schema_diag'] = diag | {'period_shape': {'type': 'string', 'length': 6, 'pattern': 'secret'}}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page).query({'kind': 'related'})
+        self.assertNotIn('secret', str(logs.output))
+        self.assertNotIn('schema_digest=', str(logs.output))
+
     def test_hold_bounds(self):
         from baidu_browser import BaiduBrowser
         for value in ('0', '86401', 'invalid'):
