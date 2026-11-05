@@ -46,7 +46,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(self.response, Exception):
                 raise self.response
             if payload and payload.get('kind') == 'related' and self.response.get('ok'):
-                return {**self.response, 'metadata': {**self.response['metadata'], 'related_date': payload['related_date']}}
+                return {**self.response, 'metadata': {**self.response['metadata'], 'related_period': {'start_date': '2026-10-26', 'end_date': '2026-11-01'}, **({'related_date': payload['related_date']} if 'related_date' in payload else {})}}
             return self.response
         self.hub = Hub(self.temp.name, bridge)
         self.s = self.hub.store
@@ -83,6 +83,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         job = self.submit(q)
         await self.hub.run_one()
         self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertNotIn('related_date', self.s.job(job['id'])['result']['metadata'])
+        self.assertEqual(self.s.insight(q)['metadata']['related_period'], {'start_date': '2026-10-26', 'end_date': '2026-11-01'})
         self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 1)
         self.assertEqual(hub_baidu.daily(self.s)['attempts'], 1)
         self.assertTrue(self.submit(q)['cache_hit'])
@@ -114,10 +116,14 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         job = self.submit(q)
         async def immediate(func, *args):
             return func(*args)
-        with patch('hub_baidu.asyncio.to_thread', immediate):
+        with patch('hub_baidu.asyncio.to_thread', immediate), patch.dict('os.environ', {'BAIDU_RELATED_SUNDAY_FALLBACK': '1'}):
             await self.hub.run_one()
-        self.assertEqual(self.s.job(job['id'])['result']['metadata']['related_date'], '2026-11-03')
-        self.assertEqual(self.s.insight(q)['metadata']['related_date'], '2026-11-03')
+        self.assertEqual(self.s.job(job['id'])['result']['metadata']['related_date'], '2026-11-01')
+        self.assertEqual(self.s.insight(q)['metadata']['related_date'], '2026-11-01')
+
+    def test_sunday_alignment(self):
+        for day, expected in [('2026-11-03', '2026-11-01'), ('2026-11-01', '2026-11-01'), ('2026-10-01', '2026-09-27')]:
+            self.assertEqual(hub_baidu.previous_sunday(day), expected)
 
     def test_related_date_without_stored_points(self):
         q = {'keywords': ['absent'], 'end_date': '9999-12-31'}

@@ -20,23 +20,33 @@ async function run(mode) {
   return vm.runInNewContext(script, context)(query);
 }
 (async () => {
-  const relatedQuery = {...query, kind:'related', end_date:'2026-11-04', related_date:'2026-11-03'};
-  async function related(data) {
+  const relatedQuery = {...query, kind:'related', end_date:'2026-11-04'};
+  async function related(data, fallback = false) {
     let path;
     const fetch = async url => { path = url; return new Response(JSON.stringify({status:0, data}), {headers:{'content-type':'application/json'}}); };
     const context = {location:{origin:query._origin}, fetch, URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout, clearTimeout};
-    const result = await vm.runInNewContext(script, context)(relatedQuery);
-    assert.equal(new URL(path, query._origin).searchParams.get('datelist'), '20261103');
+    const result = await vm.runInNewContext(script, context)({...relatedQuery, ...(fallback ? {related_date:'2026-11-01'} : {})});
+    assert.equal(new URL(path, query._origin).searchParams.get('datelist'), fallback ? '20261101' : null);
     return result;
   }
-  assert.equal((await related({wordlist:[{wordGraph:[]}]})).status, 'ok');
+  const valid = {period:'20261026|20261101', wordlist:[{wordGraph:[]}]};
+  const good = await related(valid);
+  assert.equal(good.status, 'ok');
+  assert.equal(good.data.period.start_date, '2026-10-26');
+  assert.equal(good.data.period.end_date, '2026-11-01');
+  assert.equal((await related(valid, true)).status, 'ok');
+  for (const period of [undefined, '', '20260230|20260306', '00000101|00000107', '20261001|20261020', '20261101|20261026']) {
+    const result = await related({...valid, period});
+    assert.equal(result.schema_diag.reason, 'related_period');
+    assert.equal(result.schema_diag.period_returned, period !== undefined);
+  }
   const secret = 'synthetic-response-secret';
   const badType = await related(secret);
   assert.equal(badType.schema_diag.reason, 'related_data_type');
   assert.equal(badType.schema_diag.data_type, 'string');
   assert.equal(badType.schema_diag.data_length, secret.length);
   assert(!JSON.stringify(badType).includes(secret));
-  assert.equal((await related({wordlist:[]})).schema_diag.reason, 'related_shape');
+  assert.equal((await related({period:'20261026|20261101', wordlist:[]})).schema_diag.reason, 'related_shape');
   for (const mode of ['truncated_end', 'trailing_empty']) {
     const result = await run(mode);
     assert.equal(result.status, 'ok');

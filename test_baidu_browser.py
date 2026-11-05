@@ -8,6 +8,27 @@ from baidu_browser import prepare_profile
 from browser_profile import ProfileError
 
 
+
+def graph_handler():
+    import json
+    from urllib.parse import parse_qs, urlsplit
+    from fake_baidu_page import Handler
+    class GraphHandler(Handler):
+        def do_GET(self):
+            path = urlsplit(self.path)
+            if path.path != '/api/WordGraph/multi':
+                return super().do_GET()
+            self.server.graph_calls = getattr(self.server, 'graph_calls', 0) + 1
+            assert len(parse_qs(path.query)['wordlist[]']) == 1
+            mode = getattr(self.server, 'mode', '')
+            graph = [] if mode == 'graph_empty' else [{'word': '合成关联词'}] * (101 if mode == 'graph_oversized' else 1)
+            data = {} if mode == 'graph_schema' else {'period': '20261026|20261101', 'wordlist': [{'wordGraph': graph}]}
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'status': 0, 'data': data}).encode())
+    return GraphHandler
+
 class ReadinessTests(unittest.TestCase):
     def test_related_query_with_job_id_and_unavailable_signature(self):
         import datetime
@@ -18,7 +39,7 @@ class ReadinessTests(unittest.TestCase):
 
         worker = Mock()
         worker.call.side_effect = lambda action: action(Mock())
-        graph = {'wordlist': [{'wordGraph': []}]}
+        graph = {'period': {'start_date': '2026-10-26', 'end_date': '2026-11-01'}, 'wordlist': [{'wordGraph': []}]}
         body = {**query(), 'kind': 'related', 'related_date': query()['end_date'], '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat(), '_job_id': 'a' * 32}
         with patch.object(baidu_browser, 'browser', return_value=worker), \
              patch.object(baidu_browser, '_page'), patch.object(baidu_browser, 'wait_ready') as ready, \
@@ -31,6 +52,7 @@ class ReadinessTests(unittest.TestCase):
         ready.assert_called_once()
         project.assert_called_once_with(graph)
         self.assertNotIn('_job_id', transport.return_value.query.call_args.args[0])
+        self.assertEqual(answer['metadata']['related_period'], graph['period'])
         self.assertEqual(answer['metadata']['related_date'], body['related_date'])
         for invalid in ('2026-02-30', '20261103', '9999-12-31', None):
             with self.subTest(invalid=invalid), self.assertRaises(adapter.BaiduError):
@@ -88,8 +110,32 @@ class ReadinessTests(unittest.TestCase):
                     sent = 'no' if mode == 'login' else 'unknown'
                     self.assertIn(f'category={category} requests_sent={sent} since_start=', line)
                     self.assertIn('on_index=' + ('false' if mode == 'login' else 'true'), line)
+                    self.assertIn('datelist_sent=none period_returned=false', line)
                     for secret in ('fake-cookie-secret', 'synthetic', '?', 'Target', 'exception message'):
                         self.assertNotIn(secret, line)
+
+    def test_related_failure_logs_safe_period_diagnostics(self):
+        import datetime
+        from unittest.mock import Mock
+        import baidu_adapter as adapter
+        import baidu_browser
+        from test_baidu_adapter import query
+        page = Mock(url='https://index.baidu.com/?synthetic-secret')
+        worker = Mock()
+        worker.call.side_effect = lambda action: action(Mock())
+        diag = dict(reason='related_period', request_start=None, request_end=None, response_start=None, response_end=None,
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None,
+                    data_type='object', datelist_sent='20260927', period_returned=True)
+        page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'object', 'keys': {}}, 'schema_diag': diag}
+        body = {**query(), 'kind': 'related', 'related_date': '2026-09-27', '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat()}
+        with patch.object(baidu_browser, 'browser', return_value=worker), patch.object(baidu_browser, '_page', return_value=page), \
+             patch.object(baidu_browser, 'wait_ready'), patch.object(baidu_browser, 'status', return_value={'state': 'browser_ready'}), \
+             self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+            answer = adapter.bridge_command('baidu_query', body)
+        self.assertEqual(answer['code'], 'response_schema')
+        line = next(line for line in logs.output if 'baidu_failure' in line)
+        self.assertIn('datelist_sent=20260927 period_returned=true', line)
+        self.assertNotIn('synthetic-secret', str(logs.output))
 
     def test_readiness_deadline(self):
         from unittest.mock import Mock
@@ -152,7 +198,9 @@ class BrowserPageTests(unittest.TestCase):
         from playwright.sync_api import sync_playwright
         from baidu_browser import PageTransport
         from fake_baidu_page import serve
+        from test_baidu_browser import graph_handler
         server = serve()
+        server.RequestHandlerClass = graph_handler()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         origin = 'http://127.0.0.1:' + str(server.server_port)
@@ -311,7 +359,9 @@ class BridgeLeakTests(unittest.TestCase):
         import hub_bridge
         from hub_store import Store
         from fake_baidu_page import serve
+        from test_baidu_browser import graph_handler
         server = serve()
+        server.RequestHandlerClass = graph_handler()
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         origin = 'http://127.0.0.1:' + str(server.server_port)
@@ -540,7 +590,7 @@ class ReadOnlyStatusTests(unittest.TestCase):
         from baidu_adapter import BaiduError
         from baidu_browser import PageTransport
         diag = dict(reason='word', request_start=None, request_end=None, response_start=None, response_end=None,
-                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None, data_type=None)
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None, data_type=None, datelist_sent='none', period_returned=False)
         page = Mock(url='https://index.baidu.com/')
         for change in ({'secret':'synthetic-secret'}, {'name_matches':1}, {'request_start':'synthetic-secret'}, {'reason':'synthetic-secret'}, {'ptbk_length':True}, {'data_type':'synthetic-secret'}):
             page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag | change}
