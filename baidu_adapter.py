@@ -386,7 +386,7 @@ def bridge_command(command, payload=None):
                 raise BaiduError(state)
             requests_sent = 'unknown'
             if query.get('kind') == 'related':
-                graph = baidu_browser.PageTransport(page).query({**query, '_budget_day': day})
+                graph = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
                 period = graph['period']
                 if type(period) is not dict or set(period) != {'start_date', 'end_date'}:
                     raise BaiduError()

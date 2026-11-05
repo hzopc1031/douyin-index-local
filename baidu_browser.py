@@ -208,12 +208,61 @@ def _safe_digest(value, depth=0):
     return value
 
 
+def _safe_entry_keys(value):
+    import re
+    if type(value) is not dict or len(value) > 1048576:
+        raise ValueError
+    for key, kind in value.items():
+        if (type(key) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,31}', key, flags=re.ASCII)
+                or type(kind) is not str or kind not in ('string', 'number', 'boolean', 'null', 'array', 'object', 'mixed')):
+            raise ValueError
+    return dict(sorted(value.items()))
+
+
+def _safe_period_shape(value, depth=0):
+    import re
+    if type(value) is not dict or value.get('type') not in ('string', 'number', 'boolean', 'null', 'array', 'object'):
+        raise ValueError
+    kind = value['type']
+    if depth >= 2 or kind in ('boolean', 'null'):
+        if set(value) != {'type'}:
+            raise ValueError
+    elif kind == 'string':
+        if (set(value) != {'type', 'length', 'pattern'} or type(value['length']) is not int
+                or not 0 <= value['length'] <= 1048576 or type(value['pattern']) is not str
+                or len(value['pattern']) != min(value['length'], 64)
+                or not re.fullmatch(r'[9aC\x20-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]*', value['pattern'], flags=re.ASCII)):
+            raise ValueError
+    elif kind == 'number':
+        if set(value) != {'type', 'digits'} or type(value['digits']) is not int or not 1 <= value['digits'] <= 32:
+            raise ValueError
+    elif kind == 'array':
+        if (set(value) != {'type', 'length', 'items'} or type(value['length']) is not int
+                or not 0 <= value['length'] <= 1048576 or type(value['items']) is not list
+                or len(value['items']) != min(value['length'], 4)):
+            raise ValueError
+        for child in value['items']:
+            _safe_period_shape(child, depth + 1)
+    else:
+        if (set(value) != {'type', 'keys', 'values'} or type(value['keys']) is not list
+                or len(value['keys']) > 8 or type(value['values']) is not dict):
+            raise ValueError
+        keys = value['keys']
+        if any(type(k) is not str or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,31}', k, flags=re.ASCII) for k in keys):
+            raise ValueError
+        if keys != sorted(set(keys)) or set(keys) != set(value['values']):
+            raise ValueError
+        for child in value['values'].values():
+            _safe_period_shape(child, depth + 1)
+    return value
+
+
 def _safe_diag(value):
     import math
     import re
     keys = {'reason', 'request_start', 'request_end', 'response_start', 'response_end',
             'word_type', 'name_matches', 'ptbk_length', 'decoded_points', 'data_length', 'data_type', 'datelist_sent', 'period_returned'}
-    if type(value) is not dict or set(value) != keys or value['reason'] not in {
+    if type(value) is not dict or set(value) - {'period_shape', 'entry_keys'} != keys or value['reason'] not in {
             'index_shape', 'ptbk', 'word', 'word_type', 'series_shape', 'start_date',
             'end_date', 'point_count', 'token', 'data_length', 'related_data_type', 'related_shape', 'related_period'}:
         raise ValueError
@@ -232,15 +281,27 @@ def _safe_diag(value):
         n = value[key]
         if (n is None and key == 'ptbk_length') or (n is not None and (type(n) is not int or not 0 <= n <= 1048576)):
             raise ValueError
+    if 'period_shape' in value:
+        if value['reason'] != 'related_period' or not value['period_returned']:
+            raise ValueError
+        _safe_period_shape(value['period_shape'])
+    if 'entry_keys' in value:
+        if value['reason'] not in ('related_period', 'related_shape'):
+            raise ValueError
+        _safe_entry_keys(value['entry_keys'])
     return value
 
 
 class PageTransport:
-    def __init__(self, page, *, origin='https://index.baidu.com', allow_loopback=False):
+    def __init__(self, page, *, origin='https://index.baidu.com', allow_loopback=False, job_id='-'):
         from urllib.parse import urlsplit
         parsed = urlsplit(origin)
         if origin != 'https://index.baidu.com' and not (allow_loopback and parsed.scheme == 'http' and parsed.hostname == '127.0.0.1' and parsed.port and not parsed.path and not parsed.query and not parsed.fragment and not parsed.username):
             raise ValueError('Invalid Baidu origin')
+        import re
+        if type(job_id) is not str or not re.fullmatch(r'-|[0-9a-f]{32}', job_id):
+            raise ValueError('Invalid job ID')
+        self.job_id = job_id
         self.page = page
         self.origin = origin
 
@@ -279,10 +340,22 @@ class PageTransport:
                     logging.getLogger('index_hub.baidu').warning('schema_digest=%s schema_diag=%s', json.dumps(digest, separators=(',', ':')), json.dumps(diag, separators=(',', ':')))
                 except (TypeError, ValueError, RecursionError):
                     pass
+            if query.get('kind') == 'related':
+                self._log_entry_keys(diag.get('entry_keys', {}) if diag else {})
             error = baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
             error.period_returned = diag['period_returned'] if diag else False
             raise error
-        return result.get('data') if query.get('kind') == 'related' else result.get('rows')
+        if query.get('kind') == 'related':
+            try:
+                self._log_entry_keys(result['meta']['entry_keys'])
+            except (KeyError, TypeError, ValueError):
+                raise baidu_adapter.BaiduError('response_schema') from None
+            return result.get('data')
+        return result.get('rows')
+
+    def _log_entry_keys(self, value):
+        keys = _safe_entry_keys(value)
+        logging.getLogger('index_hub.baidu').warning('baidu_related_entry_keys job=%s keys=%s', self.job_id, ','.join(f'{key}:{kind}' for key, kind in keys.items()))
 
 
 _browser = None

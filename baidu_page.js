@@ -9,6 +9,38 @@ async (query) => {
     for (const key of Object.keys(value)) if (schemaKeys.has(key)) keys[key] = digest(value[key], depth + 1);
     return {type, keys};
   };
+  const typeOf = value => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+  const safeKey = key => /^[A-Za-z_][A-Za-z0-9_]{0,31}$/.test(key) ? key : 'masked';
+  const pattern = value => Array.from(value, ch => /[0-9]/.test(ch) ? '9' : /[A-Za-z]/.test(ch) ? 'a' : ch.codePointAt(0) > 127 ? 'C' : ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? 'C' : ch).slice(0, 64).join('');
+  const shape = (value, depth = 0) => {
+    const type = typeOf(value);
+    if (depth >= 2) return {type};
+    if (type === 'string') return {type, length:Array.from(value).length, pattern:pattern(value)};
+    if (type === 'number') return {type, digits:(String(value).match(/[0-9]/g) || []).length};
+    if (type === 'array') return {type, length:value.length, items:value.slice(0, 4).map(item => shape(item, depth + 1))};
+    if (type === 'object') {
+      const values = Object.create(null);
+      for (const key of Object.keys(value).sort().slice(0, 8)) {
+        const name = safeKey(key);
+        if (!(name in values)) values[name] = shape(value[key], depth + 1);
+      }
+      return {type, keys:Object.keys(values).sort(), values};
+    }
+    return {type};
+  };
+  const entryKeys = data => {
+    const entries = Object.create(null);
+    if (Array.isArray(data?.wordlist)) for (const group of data.wordlist) {
+      if (!Array.isArray(group?.wordGraph)) continue;
+      for (const item of group.wordGraph) if (item && typeof item === 'object' && !Array.isArray(item)) {
+        for (const key of Object.keys(item)) {
+          const name = safeKey(key), type = typeOf(item[key]);
+          entries[name] = entries[name] && entries[name] !== type ? 'mixed' : type;
+        }
+      }
+    }
+    return Object.fromEntries(Object.entries(entries).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+  };
   const schema = (value, diag = {}) => {
     const date = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
     return {status:'response_schema', schema_digest:digest(value), schema_diag:{
@@ -19,7 +51,7 @@ async (query) => {
       decoded_points:Number.isInteger(diag.decoded_points) ? diag.decoded_points : null,
       data_length:Number.isInteger(diag.data_length) ? diag.data_length : null,
       data_type:diag.data_type || null, datelist_sent:query.related_date ? query.related_date.replaceAll('-', '') : 'none',
-      period_returned:diag.period_returned === true}};
+      period_returned:diag.period_returned === true, ...(diag.period_shape ? {period_shape:diag.period_shape} : {}), ...(diag.entry_keys ? {entry_keys:diag.entry_keys} : {})}};
   };
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
@@ -100,13 +132,27 @@ async (query) => {
       const dataType = data === null ? 'null' : Array.isArray(data) ? 'array' : typeof data;
       if (dataType !== 'object') return schema(data, {reason:'related_data_type', data_type:dataType, data_length:dataType === 'string' ? data.length : null});
       const periodReturned = Object.prototype.hasOwnProperty.call(data, 'period');
-      const match = typeof data.period === 'string' && /^(\d{4})(\d{2})(\d{2})\|(\d{4})(\d{2})(\d{2})$/.exec(data.period);
-      const iso = parts => `${parts[0]}-${parts[1]}-${parts[2]}`;
-      const start = match && iso(match.slice(1, 4)), end = match && iso(match.slice(4, 7));
+      const keys = entryKeys(data), period = data.period;
+      let dates;
+      if (typeof period === 'string') {
+        const match = /^(\d{4}(?:\d{4}|-\d{2}-\d{2}))(?:\||~|,| - |至)(\d{4}(?:\d{4}|-\d{2}-\d{2}))$/.exec(period);
+        if (match) dates = match.slice(1);
+      } else if (Array.isArray(period) && period.length === 2) dates = period;
+      else if (period && typeof period === 'object') {
+        for (const [first, last] of [['startDate','endDate'], ['start','end'], ['beginDate','endDate'], ['start_date','end_date'], ['begin','end']]) {
+          if (Object.keys(period).length === 2 && Object.hasOwn(period, first) && Object.hasOwn(period, last)) { dates = [period[first], period[last]]; break; }
+        }
+      }
+      const iso = date => {
+        if (typeof date !== 'string') return null;
+        const match = /^(\d{4})(?:(\d{2})(\d{2})|-(\d{2})-(\d{2}))$/.exec(date);
+        return match && match[1] !== '0000' ? `${match[1]}-${match[2] || match[4]}-${match[3] || match[5]}` : null;
+      };
+      const [start, end] = dates ? dates.map(iso) : [null, null];
       const startMs = Date.parse(start + 'T00:00:00Z'), endMs = Date.parse(end + 'T00:00:00Z');
-      if (!match || match[1] === '0000' || match[4] === '0000' || !Number.isFinite(startMs) || !Number.isFinite(endMs) || new Date(startMs).toISOString().slice(0,10) !== start || new Date(endMs).toISOString().slice(0,10) !== end || (endMs - startMs) / 86400000 < 5 || (endMs - startMs) / 86400000 > 7) return schema(data, {reason:'related_period', data_type:dataType, period_returned:periodReturned});
-      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType, period_returned:periodReturned});
-      return {status:'ok', data:{period:{start_date:start, end_date:end}, wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
+      if (!start || !end || !Number.isFinite(startMs) || !Number.isFinite(endMs) || new Date(startMs).toISOString().slice(0,10) !== start || new Date(endMs).toISOString().slice(0,10) !== end || (endMs - startMs) / 86400000 < 5 || (endMs - startMs) / 86400000 > 7) return schema(data, {reason:'related_period', data_type:dataType, period_returned:periodReturned, ...(periodReturned ? {period_shape:shape(period)} : {}), entry_keys:keys});
+      if (!Array.isArray(data.wordlist) || data.wordlist.length !== 1 || !data.wordlist[0] || typeof data.wordlist[0] !== 'object' || Array.isArray(data.wordlist[0]) || !Array.isArray(data.wordlist[0].wordGraph) || data.wordlist[0].wordGraph.length > 100 || data.wordlist[0].wordGraph.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof item.word !== 'string' || !item.word.trim() || item.word.length > 200)) return schema(data, {reason:'related_shape', data_type:dataType, period_returned:periodReturned, entry_keys:keys});
+      return {status:'ok', meta:{entry_keys:keys}, data:{period:{start_date:start, end_date:end}, wordlist:[{wordGraph:data.wordlist[0].wordGraph.map(item => ({word:item.word}))}]}};
     }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');
     let signature;
