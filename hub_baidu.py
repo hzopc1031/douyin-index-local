@@ -52,7 +52,7 @@ def daily(store):
 async def browser_status(hub):
     try:
         result = await asyncio.to_thread(hub.bridge, 'baidu_status', None, 2)
-        if result.get('ok') is True and result.get('live_enabled') is True and result.get('state') in ('browser_ready', 'login_required', 'login_in_progress', 'signature_unavailable'):
+        if result.get('ok') is True and result.get('live_enabled') is True and result.get('state') in ('browser_ready', 'browser_idle', 'login_required', 'login_in_progress', 'signature_unavailable'):
             return result['state']
     except Exception:
         pass

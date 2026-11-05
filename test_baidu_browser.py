@@ -95,6 +95,26 @@ class BrowserPageTests(unittest.TestCase):
                     with self.subTest(mode=mode), self.assertRaises(BaiduError) as caught:
                         PageTransport(page, origin=origin, allow_loopback=True).query(query)
                     self.assertEqual(caught.exception.code, 'response_schema')
+                server.mode = 'extra'
+                self.assertEqual(PageTransport(page, origin=origin, allow_loopback=True).query(query)[0]['search_index'], 1)
+                for mode, present, absent in [('no_uniqid', 'userIndexes', 'uniqid'), ('no_indexes', 'uniqid', 'userIndexes'), ('no_data', 'startDate', 'data')]:
+                    server.mode = mode
+                    with self.subTest(mode=mode), self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+                        with self.assertRaises(BaiduError) as caught:
+                            PageTransport(page, origin=origin, allow_loopback=True).query(query)
+                    self.assertEqual(caught.exception.code, 'response_schema')
+                    self.assertIn(present, str(logs.output))
+                    if mode != 'no_data':
+                        self.assertNotIn(absent, str(logs.output))
+                    for secret in ('fake-cookie-secret', 'synthetic-cookie-secret', 'fake-signature-secret', 'abc1,2', 'synthetic-value-secret'):
+                        self.assertNotIn(secret, str(logs.output) + str(caught.exception))
+                long_series = {**query, 'keywords': ['a'], 'start_date': '2025-10-02', 'end_date': '2026-10-01'}
+                server.mode = 'long_data'
+                self.assertEqual(len(PageTransport(page, origin=origin, allow_loopback=True).query(long_series)), 365 * 3)
+                server.mode = 'over_limit'
+                with self.assertLogs('index_hub.baidu', level='WARNING'), self.assertRaises(BaiduError) as caught:
+                    PageTransport(page, origin=origin, allow_loopback=True).query(long_series)
+                self.assertEqual(caught.exception.code, 'response_schema')
                 server.mode = 'missing'
                 missing = PageTransport(page, origin=origin, allow_loopback=True).query(query)
                 self.assertTrue(all(r['search_index'] is None for r in missing))
@@ -283,6 +303,52 @@ class ReadOnlyStatusTests(unittest.TestCase):
             result = baidu_adapter.bridge_command('baidu_status')
             worker.call.assert_called_once_with(baidu_browser.status, touch='status')
         self.assertEqual(asyncio.run(hub_baidu.browser_status(Mock(bridge=Mock(return_value=result)))), 'login_in_progress')
+
+    def test_idle_status_and_cold_query(self):
+        import asyncio
+        import datetime
+        from unittest.mock import Mock
+        import baidu_adapter
+        import baidu_browser
+        import hub_baidu
+        from test_baidu_adapter import query
+        worker = Mock(started=False, busy=False, last_state='browser_ready')
+        context = Mock()
+        worker.call.side_effect = lambda action, **kwargs: action(context)
+        with patch.object(baidu_browser, 'browser', return_value=worker):
+            result = baidu_adapter.bridge_command('baidu_status')
+            self.assertEqual(result['state'], 'browser_idle')
+            self.assertEqual(asyncio.run(hub_baidu.browser_status(Mock(bridge=Mock(return_value=result)))), 'browser_idle')
+            with patch.object(baidu_browser, '_page') as page, patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}) as status:
+                day = datetime.datetime.now(baidu_adapter.TZ).date().isoformat()
+                answer = baidu_adapter.bridge_command('baidu_query', {**query(), '_budget_day': day})
+            self.assertEqual(answer['code'], 'login_required')
+            page.assert_called_once_with(context)
+            status.assert_called_once_with(context)
+            self.assertEqual(worker.last_state, 'login_required')
+
+    def test_status_exception_clears_ready(self):
+        from unittest.mock import Mock
+        import baidu_browser
+        worker = baidu_browser.BaiduBrowser(root='.')
+        worker.last_state = 'browser_ready'
+        try:
+            with patch.object(baidu_browser, 'prepare_profile', side_effect=ProfileError('synthetic')):
+                with self.assertRaises(ProfileError):
+                    worker.call(lambda context: None, touch='status')
+            self.assertEqual(worker.last_state, 'login_required')
+        finally:
+            worker.close()
+
+    def test_untrusted_digest_is_not_logged(self):
+        from unittest.mock import Mock
+        from baidu_adapter import BaiduError
+        from baidu_browser import PageTransport
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'string', 'secret': 'synthetic-secret'}}
+        with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
+            PageTransport(page).query({})
+        logger.assert_not_called()
 
     def test_hold_bounds(self):
         from baidu_browser import BaiduBrowser

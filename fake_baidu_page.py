@@ -20,7 +20,7 @@ class Handler(BaseHTTPRequestHandler):
         mode = getattr(self.server, 'mode', '')
         if path.path == '/api/SearchApi/index':
             self.server.index_calls = getattr(self.server, 'index_calls', 0) + 1
-        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'bad_type', 'missing'):
+        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'bad_type', 'missing', 'extra', 'no_uniqid', 'no_indexes', 'no_data', 'long_data', 'over_limit'):
             if mode == 'timeout':
                 import time
                 time.sleep(27)
@@ -43,7 +43,21 @@ class Handler(BaseHTTPRequestHandler):
             from datetime import date
             days = (date.fromisoformat(params['endDate'][0]) - date.fromisoformat(params['startDate'][0])).days + 1
             series = {'startDate': params['startDate'][0], 'endDate': params['endDate'][0], 'type': 'week' if mode == 'non_day' else 0 if mode == 'bad_type' else 'day', 'data':'ab' * (days - 1) + 'c'}
+            if mode in ('long_data', 'over_limit'):
+                series['data'] = ('b'.join(['a' * 15] * days) if mode == 'long_data' else 'a' * (max(6200, days * 64) + 1))
+            if mode == 'no_data':
+                del series['data']
+            if mode == 'extra':
+                for word in words:
+                    word[0]['extra'] = 'synthetic-value-secret'
+                series['extra'] = 'synthetic-value-secret'
             data = {'status': 0, 'data': {'uniqid':'synthetic', 'userIndexes': [] if mode == 'missing' else [{'word':w, 'all':series, 'pc':series, 'wise':series} for w in words]}}
+            if mode == 'extra':
+                data['data']['generalRatio'] = 'synthetic-value-secret'
+            if mode == 'no_uniqid':
+                del data['data']['uniqid']
+            if mode == 'no_indexes':
+                del data['data']['userIndexes']
         elif path.path == '/Interface/api/ptbk':
             data = {'status': 0, 'data': 'abc1,2'}
         else:

@@ -12,6 +12,7 @@ DIMENSIONS = dict(platform='baidu', metric='search_index', device='all', region=
                   granularity='day', source='index.baidu.com')
 ERRORS = {
     'login_required': '百度未登录，请登录。',
+    'browser_idle': '百度浏览器已空闲关闭，查询时需重新检查登录。',
     'login_in_progress': '百度登录进行中。',
     'rate_limited': '百度限流，请冷却后人工恢复。',
     'bad_request': '百度拒绝请求参数。',
@@ -141,7 +142,8 @@ def parse_index(data, ptbk, query):
             if type(word) is not list or len(word) != 1 or type(word[0]) is not dict:
                 raise BaiduError()
             name = word[0].get('name')
-            if word != [{'name': name, 'wordType': 1}] or name not in query['keywords'] or name in by_word:
+            if (not isinstance(name, str) or not name or type(word[0].get('wordType')) is not int
+                    or word[0]['wordType'] != 1 or name not in query['keywords'] or name in by_word):
                 raise BaiduError()
             by_word[name] = item
         rows = []
@@ -252,7 +254,8 @@ def bridge_command(command, payload=None):
     if command == 'baidu_status':
         instance = baidu_browser.browser()
         if not instance.started or instance.busy:
-            return {'ok': True, 'state': instance.last_state, 'live_enabled': True}
+            state = 'browser_idle' if not instance.started and instance.last_state == 'browser_ready' else instance.last_state
+            return {'ok': True, 'state': state, 'live_enabled': True}
         return instance.call(baidu_browser.status, touch='status')
     if command == 'baidu_login_open':
         return baidu_browser.browser().call(baidu_browser.login_open, hold=True)
@@ -268,7 +271,7 @@ def bridge_command(command, payload=None):
         raise BaiduError('baidu_daily_limit') from None
     query = validate_query({k: v for k, v in payload.items() if k != '_budget_day'})
     instance = baidu_browser.browser()
-    if not instance.started and instance.last_state != 'browser_ready':
+    if not instance.started and instance.last_state == 'login_required':
         return {'ok': False, 'code': 'login_required'}
     import hub_baidu
     try:

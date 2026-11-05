@@ -104,6 +104,16 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(b.BaiduError):
             b.parse_index(raw, PTBK, query())
 
+    def test_word_extra_fields_and_required_types(self):
+        raw = fixture()
+        word = raw['userIndexes'][0]['word'][0]
+        word['extra'] = 'synthetic'
+        self.assertEqual(b.parse_index(raw, PTBK, query())['rows'][0]['search_index'], 12)
+        for bad in (True, '1', None):
+            word['wordType'] = bad
+            with self.assertRaises(b.BaiduError):
+                b.parse_index(raw, PTBK, query())
+
     def test_scope_and_public_trust_boundary(self):
         from hub_store import HubError
         for patch in ({'keywords': ['a', 'a']}, {'cookie': 'synthetic'}, {'device': 'pc'},
@@ -140,7 +150,9 @@ class AdapterTests(unittest.TestCase):
 
     def test_live_bridge_needs_login(self):
         self.assertTrue(b.bridge_command('baidu_status')['live_enabled'])
-        self.assertEqual(b.bridge_command('baidu_query', {**query(), '_budget_day': dt.datetime.now(b.TZ).date().isoformat()})['code'], 'login_required')
+        from unittest.mock import Mock, patch
+        with patch('baidu_browser.browser', return_value=Mock(started=False, last_state='login_required', call=Mock(side_effect=b.BaiduError('login_required')))):
+            self.assertEqual(b.bridge_command('baidu_query', {**query(), '_budget_day': dt.datetime.now(b.TZ).date().isoformat()})['code'], 'login_required')
 
 
 if __name__ == '__main__':

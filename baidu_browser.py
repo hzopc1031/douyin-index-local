@@ -1,5 +1,7 @@
 """Isolated, lazily started Baidu browser owned by one worker thread."""
 import os
+import json
+import logging
 from pathlib import Path
 import queue
 import stat
@@ -155,6 +157,8 @@ class BaiduBrowser:
                     hold_until = now + self.hold_seconds
                 result.put((True, value))
             except Exception as exc:
+                if touch == 'status':
+                    self.last_state = 'login_required'
                 if context is None:
                     try:
                         stop()
@@ -169,6 +173,33 @@ class BaiduBrowser:
                 result.put((False, exc))
             finally:
                 self.busy = False
+
+
+def _safe_digest(value, depth=0):
+    keys = {'status', 'data', 'uniqid', 'userIndexes', 'word', 'name', 'wordType',
+            'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio'}
+    if type(value) is not dict or value.get('type') not in ('string', 'number', 'boolean', 'null', 'array', 'object'):
+        raise ValueError
+    kind = value['type']
+    if kind == 'array':
+        if set(value) - {'type', 'length', 'items'} or type(value.get('length')) is not int or not 0 <= value['length'] <= 1048576:
+            raise ValueError
+        if 'items' in value:
+            if not value['length'] or depth >= 3:
+                raise ValueError
+            _safe_digest(value['items'], depth)
+    elif kind == 'object':
+        if set(value) - {'type', 'keys'} or (depth < 3) != ('keys' in value):
+            raise ValueError
+        if 'keys' in value:
+            fields = value['keys']
+            if type(fields) is not dict or set(fields) - keys:
+                raise ValueError
+            for child in fields.values():
+                _safe_digest(child, depth + 1)
+    elif set(value) != {'type'}:
+        raise ValueError
+    return value
 
 
 class PageTransport:
@@ -191,6 +222,12 @@ class PageTransport:
         result = self.page.evaluate(script, {**query, '_origin': self.origin})
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
+            if code == 'response_schema' and 'schema_digest' in result:
+                try:
+                    digest = _safe_digest(result['schema_digest'])
+                    logging.getLogger('index_hub.baidu').warning('schema_digest=%s', json.dumps(digest, separators=(',', ':')))
+                except (TypeError, ValueError, RecursionError):
+                    pass
             raise baidu_adapter.BaiduError(code if code in baidu_adapter.ERRORS else 'network_error')
         return result.get('rows')
 

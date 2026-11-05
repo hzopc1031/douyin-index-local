@@ -1,5 +1,15 @@
 async (query) => {
   const fail = status => ({status});
+  const schemaKeys = new Set(['status','data','uniqid','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio']);
+  const digest = (value, depth = 0) => {
+    const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    if (type === 'array') return {type, length:value.length, ...(value.length && depth < 3 ? {items:digest(value[0], depth)} : {})};
+    if (type !== 'object' || depth >= 3) return {type};
+    const keys = Object.create(null);
+    for (const key of Object.keys(value)) if (schemaKeys.has(key)) keys[key] = digest(value[key], depth + 1);
+    return {type, keys};
+  };
+  const schema = value => ({status:'response_schema', schema_digest:digest(value)});
   if (location.origin !== query._origin) return fail('network_error');
   const parse = text => {
     let i = 0;
@@ -63,8 +73,9 @@ async (query) => {
       if (text.trimStart().startsWith('<')) return fail('verification_required');
       let body;
       try { body = parse(text); } catch (_) { return fail('response_schema'); }
-      if (!body || !Number.isInteger(body.status)) return fail('response_schema');
+      if (!body || !Number.isInteger(body.status)) return schema(body);
       if (body.status !== 0) return fail(({10000:'login_required',10001:'rate_limited',10002:'bad_request',10018:'abnormal_access'})[body.status] || 'business_error');
+      if (!Object.prototype.hasOwnProperty.call(body, 'data')) return schema(body);
       return {status:'ok', data:body.data};
     } finally { clearTimeout(timer); }
   };
@@ -83,17 +94,19 @@ async (query) => {
     const index = await get('/api/SearchApi/index?' + params, {'Cipher-Text':signature});
     if (index.status !== 'ok') return index;
     const data = index.data;
-    if (!data || !/^[A-Za-z0-9_-]{1,128}$/.test(data.uniqid) || !Array.isArray(data.userIndexes) || data.userIndexes.length > query.keywords.length) return fail('response_schema');
+    if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(data.uniqid) || !Array.isArray(data.userIndexes) || data.userIndexes.length > query.keywords.length) return schema(data);
     const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}));
     if (table.status !== 'ok') return table;
     const ptbk = table.data;
-    if (typeof ptbk !== 'string' || !ptbk.length || ptbk.length > 256 || ptbk.length % 2) return fail('response_schema');
+    if (typeof ptbk !== 'string' || !ptbk.length || ptbk.length > 256 || ptbk.length % 2) return schema(data);
     const half = ptbk.length / 2, left = ptbk.slice(0, half), right = ptbk.slice(half);
-    if (new Set(left).size !== half || new Set(right).size !== half) return fail('response_schema');
+    if (new Set(left).size !== half || new Set(right).size !== half) return schema(data);
     const byWord = new Map();
     for (const item of data.userIndexes) {
-      const word = typeof item.word === 'string' ? parse(item.word) : item.word;
-      if (!Array.isArray(word) || word.length !== 1 || !word[0] || Object.keys(word[0]).sort().join(',') !== 'name,wordType' || word[0].wordType !== 1 || !query.keywords.includes(word[0].name) || byWord.has(word[0].name)) return fail('response_schema');
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return schema(data);
+      let word;
+      try { word = typeof item.word === 'string' ? parse(item.word) : item.word; } catch (_) { return schema(data); }
+      if (!Array.isArray(word) || word.length !== 1 || !word[0] || typeof word[0] !== 'object' || Array.isArray(word[0]) || typeof word[0].name !== 'string' || !word[0].name || word[0].wordType !== 1 || !query.keywords.includes(word[0].name) || byWord.has(word[0].name)) return schema(data);
       byWord.set(word[0].name, item);
     }
     const start = Date.parse(query.start_date + 'T00:00:00Z'), end = Date.parse(query.end_date + 'T00:00:00Z');
@@ -102,15 +115,16 @@ async (query) => {
       let tokens = Array(days).fill('');
       if (byWord.has(word)) {
         const series = byWord.get(word)[device];
-        if (!series || series.startDate !== query.start_date || series.endDate !== query.end_date || (series.type === undefined ? 'day' : series.type) !== 'day' || typeof series.data !== 'string' || series.data.length > 6200) return fail('response_schema');
+        // Long daily series can exceed the former seven-day-sized bound.
+        if (!series || typeof series !== 'object' || Array.isArray(series) || series.startDate !== query.start_date || series.endDate !== query.end_date || (series.type === undefined ? 'day' : series.type) !== 'day' || typeof series.data !== 'string' || series.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(data);
         let plain = '';
-        for (const char of series.data) { const n = left.indexOf(char); if (n < 0) return fail('response_schema'); plain += right[n]; }
+        for (const char of series.data) { const n = left.indexOf(char); if (n < 0) return schema(data); plain += right[n]; }
         tokens = plain.split(',');
-        if (tokens.length !== days) return fail('response_schema');
+        if (tokens.length !== days) return schema(data);
       }
       for (let i = 0; i < days; i++) {
         const token = tokens[i];
-        if (token && !/^[0-9]{1,15}$/.test(token)) return fail('response_schema');
+        if (token && !/^[0-9]{1,15}$/.test(token)) return schema(data);
         rows.push({keyword:word,device,date:new Date(start + i * 86400000).toISOString().slice(0,10),search_index:token ? Number(token) : null,value_status:token ? 'available' : 'missing'});
       }
     }
