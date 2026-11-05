@@ -327,7 +327,13 @@ def run(output=None):
                 page.locator('[data-platform=baidu]').click()
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
+                assert page.locator('#viewChips').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                assert page.locator('#overviewHot').is_hidden()
                 page.locator('[data-platform=douyin]').click()
+                assert page.locator('#viewChips').is_visible()
+                assert '搜索指数' in page.locator('#viewChips').inner_text()
+                assert '热搜榜' not in page.locator('#platformChips').inner_text()
                 assert page.locator('[data-tab=hot]').count() == 0
                 assert '热榜' not in page.locator('.nav').inner_text()
                 page.locator('[data-source=hot_search]').click()
@@ -350,6 +356,10 @@ def run(output=None):
                 assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
+                assert page.locator('#topicCategory').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                page.locator('[data-source=index]').click()
+                assert page.locator('#groupPanel').is_visible()
                 assert page.locator('[data-tab=groups]').count() == 0
                 assert '关键词组' not in page.locator('.nav').inner_text()
                 page.locator('[data-tab=overview]').click()
@@ -389,6 +399,8 @@ def run(output=None):
                 assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
                 assert page.locator('#keywordSelect').is_hidden()
                 assert page.locator('#resultTab-summary').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                assert page.locator('#topicCategory').is_hidden()
                 page.locator('[data-source=topic]').click()
                 page.wait_for_function("document.querySelector('#topicCategory').textContent.includes('美食')")
                 assert page.locator('#topicWindow').inner_text() == '近1天'
@@ -402,6 +414,8 @@ def run(output=None):
                 assert '0' not in page.locator('#topicRows').inner_text()
                 page.locator('[data-platform=douyin]').click()
                 assert page.locator('#openQuery').is_visible()
+                assert page.locator('#groupPanel').is_visible()
+                assert page.locator('#overviewTopic').is_hidden()
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
