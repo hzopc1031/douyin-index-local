@@ -20,7 +20,7 @@ class Handler(BaseHTTPRequestHandler):
         mode = getattr(self.server, 'mode', '')
         if path.path == '/api/SearchApi/index':
             self.server.index_calls = getattr(self.server, 'index_calls', 0) + 1
-        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'bad_type', 'missing', 'extra', 'no_uniqid', 'no_indexes', 'no_data', 'long_data', 'over_limit'):
+        if path.path == '/api/SearchApi/index' and mode and mode not in ('non_day', 'bad_type', 'missing', 'extra', 'no_uniqid', 'no_indexes', 'no_data', 'long_data', 'over_limit', 'truncated_end', 'trailing_empty', 'end_after', 'start_mismatch', 'bad_word_type', 'wrong_name'):
             if mode == 'timeout':
                 import time
                 time.sleep(27)
@@ -50,9 +50,22 @@ class Handler(BaseHTTPRequestHandler):
         elif path.path == '/api/SearchApi/index':
             assert self.headers.get('Cipher-Text') == 'fake-signature-secret'
             words = json.loads(params['word'][0])
-            from datetime import date
+            from datetime import date, timedelta
             days = (date.fromisoformat(params['endDate'][0]) - date.fromisoformat(params['startDate'][0])).days + 1
             series = {'startDate': params['startDate'][0], 'endDate': params['endDate'][0], 'type': 'week' if mode == 'non_day' else 0 if mode == 'bad_type' else 'day', 'data':'ab' * (days - 1) + 'c'}
+            if mode == 'truncated_end':
+                series['endDate'] = (date.fromisoformat(series['endDate']) - timedelta(days=2)).isoformat()
+                series['data'] = 'ab' * (days - 3) + 'c'
+            if mode == 'trailing_empty':
+                series['data'] = 'ab' * (days - 3) + 'cbb'
+            if mode == 'end_after':
+                series['endDate'] = (date.fromisoformat(series['endDate']) + timedelta(days=1)).isoformat()
+            if mode == 'start_mismatch':
+                series['startDate'] = (date.fromisoformat(series['startDate']) + timedelta(days=1)).isoformat()
+            if mode == 'bad_word_type':
+                words[0][0]['wordType'] = 2
+            if mode == 'wrong_name':
+                words[0][0]['name'] = 'synthetic-value-secret'
             if mode in ('long_data', 'over_limit'):
                 series['data'] = ('b'.join(['a' * 15] * days) if mode == 'long_data' else 'a' * (max(6200, days * 64) + 1))
             if mode == 'no_data':

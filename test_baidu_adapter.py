@@ -38,6 +38,59 @@ class Browser:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_lagged_series_and_device_cutoff(self):
+        for trailing in (False, True):
+            raw = fixture('12,,34,45,56,,' if trailing else '12,,34,45,56')
+            if not trailing:
+                for device in ('all', 'pc', 'wise'):
+                    raw['userIndexes'][0][device]['endDate'] = (dt.date.fromisoformat(query()['end_date']) - dt.timedelta(days=2)).isoformat()
+            result = b.public_result(b.parse_index(raw, PTBK, query()))
+            self.assertEqual(len(result['rows']), 15)
+            self.assertIsNone(result['rows'][1]['search_index'])
+            self.assertTrue(result['metadata']['lagged'])
+            self.assertFalse(result['metadata']['complete'])
+            self.assertIn('（滞后）', result['metadata']['note'])
+        raw = fixture()
+        raw['userIndexes'][0]['pc']['data'] = fixture('12,23,34,45,56,,')['userIndexes'][0]['pc']['data']
+        self.assertEqual(len(b.parse_index(raw, PTBK, query())['rows']), 15)
+        q = {**query(), 'keywords': query()['keywords'] + ['未收录']}
+        result = b.public_result(b.parse_index(raw, PTBK, q))
+        self.assertTrue(result['metadata']['lagged'])
+        self.assertEqual(result['metadata']['data_end_date'], (dt.date.fromisoformat(q['end_date']) - dt.timedelta(days=2)).isoformat())
+        self.assertEqual(sum(r['keyword'] == '未收录' for r in result['rows']), 21)
+
+    def test_reject_range_and_identity_changes(self):
+        for field, value in [('startDate', (dt.date.fromisoformat(query()['start_date']) + dt.timedelta(days=1)).isoformat()),
+                             ('endDate', (dt.date.fromisoformat(query()['end_date']) + dt.timedelta(days=1)).isoformat()),
+                             ('endDate', '2026-02-30')]:
+            raw = fixture()
+            raw['userIndexes'][0]['all'][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(b.BaiduError):
+                b.parse_index(raw, PTBK, query())
+        for field, value in [('name', 'wrong'), ('wordType', 2)]:
+            raw = fixture()
+            raw['userIndexes'][0]['word'][0][field] = value
+            with self.assertRaises(b.BaiduError):
+                b.parse_index(raw, PTBK, query())
+
+    def test_multiple_slices_preserve_gaps(self):
+        end = dt.date.fromisoformat(query()['end_date'])
+        q = {**query(), 'start_date': (end - dt.timedelta(days=399)).isoformat()}
+        class Page:
+            def __init__(self, truncate_first): self.calls = 0; self.truncate_first = truncate_first
+            def query(self, chunk):
+                self.calls += 1
+                start, last = (dt.date.fromisoformat(chunk[k]) for k in ('start_date', 'end_date'))
+                if (self.calls == 1) == self.truncate_first: last -= dt.timedelta(days=2)
+                return [dict(keyword=word, device=device, date=(start+dt.timedelta(days=i)).isoformat(), search_index=1, value_status='available')
+                        for word in chunk['keywords'] for device in ('all', 'pc', 'wise') for i in range((last-start).days+1)]
+        for first in (False, True):
+            result = b.public_result(b.collect_page(q, Page(first), sleep=lambda _: None))
+            self.assertEqual(len(result['rows']), 398 * 3)
+            self.assertFalse(result['metadata']['complete'])
+            self.assertEqual(result['metadata']['lagged'], not first)
+            self.assertIn('部分日期段' if first else '（滞后）', result['metadata']['note'])
+
     def test_two_requests_encoded_and_projected(self):
         browser = Browser(response(fixture()), response(PTBK))
         result = b.public_result(b.collect(query(), browser))
