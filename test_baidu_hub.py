@@ -132,13 +132,20 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
         self.assertIsNone(self.s.get('baidu.paused'))
 
+    async def test_resume_without_signature(self):
+        self.hub.bridge = Mock(return_value={'ok': True, 'state': 'signature_unavailable', 'live_enabled': True})
+        self.s.set('baidu.paused', {'code': 'login_required'})
+        await hub_baidu.resume(self.hub)
+        self.assertIsNone(self.s.get('baidu.paused'))
+
     async def test_other_nonready_states_remain_blocked(self):
         for state in ('login_required', 'login_in_progress', 'signature_unavailable'):
             with self.subTest(state=state):
                 self.hub.bridge = Mock(return_value={'ok': True, 'state': state, 'live_enabled': True})
                 self.s.set('baidu.paused', {'code': state})
-                with self.assertRaises(HubError):
-                    await hub_baidu.resume(self.hub)
+                if state != 'signature_unavailable':
+                    with self.assertRaises(HubError):
+                        await hub_baidu.resume(self.hub)
                 self.s.set('baidu.paused', None)
                 job = self.submit()
                 await self.hub.run_one()

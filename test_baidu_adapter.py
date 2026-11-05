@@ -207,12 +207,13 @@ class WordGraphTests(unittest.TestCase):
         with self.assertRaises(HubError) as caught:
             b.validate_insight({**query(), 'kind': 'audience'})
         self.assertEqual(caught.exception.status, 422)
-        graph = {'wordlist': [{'wordGraph': [{'word': '合成', 'unknown': 4}] * 101}]}
+        graph = {'wordlist': [{'wordGraph': [{'word': '合成', 'unknown': 4}] * 100}]}
         data = b.project_wordgraph(graph)
         self.assertEqual(len(data['search_related']), 100)
         self.assertEqual(data['search_related'][0], {'keyword': '合成', 'relation_score': None, 'search_index': None})
         self.assertEqual(data['content_related'], [])
         self.assertEqual(b.project_wordgraph({'wordlist': [{'wordGraph': []}]})['search_related'], [])
-        for invalid in ({}, {'wordlist': []}, {'wordlist': [{'wordGraph': [{}]}]}):
+        for invalid in ({}, {'wordlist': []}, {'wordlist': [{'wordGraph': [{}]}]},
+                        {'wordlist': [{'wordGraph': [{'word': '合成'}] * 101}]}):
             with self.assertRaises(b.BaiduError):
                 b.project_wordgraph(invalid)

@@ -71,15 +71,14 @@ def project_wordgraph(data):
         if type(data) is not dict or type(data.get('wordlist')) is not list or len(data['wordlist']) != 1:
             raise ValueError
         graph = data['wordlist'][0]['wordGraph']
-        if type(graph) is not list:
+        if type(graph) is not list or len(graph) > 100:
             raise ValueError
         rows = []
         for item in graph:
             word = item['word']
             if type(item) is not dict or not isinstance(word, str) or not word.strip() or len(word) > 200:
                 raise ValueError
-            if len(rows) < 100:
-                rows.append({'keyword': word, 'relation_score': None, 'search_index': None})
+            rows.append({'keyword': word, 'relation_score': None, 'search_index': None})
         return {'search_related': rows, 'content_related': []}
     except (KeyError, TypeError, ValueError):
         raise BaiduError() from None

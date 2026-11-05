@@ -42,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
             assert self.headers.get('Cipher-Text') is None
             assert len(params['wordlist[]']) == 1 and len(params['datelist'][0]) == 8
             graph = [] if mode == 'graph_empty' else [{'word': '合成关联词'}]
+            if mode == 'graph_oversized':
+                graph *= 101
             data = {'status': 0, 'data': {'wordlist': [{'wordGraph': graph}]}}
             if mode == 'graph_schema':
                 data['data'] = {}

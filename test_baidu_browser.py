@@ -92,6 +92,10 @@ class BrowserPageTests(unittest.TestCase):
                 server.mode = 'graph_schema'
                 with self.assertLogs('index_hub.baidu', level='WARNING'), self.assertRaises(BaiduError):
                     PageTransport(page, origin=origin, allow_loopback=True).query(related)
+                server.mode = 'graph_oversized'
+                with self.assertLogs('index_hub.baidu', level='WARNING'), self.assertRaises(BaiduError) as caught:
+                    PageTransport(page, origin=origin, allow_loopback=True).query(related)
+                self.assertEqual(caught.exception.code, 'response_schema')
                 server.mode = 'graph_empty'
                 self.assertEqual(PageTransport(page, origin=origin, allow_loopback=True).query(related)['wordlist'][0]['wordGraph'], [])
                 server.mode = ''
