@@ -362,7 +362,7 @@ class BaiduAdapter:
             points = [by_day.get((a+dt.timedelta(days=i)).isoformat(), {'date': (a+dt.timedelta(days=i)).isoformat(),
                       'value': None, 'composite_index': None, 'value_status': 'missing', 'fetched_at': None, 'dataset_id': None})
                       for i in range((b-a).days+1)]
-        return {'platform': 'baidu', 'metric': 'search_index', 'metric_name': '整体搜索指数', 'keyword': keyword,
+        return {'platform': 'baidu', 'metric': 'search_index', 'metric_name': {'all': '整体搜索指数', 'pc': 'PC 搜索指数', 'wise': '移动搜索指数'}[device], 'keyword': keyword,
                 'region': '全国', 'device': device, 'granularity': 'day', 'unit': '指数', 'points': points,
                 'source': 'index.baidu.com', 'live_request': False, 'note': '仅返回已保存数据。'}
 

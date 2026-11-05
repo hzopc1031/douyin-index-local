@@ -20,6 +20,7 @@ def run(output=None):
             for width in (430, 1280):
                 page = browser.new_page(viewport={'width': width, 'height': 940})
                 writes, errors, unexpected = [], [], []
+                low_volume = [False]
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def route(r):
                     url = urlsplit(r.request.url)
@@ -43,6 +44,8 @@ def run(output=None):
                     elif path == 'history':
                         data = {'datasets': [{'metadata': raw['metadata'], 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
+                    elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
+                    elif path == 'insights': data = {'status': 'no_data'}
                     elif path == 'jobs': data = {'jobs': []}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'series':
@@ -50,7 +53,7 @@ def run(output=None):
                         platform = params['platform'][0]
                         device = params.get('device', ['all'])[0]
                         data = {**b.DIMENSIONS, 'platform': platform, 'device': device, 'keyword': q['keywords'][0], 'points': [
-                            dict(date=row['date'], value=(100 + i * 20 + {'all': 0, 'pc': 30, 'wise': 60}[device]), composite_index=200+i*10 if platform == 'douyin' else None, value_status='available') for i, row in enumerate(raw['rows']) if row['device'] == 'all']}
+                            dict(date=row['date'], value=None if low_volume[0] else (100 + i * 20 + {'all': 0, 'pc': 30, 'wise': 60}[device]), composite_index=200+i*10 if platform == 'douyin' else None, value_status='low_volume' if low_volume[0] else 'available') for i, row in enumerate(raw['rows']) if row['device'] == 'all']}
                     else:
                         unexpected.append(path)
                         return r.abort()
@@ -59,6 +62,7 @@ def run(output=None):
                 page.goto('http://baidu-ui.invalid/')
                 page.wait_for_function('!refreshing && platforms.length===3')
                 assert '登录中' in page.locator('#baiduBudgetStatus').inner_text()
+                page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
                 page.locator('#insightEnd').fill(q['end_date'])
                 page.locator('#resultTab-trend').click()
@@ -78,7 +82,8 @@ def run(output=None):
                 assert page.locator('#chart svg polyline').count() > 0
                 for device in ('all', 'pc', 'wise'):
                     page.locator(f'[data-device={device}]').click()
-                    page.wait_for_function('(device) => document.querySelector("#exportLink").href.includes("device="+device)', device)
+                    page.wait_for_function('(device) => document.querySelector("#exportLink").href.includes("device="+device)', arg=device)
+                    page.wait_for_selector('#chart svg circle')
                     assert page.locator('#chart svg circle').count() > 0
                     if output and width == 1280:
                         page.screenshot(path=str(output/f'baidu-trend-{device}-desktop.png'))
@@ -88,6 +93,10 @@ def run(output=None):
                     page.keyboard.press('Escape')
                 assert '综合指数' not in page.locator('#trendSummary').inner_text()
                 assert 'platform=baidu' in page.locator('#exportLink').get_attribute('href')
+                low_volume[0] = True
+                page.evaluate('loadSeries()')
+                page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('低量')")
+                assert page.locator('#chart svg').count() == 0
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()

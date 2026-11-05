@@ -266,6 +266,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             for device in ('all', 'pc', 'wise'):
                 result = await (await client.get('/api/v1/series?'+args+'&device='+device)).json()
                 self.assertEqual(result['device'], device)
+                self.assertEqual(result['metric_name'], {'all': '整体搜索指数', 'pc': 'PC 搜索指数', 'wise': '移动搜索指数'}[device])
                 self.assertEqual(result['points'][0]['value'], {'all': 12, 'pc': 42, 'wise': 84}[device])
                 self.assertEqual(len(result['points']), 7)
                 csv_text = await (await client.get('/api/v1/export.csv?'+args+'&device='+device)).text()
