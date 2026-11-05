@@ -90,7 +90,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['items'], [])
         self.assertEqual(payload['window_label'], '近1天')
         self.assertEqual(payload['rank_label'], '总榜')
-        self.assertIn('美食', payload['categories'])
+        self.assertEqual(payload['categories'], ['全部'])
         self.assertFalse(payload['live_request'])
         self.assertIn('不伪造', payload['note'])
         self.assertIn('不是搜索指数', TOPIC_NOTE)

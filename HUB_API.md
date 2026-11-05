@@ -180,6 +180,20 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 更新沿用创建时的 `name`、`keywords` 校验，组 id 与创建时间不变。保存后三个分数按新的关键词列表重算；缺数据仍为 null，不补 0。
 
+## 热点宝·话题采集
+
+调度只在 gateway 进程里、且 `INDEX_HUB_TOPIC_ENABLED` 精确为 `1` 时启动。默认关闭。请求由 desktop 进程里已打开的 Qt 页面自己 `fetch`，不在 Python 里签名，也不读取 Cookie。每轮先取「全部」的总榜和飙升，再轮流取一个垂类的一个榜；两次请求至少间隔 15 秒，上海日最多 30 次，两轮之间默认 9000 秒（2.5 小时，允许 7200–10800）。未登录（业务码 8 或离开 douhot 域名）、验证码、限频、拒绝访问或无法识别的响应会写入 `topic_paused` 并停止，不自动重试。`POST /api/v1/topics/resume` 只清除暂停。
+
+手动打一次（不开启调度），在 desktop 服务已经运行、浏览器进程持有 Unix socket 时，用服务账号执行：
+
+```bash
+cd /srv/work-ecs-projects/douyin-index-local
+sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_DIR=/var/log/douyin-index \
+  .venv/bin/python topic_board.py --probe --rank total --category 全部
+```
+
+先拉垂类用 `--probe --tags`。输出只有 `status`、`item_count`、`fields`。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
+
 搜索指数分：同一日历日每个词都有非空搜索指数才计算。当前日取最新的齐全日，基线取最早的齐全日并记为 100。基线合计为 0 时不归一化，搜索分为 null，原始合计仍返回。没有齐全日时搜索分为 null，并列出参考日缺了哪些词。
 
 热榜分：没有完整快照时为 null，这时不能把词标成未上榜。有快照时，精确相等的词用 `hot_value / 榜内最大热度`，全组都有正热度才取平均再乘 100。任一未精确上榜或热度缺失，热榜分为 null；未上榜词单独列出。子串关系只出现在 `substring_hits`，不进入分数。

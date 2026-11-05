@@ -18,7 +18,8 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
-from topic_board import topic_enabled, topic_view, validate_topic_query
+from topic_board import category_names, record_topic_result, tag_id_for, topic_enabled, topic_view, validate_topic_query
+from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
@@ -145,6 +146,7 @@ class Hub:
         self.bridge = bridge
         self.worker_task = None
         self.hotlist_task = None
+        self.topic_task = None
         self.hot_client_factory = HotListClient
 
     def _sms_pause(self, snapshot):
@@ -394,6 +396,64 @@ class Hub:
                 logger.error('hotlist %s', exc_summary(exc))
             await asyncio.sleep(HOT_POLL_SECONDS)
 
+    def _topic_daily(self, now):
+        day = dt.datetime.fromtimestamp(now, TZ).date().isoformat()
+        counter = self.store.get('topic_daily') or {'date': day, 'count': 0}
+        if counter.get('date') != day:
+            counter = {'date': day, 'count': 0}
+        return counter
+
+    async def run_topic_round(self):
+        """One serial round. Disabled unless INDEX_HUB_TOPIC_ENABLED is exactly 1."""
+        if not topic_enabled() or self.store.get('topic_paused'):
+            return {'ok': False, 'code': 'paused' if self.store.get('topic_paused') else 'disabled'}
+        now = time.time()
+        last_round = self.store.get('topic_round_at') or 0
+        if last_round and now - last_round < round_interval_seconds():
+            return {'ok': False, 'code': 'interval'}
+        tags = self.store.get('topic_categories') or []
+        if not isinstance(tags, list):
+            tags = []
+        cursor = self.store.get('topic_cursor') or 0
+        stale = not tags or (self.store.get('topic_tags_at') or 0) < now - 86400
+        jobs = plan_round(tags, int(cursor or 0), include_tags=stale)
+        started = False
+        for job in jobs:
+            now = time.time()
+            gate = request_gate(now, self.store.get('topic_request_at'), int(self._topic_daily(now).get('count') or 0))
+            if gate == 'daily_limit':
+                break
+            if gate == 'interval':
+                wait = MIN_GAP_SECONDS - (now - self.store.get('topic_request_at'))
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            result = await asyncio.to_thread(self.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT)
+            if result.get('code') == 'busy':
+                if not started:
+                    return {'ok': False, 'code': 'busy'}
+                break
+            started = True
+            record_topic_result(self.store, job, result)
+            if not result.get('ok'):
+                if not self.store.get('topic_round_at'):
+                    self.store.set('topic_round_at', time.time())
+                logger.warning('topic stopped code=%s', result.get('code'))
+                return {'ok': False, 'code': result.get('code')}
+        if started:
+            self.store.set('topic_round_at', time.time())
+            self.store.set('topic_cursor', int(cursor or 0) + 1)
+        return {'ok': True}
+
+    async def topic_worker(self):
+        while True:
+            try:
+                await self.run_topic_round()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error('topic %s', exc_summary(exc))
+            await asyncio.sleep(HOT_POLL_SECONDS)
+
     async def start(self, app):
         counts = self.store.interrupt_pending()
         logger.info('interrupt_pending requeued=%d interrupted=%d', counts['requeued'], counts['interrupted'])
@@ -401,9 +461,11 @@ class Hub:
         self.worker_task = asyncio.create_task(self.worker(), name='index-hub-worker')
         if hotlist_enabled():
             self.hotlist_task = asyncio.create_task(self.hotlist_worker(), name='index-hub-hotlist')
+        if topic_enabled():
+            self.topic_task = asyncio.create_task(self.topic_worker(), name='index-hub-topic')
 
     async def close(self, app):
-        for task in (self.worker_task, self.hotlist_task):
+        for task in (self.worker_task, self.hotlist_task, self.topic_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -523,10 +585,16 @@ def openapi():
                 'parameters': [{'in': 'path', 'name': 'id', 'required': True, 'schema': {'type': 'string'}}],
                 'responses': {'200': {'description': '成功'}, '401': error, '403': error, '404': error}}}
     paths['/api/v1/topics'] = {
-        'get': {'summary': '读取已保存的热点宝话题。不抓取、不伪造；未启用或未登录时列表为空。',
+        'get': {'summary': '读取已保存的热点宝话题。缺失为 null。采集只在 INDEX_HUB_TOPIC_ENABLED=1 时由调度进行。',
                 'parameters': [{'in': 'query', 'name': name, 'required': False, 'schema': {'type': 'string'}}
                                for name in ('category', 'rank', 'window')],
                 'responses': {'200': {'description': '成功；items 可为空'}, '400': error, '401': error, '403': error}}}
+    paths['/api/v1/topics/collect-once'] = {'post': {
+        'summary': '管理员通过现有浏览器会话打一次话题请求。不重试。',
+        'responses': {'200': {'description': '状态、条数和字段名'}, '401': error, '403': error, '409': error, '429': error}}}
+    paths['/api/v1/topics/resume'] = {'post': {
+        'summary': '人工恢复话题采集。不立即补抓。',
+        'responses': {'200': {'description': '已恢复'}, '401': error, '403': error}}}
     for path, method in (('/api/v1/login/qr', 'get'), ('/api/v1/login/qr/image', 'get'),
                          ('/api/v1/login/qr/start', 'post'), ('/api/v1/login/qr/cancel', 'post')):
         paths[path] = {method: {'summary': '管理员扫码登录（需网关认证，POST 需 CSRF 校验）',
@@ -646,6 +714,9 @@ def mount(app, hub):
         browser = await hub.browser_status(details=True)
         next_attempt = s.get('last_attempt_at', 0) + 15
         remaining = max(0, math.ceil(next_attempt - time.time()))
+        topic_counter = s.get('topic_daily') or {'date': day, 'count': 0}
+        if topic_counter.get('date') != day:
+            topic_counter = {'date': day, 'count': 0}
         return reply({'login_mode': login_mode(), 'version': '1.0.0', 'browser': browser['state'],
                       'login_state': browser['login_state'], 'paused': s.get('paused'),
                       'last_result': s.get('last_result'), 'worker_error': s.get('worker_error'),
@@ -657,6 +728,10 @@ def mount(app, hub):
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
                       'hotlist': _hotlist_status(s, day),
+                      'topics': {'enabled': topic_enabled(), 'paused': s.get('topic_paused'),
+                                 'interval_seconds': round_interval_seconds(),
+                                 'min_interval_seconds': MIN_GAP_SECONDS,
+                                 'daily_limit': DAILY_LIMIT, 'daily_count': topic_counter.get('count') or 0},
                       'counts': {'datasets': s.db.execute('SELECT count(*) FROM datasets').fetchone()[0],
                                  'keywords': s.db.execute('SELECT count(DISTINCT keyword) FROM points').fetchone()[0],
                                  'points': s.db.execute('SELECT count(*) FROM points').fetchone()[0]}})
@@ -872,10 +947,39 @@ def mount(app, hub):
 
     async def topics(request):
         require(request)
-        category, rank, window = validate_topic_query(request.query)
-        # Read stored rows only. Do not call the browser or start a collector.
+        names = category_names(s.get('topic_categories'))
+        category, rank, window = validate_topic_query(request.query, names)
         return reply(topic_view(s.latest_topics(rank=rank, window=window, category=category),
-                                enabled=topic_enabled()))
+                                enabled=topic_enabled(), paused=s.get('topic_paused'), categories=names))
+
+    async def topic_once(request):
+        require(request, admin=True)
+        body = await read_json(request)
+        if type(body) is not dict or set(body) - {'rank', 'category'}:
+            raise HubError('invalid_parameters', '只接受 rank 和 category。')
+        rank = body.get('rank', 'total')
+        category = body.get('category', '全部')
+        names = category_names(s.get('topic_categories'))
+        if rank not in ('total', 'rising') or category not in names:
+            raise HubError('invalid_parameters', '榜单或垂类无效。')
+        now = time.time()
+        counter = s.get('topic_daily') or {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 0}
+        gate = request_gate(now, s.get('topic_request_at'), int(counter.get('count') or 0))
+        if s.get('topic_paused'):
+            raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
+        if gate != 'ok':
+            raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
+        job = {'action': 'board', 'rank': rank, 'tag_id': tag_id_for(s, category), 'tag_name': category}
+        result = record_topic_result(s, job, await asyncio.to_thread(hub.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT))
+        status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')
+        return reply({'status': status, 'item_count': result.get('item_count') or 0,
+                      'fields': result.get('fields') or [], 'rank': rank, 'category': category,
+                      'live_request': bool(result.get('requested'))})
+
+    async def topic_resume(request):
+        require(request, admin=True)
+        s.set('topic_paused', None)
+        return reply({'ok': True, 'note': '已恢复话题采集。不会立刻补抓，仍受 15 秒间隔和每日 30 次约束。'})
 
     async def hot_resume(request):
         require(request, admin=True)
@@ -917,6 +1021,8 @@ def mount(app, hub):
     app.router.add_delete('/api/v1/groups/{id}', group_delete)
     app.router.add_get('/api/v1/groups/{id}/score', group_score_view)
     app.router.add_get('/api/v1/topics', topics)
+    app.router.add_post('/api/v1/topics/collect-once', topic_once)
+    app.router.add_post('/api/v1/topics/resume', topic_resume)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)

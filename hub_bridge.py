@@ -138,7 +138,7 @@ def start_bridge(api):
                 message = json.loads(raw)
                 requested = message.get('command')
                 command = requested if isinstance(requested, str) and (requested in SMS_COMMANDS or requested in
-                    ('status', 'insight', 'query', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel')) else 'unknown'
+                    ('status', 'insight', 'query', 'topic', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel')) else 'unknown'
                 if command in SMS_COMMANDS:
                     answer = sms_command(api, command, message.get('payload'))
                 elif command.startswith('qr_'):
@@ -148,6 +148,8 @@ def start_bridge(api):
                 elif message.get('command') == 'insight':
                     from hub_insights import collect
                     answer = collect(api, message.get('payload'))
+                elif message.get('command') == 'topic':
+                    answer = api.topic_fetch(message.get('payload'))
                 elif message.get('command') == 'query':
                     from hub_store import validate_query
                     query = validate_query(message.get('payload'))

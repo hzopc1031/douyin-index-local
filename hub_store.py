@@ -159,6 +159,10 @@ class Store:
             CREATE INDEX IF NOT EXISTS topic_snapshots_fetch
                 ON topic_snapshots(rank, window, category, fetched);
         ''')
+        topic_columns = {row['name'] for row in self.db.execute('PRAGMA table_info(topic_snapshots)')}
+        for name in ('publish_count', 'play_count', 'avg_play', 'cover'):
+            if name not in topic_columns:
+                self.db.execute(f'ALTER TABLE topic_snapshots ADD COLUMN {name} TEXT')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
         if 'requeues' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
@@ -634,12 +638,12 @@ class Store:
         No caller in the gateway fetches this yet. The Qt login integration
         must pass only rows observed on the live page.
         """
-        from topic_board import TOPIC_CATEGORIES, TOPIC_RANKS, TOPIC_WINDOW
+        from topic_board import TOPIC_RANKS, TOPIC_WINDOW, category_name_ok
         if not isinstance(snapshot, dict) or snapshot.get('complete') is not True:
             raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
         rank, window, category = snapshot.get('rank'), snapshot.get('window'), snapshot.get('category')
         items, source = snapshot.get('items'), snapshot.get('source')
-        if (rank not in TOPIC_RANKS or window != TOPIC_WINDOW or category not in TOPIC_CATEGORIES
+        if (rank not in TOPIC_RANKS or window != TOPIC_WINDOW or not category_name_ok(category)
                 or not isinstance(items, list) or not items
                 or not isinstance(source, str) or not source or len(source) > 200):
             raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
@@ -664,14 +668,34 @@ class Store:
             if heat is not None and (isinstance(heat, bool) or not isinstance(heat, (int, float))
                                       or isinstance(heat, float) and not math.isfinite(heat) or heat < 0):
                 raise HubError('incomplete_snapshot', '话题热度无法核验，本次快照不入库。')
+
+            def optional_number(value):
+                if value is None:
+                    return encode(None)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise HubError('incomplete_snapshot', '话题计数字段无法核验，本次快照不入库。')
+                if isinstance(value, float) and not math.isfinite(value) or value < 0:
+                    raise HubError('incomplete_snapshot', '话题计数字段无法核验，本次快照不入库。')
+                return encode(value)
+
+            cover = item.get('cover')
+            if cover is not None and (not isinstance(cover, str) or not cover.startswith('https://') or len(cover) > 500):
+                raise HubError('incomplete_snapshot', '话题封面无法核验，本次快照不入库。')
             seen_titles.add(title)
             seen_positions.add(position)
-            rows.append(('title:' + title, title, position, encode(heat)))
+            key = item.get('item_key') if isinstance(item.get('item_key'), str) else 'title:' + title
+            rows.append((key, title, position, encode(heat), optional_number(item.get('publish_count')),
+                         optional_number(item.get('play_count')), optional_number(item.get('avg_play')),
+                         cover))
         identifier = uuid.uuid4().hex
         with self.db:
             self.db.executemany(
-                'INSERT INTO topic_snapshots VALUES(?,?,?,?,?,?,?,?,?,?)',
-                [(identifier, fetched, rank, window, category, *row, source) for row in rows])
+                '''INSERT INTO topic_snapshots
+                   (id, fetched, rank, window, category, item_key, title, position, hot_value, source,
+                    publish_count, play_count, avg_play, cover)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                [(identifier, fetched, rank, window, category, row[0], row[1], row[2], row[3], source,
+                  row[4], row[5], row[6], row[7]) for row in rows])
         return identifier
 
     def latest_topics(self, *, rank, window, category):
@@ -685,10 +709,17 @@ class Store:
                     'fetched_at': None, 'source': None, 'items': []}
         rows = self.db.execute(
             'SELECT * FROM topic_snapshots WHERE id=? ORDER BY position', (row['id'],)).fetchall()
+        def load_number(raw):
+            return None if raw is None else json.loads(raw)
+
         return {'rank': rank, 'window': window, 'category': category,
                 'source': rows[0]['source'],
                 'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
                 'items': [{'title': item['title'], 'position': item['position'],
                            'hot_value': json.loads(item['hot_value']),
+                           'publish_count': load_number(item['publish_count']),
+                           'play_count': load_number(item['play_count']),
+                           'avg_play': load_number(item['avg_play']),
+                           'cover': item['cover'],
                            'fetched_at': dt.datetime.fromtimestamp(item['fetched'], TZ).isoformat()}
                           for item in rows]}
