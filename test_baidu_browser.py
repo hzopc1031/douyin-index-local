@@ -773,6 +773,7 @@ class AudienceDiagnosticSyntheticTests(unittest.TestCase):
         from hub_logging import redact
         from baidu_browser import PageTransport
         from unittest.mock import Mock
+        import baidu_adapter as adapter
         diag = dict(reason='audience_period', request_start='2026-10-01', request_end='2027-10-02', response_start=None, response_end=None, word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None, data_type=None, datelist_sent='none', period_returned=True, period_rule='span_out_of_range', period_days=367)
         page = Mock(url='https://index.baidu.com/')
         page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'object', 'keys':{}}, 'schema_diag':diag}
