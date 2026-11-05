@@ -19,7 +19,7 @@ class ReadinessTests(unittest.TestCase):
         worker = Mock()
         worker.call.side_effect = lambda action: action(Mock())
         graph = {'wordlist': [{'wordGraph': []}]}
-        body = {**query(), 'kind': 'related', '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat(), '_job_id': 'a' * 32}
+        body = {**query(), 'kind': 'related', 'related_date': query()['end_date'], '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat(), '_job_id': 'a' * 32}
         with patch.object(baidu_browser, 'browser', return_value=worker), \
              patch.object(baidu_browser, '_page'), patch.object(baidu_browser, 'wait_ready') as ready, \
              patch.object(baidu_browser, 'status', return_value={'state': 'signature_unavailable'}), \
@@ -31,6 +31,10 @@ class ReadinessTests(unittest.TestCase):
         ready.assert_called_once()
         project.assert_called_once_with(graph)
         self.assertNotIn('_job_id', transport.return_value.query.call_args.args[0])
+        self.assertEqual(answer['metadata']['related_date'], body['related_date'])
+        for invalid in ('2026-02-30', '20261103', '9999-12-31', None):
+            with self.subTest(invalid=invalid), self.assertRaises(adapter.BaiduError):
+                adapter.bridge_command('baidu_query', {**body, 'related_date': invalid})
 
     def test_query_readiness_and_safe_failures(self):
         import datetime
@@ -173,7 +177,7 @@ class BrowserPageTests(unittest.TestCase):
                 self.assertEqual(len(rows), 30)
                 self.assertEqual([r['search_index'] for r in rows[:2]], [1, 2])
                 self.assertNotIn('secret', repr(rows))
-                related = {**query, 'keywords': ['a'], 'kind': 'related'}
+                related = {**query, 'keywords': ['a'], 'kind': 'related', 'related_date': query['end_date']}
                 page.evaluate('window.Paris = null')
                 graph = PageTransport(page, origin=origin, allow_loopback=True).query(related)
                 self.assertEqual(graph['wordlist'][0]['wordGraph'][0]['word'], '合成关联词')
@@ -335,7 +339,7 @@ class BridgeLeakTests(unittest.TestCase):
                     answer = hub_bridge.call_bridge('baidu_query', {**query, '_budget_day':day})
                     self.assertTrue(answer['ok'])
                     related = {**query, 'kind': 'related'}
-                    related_answer = hub_bridge.call_bridge('baidu_query', {**related, '_budget_day':day})
+                    related_answer = hub_bridge.call_bridge('baidu_query', {**related, 'related_date': query['end_date'], '_budget_day':day})
                     self.assertTrue(related_answer['ok'])
                     self.assertEqual(related_answer['data']['search_related'][0]['keyword'], '合成关联词')
                     self.assertEqual(server.graph_calls, 1)
@@ -536,9 +540,9 @@ class ReadOnlyStatusTests(unittest.TestCase):
         from baidu_adapter import BaiduError
         from baidu_browser import PageTransport
         diag = dict(reason='word', request_start=None, request_end=None, response_start=None, response_end=None,
-                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None)
+                    word_type=None, name_matches=False, ptbk_length=0, decoded_points=None, data_length=None, data_type=None)
         page = Mock(url='https://index.baidu.com/')
-        for change in ({'secret':'synthetic-secret'}, {'name_matches':1}, {'request_start':'synthetic-secret'}, {'reason':'synthetic-secret'}, {'ptbk_length':True}):
+        for change in ({'secret':'synthetic-secret'}, {'name_matches':1}, {'request_start':'synthetic-secret'}, {'reason':'synthetic-secret'}, {'ptbk_length':True}, {'data_type':'synthetic-secret'}):
             page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag | change}
             with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
                 PageTransport(page).query({})
@@ -548,6 +552,14 @@ class ReadOnlyStatusTests(unittest.TestCase):
             PageTransport(page).query({})
         self.assertIn('"reason":"word"', str(logs.output))
         self.assertIn('schema_digest=', str(logs.output))
+        secret = 'synthetic-response-secret'
+        page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'},
+                                      'schema_diag':diag | {'reason':'related_data_type', 'data_type':'string', 'data_length':len(secret)}}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page).query({})
+        self.assertIn('"data_type":"string"', str(logs.output))
+        self.assertIn(f'"data_length":{len(secret)}', str(logs.output))
+        self.assertNotIn(secret, str(logs.output))
 
     def test_hold_bounds(self):
         from baidu_browser import BaiduBrowser

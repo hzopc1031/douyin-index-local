@@ -45,6 +45,8 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
                 return {'ok': True, **dy_fixture()}
             if isinstance(self.response, Exception):
                 raise self.response
+            if payload and payload.get('kind') == 'related' and self.response.get('ok'):
+                return {**self.response, 'metadata': {**self.response['metadata'], 'related_date': payload['related_date']}}
             return self.response
         self.hub = Hub(self.temp.name, bridge)
         self.s = self.hub.store
@@ -100,6 +102,28 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.job(job['id'])['status'], 'failed')
         self.assertEqual(self.s.get('baidu.paused')['code'], 'response_schema')
         self.assertFalse(await self.hub.run_one())
+
+    async def test_related_date_uses_latest_available_point_and_is_saved(self):
+        q = b.validate_insight({**query(), 'kind': 'related', 'end_date': '2026-11-04'})
+        self.s.ingest(result())
+        with self.s.db:
+            self.s.db.execute("DELETE FROM baidu_points WHERE day<>(SELECT max(day) FROM baidu_points)")
+            self.s.db.execute("UPDATE baidu_points SET day='2026-11-03' WHERE day=(SELECT max(day) FROM baidu_points)")
+        self.response = {'ok': True, 'data': {'search_related': [{'keyword': '合成'}], 'content_related': []},
+                         'metadata': {**q, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
+        job = self.submit(q)
+        async def immediate(func, *args):
+            return func(*args)
+        with patch('hub_baidu.asyncio.to_thread', immediate):
+            await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['result']['metadata']['related_date'], '2026-11-03')
+        self.assertEqual(self.s.insight(q)['metadata']['related_date'], '2026-11-03')
+
+    def test_related_date_without_stored_points(self):
+        q = {'keywords': ['absent'], 'end_date': '9999-12-31'}
+        yesterday = (dt.datetime.now(b.TZ).date() - dt.timedelta(days=1)).isoformat()
+        self.assertEqual(hub_baidu.related_date(self.s, q), yesterday)
+        self.assertEqual(hub_baidu.related_date(self.s, {**q, 'end_date': '2000-01-01'}), '2000-01-01')
 
     async def test_login_preflight_no_budget_and_pause_only_baidu(self):
         self.ready = False
