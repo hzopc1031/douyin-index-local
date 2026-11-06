@@ -205,6 +205,8 @@ class StoreTests(unittest.TestCase):
         snapshot = apply_empty_mark(store, store.latest_topics(rank='total', window='1d', category='科技'))
         self.assertEqual(snapshot['items'], [])
         self.assertIsNotNone(snapshot['fetched_at'])
+        old = dict(snapshot, fetched_at='2020-01-01T00:00:00+08:00', items=[{'title': '旧榜'}])
+        self.assertEqual(apply_empty_mark(store, old)['items'], [])
         view = topic_view(snapshot, enabled=False)
         self.assertEqual(view['status'], 'available')
         self.assertEqual(view['status_label'], '该垂类暂无话题')

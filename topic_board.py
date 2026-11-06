@@ -80,15 +80,22 @@ def empty_mark_key(rank, window, category):
 
 def apply_empty_mark(store, snapshot):
     """A code-0 empty board has no rows. Remember the fetch so the UI can say so."""
-    if snapshot.get('items') or snapshot.get('fetched_at'):
-        return snapshot
     marks = store.get('topic_empty') or {}
     if not isinstance(marks, dict):
         return snapshot
     stamp = marks.get(empty_mark_key(snapshot['rank'], snapshot['window'], snapshot['category']))
     if not isinstance(stamp, str) or not stamp:
         return snapshot
+    try:
+        from datetime import datetime
+        empty_at = datetime.fromisoformat(stamp)
+        saved_at = datetime.fromisoformat(snapshot['fetched_at']) if snapshot.get('fetched_at') else None
+        if empty_at.tzinfo is None or (saved_at and (saved_at.tzinfo is None or saved_at >= empty_at)):
+            return snapshot
+    except (ValueError, TypeError):
+        return snapshot
     marked = dict(snapshot)
+    marked['items'] = []
     marked['fetched_at'] = stamp
     return marked
 

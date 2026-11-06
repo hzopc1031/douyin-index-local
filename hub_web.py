@@ -422,16 +422,36 @@ class Hub:
             counter = {'date': day, 'count': 0}
         return counter
 
-    async def topic_request(self, job):
-        async with self._topic_lock:
+    async def topic_request(self, job, wait=False):
+        deadline = time.monotonic() + 30
+        try:
+            if wait:
+                await asyncio.wait_for(self._topic_lock.acquire(), timeout=30)
+            else:
+                await self._topic_lock.acquire()
+        except asyncio.TimeoutError:
+            raise HubError('interval', '采集排队超时，请稍后重试。', 429) from None
+        try:
             if self.store.get('topic_paused'):
                 raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
             now = time.time()
             gate = request_gate(now, self.store.get('topic_request_at'), int(self._topic_daily(now).get('count') or 0))
+            if gate == 'interval' and wait:
+                delay = MIN_GAP_SECONDS - (now - self.store.get('topic_request_at'))
+                if delay > deadline - time.monotonic():
+                    raise HubError('interval', '采集等待时间过长，请稍后重试。', 429)
+                await asyncio.sleep(max(0, delay))
+                if self.store.get('topic_paused'):
+                    raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
+                now = time.time()
+                gate = request_gate(now, self.store.get('topic_request_at'), int(self._topic_daily(now).get('count') or 0))
             if gate != 'ok':
-                raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
+                message = '今日话题采集次数已达上限，请明天再试。' if gate == 'daily_limit' else '未到下一次话题请求时间，请稍后重试。'
+                raise HubError(gate, message, 429)
             result = await asyncio.to_thread(self.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT)
             return record_topic_result(self.store, job, result)
+        finally:
+            self._topic_lock.release()
 
     async def run_topic_round(self):
         """One serial round. Disabled unless INDEX_HUB_TOPIC_ENABLED is exactly 1."""
@@ -1035,7 +1055,7 @@ def mount(app, hub):
         if key in hub._topic_inflight:
             return reply({'status': 'in_flight', 'item_count': 0, 'fields': [], 'rank': rank,
                           'category': category, 'live_request': False})
-        stored = s.latest_topics(rank=rank, window='1d', category=category)
+        stored = apply_empty_mark(s, s.latest_topics(rank=rank, window='1d', category=category))
         if snapshot_is_fresh(stored, now):
             return reply({'status': 'cached', 'item_count': len(stored['items']), 'fields': [],
                           'rank': rank, 'category': category, 'live_request': False})
@@ -1048,7 +1068,7 @@ def mount(app, hub):
                'tag_name': category}
         hub._topic_inflight.add(key)
         try:
-            result = await hub.topic_request(job)
+            result = await hub.topic_request(job, wait=True)
         finally:
             hub._topic_inflight.discard(key)
         status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')

@@ -144,7 +144,7 @@ $('#queryPlatform').onchange=()=>{const p=platformInfo($('#queryPlatform').value
 function paintTopicRank(){$('#topicRankTotal').className='btn '+(topicRank==='total'?'secondary':'light');$('#topicRankRising').className='btn '+(topicRank==='rising'?'secondary':'light');$('#topicRankTotal').setAttribute('aria-pressed',String(topicRank==='total'));$('#topicRankRising').setAttribute('aria-pressed',String(topicRank==='rising'))}
 function topicTitle(item){const cover=typeof item.cover==='string'&&item.cover.startsWith('https://')?'<img alt="" src="'+esc(item.cover)+'" style="width:36px;height:36px;object-fit:cover;vertical-align:middle;margin-right:8px">':'';return cover+hotText(item.title)}
 function topicFresh(data){const then=Date.parse(data?.fetched_at||'');return Number.isFinite(then)&&Date.now()-then<10*60*1000}
-let topicBusy=false, topicCategories=['全部'], topicCategory='全部', topicListOpen=false, topicQueryOwned=false, topicActive=-1;
+let topicRevision=0, topicCategories=['全部'], topicCategory='全部', topicListOpen=false, topicQueryOwned=false, topicActive=-1;
 /* topic-category-filter */
 function filterTopicCategories(names, query){
  const list=Array.isArray(names)?names.filter(name=>typeof name==='string'):[];
@@ -177,8 +177,10 @@ function paintTopicList(){
  if(active){const top=active.offsetTop, bottom=top+active.offsetHeight;if(top<list.scrollTop)list.scrollTop=top;else if(bottom>list.scrollTop+list.clientHeight)list.scrollTop=bottom-list.clientHeight}
 }
 function closeTopicList(){topicListOpen=false;topicQueryOwned=false;topicActive=-1;$('#topicCategory').value=topicCategory;paintTopicList()}
-function paintTopics(data){const names=data.categories&&data.categories.length?data.categories:['全部'];topicCategories=names;const requested=topicCategory||data.category||'全部';topicCategory=names.includes(requested)?requested:(names.includes(data.category)?data.category:'全部');if(!topicQueryOwned)$('#topicCategory').value=topicCategory;paintTopicList();$('#topicWindow').textContent=data.window_label||'近1天';$('#topicResume').hidden=!data.paused;if(!topicBusy)$('#topicStatus').textContent=(data.status_label||'—')+'。'+(data.fetched_at?'最近快照 '+data.fetched_at+'。':'')+(data.note||'');const items=data.items||[];const empty=data.status==='paused'?'已暂停。恢复后才会再请求，不会自动补抓。':data.status==='not_logged_in'?'未登录。需要在服务器浏览器里打开热点宝并登录。':data.fetched_at?'该垂类暂无话题。':'尚未采集。选择一个具体垂类后会采集这一榜。';$('#topicRows').innerHTML=items.length?items.map(item=>'<tr><td>'+hotText(item.position)+'</td><td>'+topicTitle(item)+'</td><td>'+hotText(item.hot_value)+'</td><td>'+hotText(item.publish_count)+'</td><td>'+hotText(item.play_count)+'</td></tr>').join(''):'<tr><td colspan="5">'+empty+'</td></tr>'}
-async function collectTopicIfNeeded(data){const category=topicCategory||'全部';if(category==='全部'||data.paused||topicFresh(data)||topicBusy)return false;topicBusy=true;$('#topicStatus').textContent='正在采集「'+category+'」的'+(topicRank==='rising'?'飙升':'总榜')+'…';try{const saved=await api('topics/collect-once',{method:'POST',body:{rank:topicRank,category}});if(saved.status&&!['ok','cached','in_flight'].includes(saved.status))toast(saved.message||saved.status)}catch(e){toast(e.message)}finally{topicBusy=false}return true}
+function paintTopics(data){const names=data.categories&&data.categories.length?data.categories:['全部'];topicCategories=names;const requested=topicCategory||data.category||'全部';topicCategory=names.includes(requested)?requested:(names.includes(data.category)?data.category:'全部');if(!topicQueryOwned)$('#topicCategory').value=topicCategory;paintTopicList();$('#topicWindow').textContent=data.window_label||'近1天';$('#topicResume').hidden=!data.paused;$('#topicStatus').textContent=(data.status_label||'—')+'。'+(data.fetched_at?'最近快照 '+data.fetched_at+'。':'')+(data.note||'');const items=data.items||[];const empty=data.status==='paused'?'已暂停。恢复后才会再请求，不会自动补抓。':data.status==='not_logged_in'?'未登录。需要在服务器浏览器里打开热点宝并登录。':data.fetched_at?'该垂类暂无话题。':'尚未采集。选择一个具体垂类后会采集这一榜。';$('#topicRows').innerHTML=items.length&&data.status!=='paused'?items.map(item=>'<tr><td>'+hotText(item.position)+'</td><td>'+topicTitle(item)+'</td><td>'+hotText(item.hot_value)+'</td><td>'+hotText(item.publish_count)+'</td><td>'+hotText(item.play_count)+'</td></tr>').join(''):'<tr><td colspan="5">'+empty+'</td></tr>'}
+function topicMessage(message){$('#topicStatus').textContent=message;$('#topicRows').innerHTML='<tr><td colspan="5">'+esc(message)+'</td></tr>'}
+function topicError(code,message){return ({daily_limit:'今日话题采集次数已达上限，请明天再试。',interval:'采集排队超时，请稍后重试。',paused:'话题采集已暂停，请先恢复。',invalid_params:'垂类参数不被热点宝接受，请刷新垂类后重试。',invalid_parameters:'垂类参数无效，请刷新垂类后重试。',in_flight:'该榜单正在采集中，请稍后刷新。',not_logged_in:'热点宝未登录，请先登录。',verification_required:'热点宝要求验证，采集已暂停。',rate_limited:'热点宝限频，采集已暂停。',access_denied:'热点宝拒绝访问，采集已暂停。',browser_unavailable:'热点宝浏览器尚未就绪。'})[code]||message||'话题采集失败，请稍后重试。'}
+
 let topicLoginState='browser_unavailable', topicLoginTimer=null, topicLoginBusy=false, topicLoginRevision=0;
 async function loadTopicLogin(){
  clearTimeout(topicLoginTimer);
@@ -191,7 +193,24 @@ function clearTopicQr(){$('#topicQrPanel').hidden=true;$('#topicQrImage').remove
 $('#topicQrImage').onerror=()=>{clearTopicQr();$('#topicLoginStatus').textContent='二维码尚未就绪，请稍候。'};
 $('#topicLoginRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{await api('topics/login/refresh',{method:'POST',body:{}});await loadTopicLogin()}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
 $('#topicCategoriesRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{const result=await api('topics/categories/refresh',{method:'POST',body:{}});if(result.status!=='ok')toast(result.status);await loadTopics(false)}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
-async function loadTopics(collect){loadTopicLogin();const data=await api('topics?'+new URLSearchParams({category:topicCategory||'全部',rank:topicRank,window:'1d'}));if(readingInfo())return;paintTopics(data);loadTopicLogin();if(collect&&await collectTopicIfNeeded(data))await loadTopics(false)}
+async function loadTopics(collect){
+ const revision=++topicRevision,category=topicCategory||'全部',rank=topicRank;
+ const current=()=>revision===topicRevision&&chosenSource==='topic'&&category===topicCategory&&rank===topicRank;
+ if(collect&&category!=='全部')topicMessage('采集中… 正在等待「'+category+'」'+(rank==='rising'?'飙升':'总榜')+'。');
+ loadTopicLogin();
+ try{
+  let data=await api('topics?'+new URLSearchParams({category,rank,window:'1d'}));
+  if(!current())return;
+  if(collect&&category!=='全部'&&!data.paused&&!topicFresh(data)){
+   const saved=await api('topics/collect-once',{method:'POST',body:{rank,category}});
+   if(!current())return;
+   if(!['ok','cached'].includes(saved.status)){topicMessage(topicError(saved.status,saved.message));return}
+   data=await api('topics?'+new URLSearchParams({category,rank,window:'1d'}));
+   if(!current())return;
+  }
+  paintTopics(data);loadTopicLogin();
+ }catch(e){if(current())topicMessage(topicError(e.code,e.message));}
+}
 function chooseTopicCategory(name){if(!name||!topicCategories.includes(name))return;topicCategory=name;topicQueryOwned=false;topicListOpen=false;topicActive=-1;$('#topicCategory').value=name;paintTopicList();loadTopics(true).catch(e=>toast(e.message))}
 $('#topicRefresh').onclick=()=>loadTopics(false).catch(e=>toast(e.message));
 $('#topicResume').onclick=()=>api('topics/resume',{method:'POST',body:{}}).then(()=>loadTopics(false)).catch(e=>toast(e.message));

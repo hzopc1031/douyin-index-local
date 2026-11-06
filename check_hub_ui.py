@@ -67,8 +67,15 @@ def run(output=None):
                             data = dict(status='ok', item_count=1, live_request=True)
                         elif request.method == 'POST' and path == 'topics/collect-once':
                             body = request.post_data_json or {}
-                            data = dict(status='ok', item_count=0, fields=[], live_request=True,
-                                        rank=body.get('rank'), category=body.get('category'))
+                            if fixture.get('topic_collect_error'):
+                                code = fixture['topic_collect_error']
+                                if code in ('daily_limit', 'paused', 'interval', 'invalid_parameters'):
+                                    request_route.fulfill(status=429 if code in ('daily_limit', 'interval') else 409, content_type='application/json', body=json.dumps({'error': {'code': code, 'message': 'fixture'}}))
+                                    return
+                                data = dict(status=code)
+                            else:
+                                data = dict(status='ok', item_count=0, fields=[], live_request=True,
+                                            rank=body.get('rank'), category=body.get('category'))
                         elif request.method == 'PUT' and path.startswith('groups/') and path.count('/') == 1:
                             body = request.post_data_json or {}
                             gid = path.split('/', 1)[1]
@@ -518,6 +525,27 @@ def run(output=None):
                 page.locator('#topicCategoriesRefresh').click()
                 page.wait_for_function("document.querySelector('#topicLoginCard').hidden")
                 assert writes[-2:] == [('topics/login/refresh', {}), ('topics/categories/refresh', {})]
+                fixture['topic_login'] = 'logged_in'
+                for code, label in [('daily_limit', '上限'), ('interval', '超时'), ('paused', '暂停'),
+                                    ('invalid_params', '参数'), ('invalid_parameters', '参数')]:
+                    fixture['topic_collect_error'] = code
+                    page.evaluate("chooseTopicCategory('科技')")
+                    page.wait_for_function("label => document.querySelector('#topicStatus').textContent.includes(label)", arg=label)
+                    assert label in page.locator('#topicRows').inner_text()
+                fixture['topic_collect_error'] = None
+                fixture['hold'] = 'topics/collect-once'
+                page.evaluate("chooseTopicCategory('科技')")
+                page.wait_for_function("document.querySelector('#topicRows').textContent.includes('采集中')")
+                page.wait_for_timeout(100)
+                assert held
+                fixture['hold'] = None
+                page.evaluate("chooseTopicCategory('旅行')")
+                page.wait_for_function("document.querySelector('#topicStatus').textContent.includes('尚未采集')")
+                old_route, old_data = held.pop()
+                old_route.fulfill(content_type='application/json', body=json.dumps(dict(status='invalid_params')))
+                page.wait_for_timeout(100)
+                assert page.locator('#topicCategory').input_value() == '旅行'
+                assert '参数' not in page.locator('#topicStatus').inner_text()
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')

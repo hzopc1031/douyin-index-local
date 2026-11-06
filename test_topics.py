@@ -156,6 +156,27 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.status, 400)
         self.assertEqual(calls, [])
 
+    async def test_empty_result_replaces_old_snapshot_and_is_cached(self):
+        self.hub.store.set('topic_categories', [{'id': '11', 'name': '美食'}])
+        self.hub.store.save_topic_snapshot({
+            'complete': True, 'rank': 'total', 'window': '1d', 'category': '美食',
+            'source': 'fixture', 'fetched_at': '2020-01-01T00:00:00+08:00',
+            'items': [{'title': '旧榜', 'position': 1}]})
+        calls = []
+        def bridge(*_args):
+            calls.append(True)
+            return {'ok': True, 'requested': True, 'items': [], 'item_count': 0}
+        self.hub.bridge = bridge
+        admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(),
+                 'X-Hub-Request': '1'}
+        body = {'rank': 'total', 'category': '美食'}
+        self.assertEqual((await (await self.client.post('/api/v1/topics/collect-once', headers=admin, json=body)).json())['status'], 'ok')
+        view = await (await self.client.get('/api/v1/topics?category=美食', headers=self.reader)).json()
+        self.assertEqual(view['items'], [])
+        self.assertEqual(view['status_label'], '该垂类暂无话题')
+        self.assertEqual((await (await self.client.post('/api/v1/topics/collect-once', headers=admin, json=body)).json())['status'], 'cached')
+        self.assertEqual(len(calls), 1)
+
 class TopicLoginTests(unittest.TestCase):
     def test_page_state_and_expired_qr_do_not_read_cookies(self):
         from app import Api
@@ -218,6 +239,27 @@ class TopicLoginApiTests(ApiTests):
         self.assertEqual((await self.client.post('/api/v1/topics/categories/refresh', headers=admin, json={})).status, 409)
 
 class TopicRequestConcurrencyTests(ApiTests):
+    async def test_collect_waits_and_serializes_then_enforces_daily_limit(self):
+        import time
+        calls = []
+        def bridge(_command, payload, _timeout):
+            calls.append((payload['action'], time.monotonic()))
+            return {'ok': True, 'requested': True, 'items': [], 'item_count': 0}
+        self.hub.bridge = bridge
+        with patch('hub_web.MIN_GAP_SECONDS', 0.05), patch('topic_fetch.MIN_GAP_SECONDS', 0.05):
+            await asyncio.gather(self.hub.topic_request({'action': 'tags'}, wait=True),
+                                 self.hub.topic_request({'action': 'board', 'rank': 'total', 'tag_name': '美食'}, wait=True))
+        self.assertEqual([x[0] for x in calls], ['tags', 'board'])
+        self.assertGreaterEqual(calls[1][1] - calls[0][1], 0.045)
+        from topic_fetch import DAILY_LIMIT
+        counter = self.hub._topic_daily(time.time())
+        self.hub.store.set('topic_daily', {'date': counter['date'], 'count': DAILY_LIMIT})
+        with self.assertRaises(HubError) as error:
+            await self.hub.topic_request({'action': 'tags'}, wait=True)
+        self.assertEqual(error.exception.code, 'daily_limit')
+        self.assertIn('上限', str(error.exception))
+        self.assertEqual(len(calls), 2)
+
     async def test_concurrent_tags_and_board_share_gate(self):
         import threading
         started, release = threading.Event(), threading.Event()
