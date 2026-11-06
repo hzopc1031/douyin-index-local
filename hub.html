@@ -189,7 +189,7 @@ async function loadTopicLogin(){
 }
 $('#topicLoginRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{await api('topics/login/refresh',{method:'POST',body:{}});await loadTopicLogin()}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
 $('#topicCategoriesRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{const result=await api('topics/categories/refresh',{method:'POST',body:{}});if(result.status!=='ok')toast(result.status);await loadTopics(false)}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
-async function loadTopics(collect){const data=await api('topics?'+new URLSearchParams({category:topicCategory||'全部',rank:topicRank,window:'1d'}));if(readingInfo())return;paintTopics(data);loadTopicLogin();if(collect&&await collectTopicIfNeeded(data))await loadTopics(false)}
+async function loadTopics(collect){loadTopicLogin();const data=await api('topics?'+new URLSearchParams({category:topicCategory||'全部',rank:topicRank,window:'1d'}));if(readingInfo())return;paintTopics(data);loadTopicLogin();if(collect&&await collectTopicIfNeeded(data))await loadTopics(false)}
 function chooseTopicCategory(name){if(!name||!topicCategories.includes(name))return;topicCategory=name;topicQueryOwned=false;topicListOpen=false;topicActive=-1;$('#topicCategory').value=name;paintTopicList();loadTopics(true).catch(e=>toast(e.message))}
 $('#topicRefresh').onclick=()=>loadTopics(false).catch(e=>toast(e.message));
 $('#topicResume').onclick=()=>api('topics/resume',{method:'POST',body:{}}).then(()=>loadTopics(false)).catch(e=>toast(e.message));

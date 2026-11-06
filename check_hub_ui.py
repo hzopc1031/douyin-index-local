@@ -115,9 +115,12 @@ def run(output=None):
                     elif path == 'topics/login':
                         data = dict(state=fixture['topic_login'], qr_available=fixture['topic_login']=='need_scan')
                     elif path == 'topics/login/qr':
-                        request_route.fulfill(content_type='image/png', body=b'\x89PNG\r\n\x1a\n')
+                        request_route.fulfill(content_type='image/png', body=(ROOT/'tests/fixtures/topic-qr-synthetic.png').read_bytes())
                         return
                     elif path == 'topics':
+                        if fixture.get('topic_error'):
+                            request_route.fulfill(status=503, content_type='application/json', body='{}')
+                            return
                         data = dict(status='available', status_label='尚未采集', window='1d', window_label='近1天',
                                     rank=query.get('rank', ['total'])[0],
                                     rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
@@ -476,13 +479,23 @@ def run(output=None):
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
                 assert len(writes)==7, writes
-                fixture.update(topic_login='need_scan', topic_categories=False)
+                fixture.update(topic_login='need_scan', topic_categories=False, topic_error=True)
                 page.locator('[data-source=topic]').click()
-                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden")
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
                 assert page.locator('#topicLoginCard').is_visible()
                 assert '/api/v1/topics/login/qr?' in page.locator('#topicQrDownload').get_attribute('href')
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'H46-after.png'), full_page=True)
+                fixture['topic_error'] = False
+                page.evaluate("""async () => {
+                    const original = readingInfo;
+                    readingInfo = () => true;
+                    document.querySelector('#topicQrPanel').hidden = true;
+                    try { await loadTopics(false); } finally { readingInfo = original; }
+                }""")
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
                 page.locator('#topicLoginRefresh').click()
-                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden")
+                page.wait_for_function("!topicLoginBusy && document.querySelector('#topicQrImage').naturalWidth > 0")
                 page.locator('#topicCategoriesRefresh').click()
                 page.wait_for_function("document.querySelector('#topicLoginCard').hidden")
                 assert writes[-2:] == [('topics/login/refresh', {}), ('topics/categories/refresh', {})]
