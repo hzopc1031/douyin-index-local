@@ -1,6 +1,7 @@
-"""Offline QR extraction tests; the optional user samples remain outside the repository."""
+"""Offline QR extraction tests."""
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     import cv2
@@ -34,3 +35,26 @@ class FrameQrTests(unittest.TestCase):
         self.assertGreaterEqual(min(enlarged.shape[:2]), 600)
         self.assertTrue(cv2.QRCodeDetector().detectAndDecode(enlarged)[0])
         self.assertIsNone(extract_frame_qr(expired.read_bytes()))
+
+    def test_live_frames(self):
+        root = Path(__file__).parent / 'tests' / 'fixtures'
+        valid = (root / 'H44-live-frame.png').read_bytes()
+        expired = (root / 'H44-live-expired.png').read_bytes()
+        for fallback in (False, True):
+            with self.subTest(finder_fallback=fallback):
+                if fallback:
+                    detector = unittest.mock.Mock()
+                    detector.detect.return_value = (False, None)
+                    detector.detectAndDecode.return_value = ('', None, None)
+                    patches = (patch.object(cv2, 'QRCodeDetectorAruco', return_value=detector),
+                               patch.object(cv2, 'QRCodeDetector', return_value=detector))
+                    with patches[0], patches[1]:
+                        result = extract_frame_qr(valid)
+                        self.assertIsNone(extract_frame_qr(expired))
+                else:
+                    result = extract_frame_qr(valid)
+                    self.assertIsNone(extract_frame_qr(expired))
+                self.assertIsNotNone(result)
+                enlarged = cv2.imdecode(np.frombuffer(result, np.uint8), cv2.IMREAD_COLOR)
+                self.assertGreaterEqual(min(enlarged.shape[:2]), 600)
+                self.assertTrue(cv2.QRCodeDetectorAruco().detect(enlarged)[0])

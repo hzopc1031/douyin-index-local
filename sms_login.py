@@ -143,13 +143,59 @@ def extract_frame_qr(png):
         image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             return None
-        image = cv2.resize(image, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        content, points, _ = cv2.QRCodeDetectorAruco().detectAndDecode(image)
-        if not content or points is None:
-            return None
-        x, y, width, height = cv2.boundingRect(points)
+        points = None
+        for scale in (1, 2):
+            candidate = image if scale == 1 else cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+            for factory in (getattr(cv2, 'QRCodeDetectorAruco', None), cv2.QRCodeDetector):
+                if factory is not None:
+                    found, corners = factory().detect(candidate)
+                    if found and corners is not None:
+                        points = corners / scale
+                        break
+            if points is not None:
+                break
+        if points is None:
+            candidate = cv2.resize(image, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            detector = getattr(cv2, 'QRCodeDetectorAruco', None)
+            if detector is not None:
+                content, corners, _ = detector().detectAndDecode(candidate)
+                if content and corners is not None:
+                    image, points = candidate, corners
+        if points is not None:
+            x, y, width, height = cv2.boundingRect(points)
+        else:
+            # shortcut: axis-aligned finder patterns only, upgrade if rotated frames occur.
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+            contours, hierarchy = cv2.findContours(binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            finders = []
+            for i, contour in enumerate(contours):
+                x, y, w, h = cv2.boundingRect(contour)
+                child = hierarchy[0][i][2]
+                if 7 <= w <= 100 and .8 <= w / h <= 1.25 and child >= 0 and hierarchy[0][child][2] >= 0:
+                    finders.append((x, y, w, h))
+            box = None
+            for x, y, w, h in finders:
+                for rx, ry, rw, rh in finders:
+                    if rx <= x + 3*w or abs(ry-y) > h or not all(.7 <= size/w <= 1.3 for size in (rw, rh)):
+                        continue
+                    for bx, by, bw, bh in finders:
+                        if (by > y + 3*h and abs(bx-x) <= w
+                                and .8 <= (rx-x)/(by-y) <= 1.25
+                                and all(.7 <= size/w <= 1.3 for size in (bw, bh))):
+                            left, top = max(0, x-2), max(0, y-2)
+                            box = (left, top, min(image.shape[1], rx+rw+2)-left,
+                                   min(image.shape[0], by+bh+2)-top)
+                            break
+                    if box:
+                        break
+                if box:
+                    break
+            if box is None:
+                return None
+            x, y, width, height = box
         crop = image[y:y+height, x:x+width]
-        border = max(10, round(max(width, height) / 80) * 10)
+        border = max(10, math.ceil(max(width, height) * .05))
         crop = cv2.copyMakeBorder(crop, border, border, border, border, cv2.BORDER_CONSTANT, value=(255, 255, 255))
         scale = max(1, math.ceil(600 / min(crop.shape[:2])))
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
