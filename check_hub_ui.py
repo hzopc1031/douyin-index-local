@@ -41,7 +41,7 @@ def run(output=None):
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
                 errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None,
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None, 'topic_login': 'logged_in', 'topic_categories': True,
                            'groups': [dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])]}
 
                 def route(request_route):
@@ -60,6 +60,11 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif path == 'topics/login/refresh':
+                            data = dict(state='need_scan', qr_available=True)
+                        elif path == 'topics/categories/refresh':
+                            fixture['topic_login'], fixture['topic_categories'] = 'logged_in', True
+                            data = dict(status='ok', item_count=1, live_request=True)
                         elif request.method == 'POST' and path == 'topics/collect-once':
                             body = request.post_data_json or {}
                             data = dict(status='ok', item_count=0, fields=[], live_request=True,
@@ -107,12 +112,17 @@ def run(output=None):
                                                       dict(keyword=words[-1], status='未上榜', ratio=None)],
                                              substring_hits=[dict(keyword=words[-1], word=words[-1] + '醋鱼')]),
                                     fusion=dict(score=None))
+                    elif path == 'topics/login':
+                        data = dict(state=fixture['topic_login'], qr_available=fixture['topic_login']=='need_scan')
+                    elif path == 'topics/login/qr':
+                        request_route.fulfill(content_type='image/png', body=b'\x89PNG\r\n\x1a\n')
+                        return
                     elif path == 'topics':
                         data = dict(status='available', status_label='尚未采集', window='1d', window_label='近1天',
                                     rank=query.get('rank', ['total'])[0],
                                     rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
                                     category=query.get('category', ['全部'])[0],
-                                    categories=['全部', '美食', '旅行', '科技', '科技科普', '科技产品'], items=[], fetched_at=None,
+                                    categories=(['全部', '美食', '旅行', '科技', '科技科普', '科技产品'] if fixture['topic_categories'] else ['全部']), items=[], fetched_at=None,
                                     live_request=False, note='热点宝话题不是搜索指数，待联调，不伪造话题。')
                     elif path == 'hot/rising':
                         data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
@@ -466,6 +476,16 @@ def run(output=None):
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
                 assert len(writes)==7, writes
+                fixture.update(topic_login='need_scan', topic_categories=False)
+                page.locator('[data-source=topic]').click()
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden")
+                assert page.locator('#topicLoginCard').is_visible()
+                assert '/api/v1/topics/login/qr?' in page.locator('#topicQrDownload').get_attribute('href')
+                page.locator('#topicLoginRefresh').click()
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden")
+                page.locator('#topicCategoriesRefresh').click()
+                page.wait_for_function("document.querySelector('#topicLoginCard').hidden")
+                assert writes[-2:] == [('topics/login/refresh', {}), ('topics/categories/refresh', {})]
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
