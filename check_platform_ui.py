@@ -24,7 +24,7 @@ with sync_playwright() as pw:
                 'counts': {'keywords': 1, 'points': 1}, 'daily_online_attempts': 0,
                 'limits': {'online_attempts_per_day': 50}, 'cooldown_remaining_seconds': 0, 'paused': None},
             'history': {'datasets': [{'metadata': META, 'fetched': 1}], 'latest_available_date': '2026-10-31'},
-            'jobs': {'jobs': []}, 'keys': {'keys': []},
+            'jobs': {'jobs': []}, 'keys': {'keys': []}, 'groups': {'groups': [], 'live_request': False},
             'series': {'platform': 'synthetic', 'keyword': '杭州', 'points': [{'date': '2026-10-31', 'value': 42}]},
             'insights/ranges': {'ranges': [], 'attempts': []},
             'insights': {'status': 'empty'},
@@ -40,10 +40,10 @@ with sync_playwright() as pw:
         r.fulfill(content_type='application/json', body=json.dumps(data))
     page.route('**/*', route)
     page.goto('http://hub-ui.invalid/')
-    page.locator('[data-platform="synthetic"]').click()
+    page.locator('#platformChips [data-platform="synthetic"]').click()
     page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('合成指数')")
-    assert page.locator('#resultTab-related').is_hidden()
-    assert page.locator('#resultTab-audience').is_hidden()
+    assert page.locator('#resultTab-related').is_visible()
+    assert page.locator('#resultTab-audience').is_visible()
     assert '合成来源' in page.locator('#chartMeta').inner_text()
     assert held
     held[0].fulfill(content_type='application/json', body=json.dumps({'platform': 'douyin', 'keyword': '杭州', 'points': [{'date': '2026-10-31', 'value': 999, 'composite_index': 1}]}))
@@ -55,7 +55,9 @@ with sync_playwright() as pw:
     page.locator('#queryWords').fill('杭州')
     page.locator('#submitButton').click()
     page.wait_for_function("!document.querySelector('#queryDialog').open")
-    assert writes and writes[0][0] == 'queries' and writes[0][1]['platform'] == 'synthetic'
-    assert all(name != 'insights/queries' for name, _ in writes)
+    page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
+    assert [name for name, _ in writes] == ['queries', 'insights/queries', 'insights/queries'], writes
+    assert all(body['platform'] == 'synthetic' for _, body in writes)
+    assert [body.get('kind') for _, body in writes[1:]] == ['related', 'audience']
     browser.close()
 print('Synthetic second-platform UI passed')

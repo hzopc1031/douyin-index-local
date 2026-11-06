@@ -51,6 +51,7 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata={**META, 'keywords':['酵素','akg']}, fetched=1793498400)], latest_available_date=END)
                     elif path == 'jobs': data = dict(jobs=fixture['jobs'])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'groups': data = dict(groups=[], live_request=False)
                     elif path == 'series': data = dict(points=[])
                     elif path == 'insights/ranges':
                         if fixture['legacy'] or fixture['range_error']:
@@ -194,7 +195,7 @@ def run(output=None):
                 fixture['jobs'][0].update(status='no_data', error=dict(code='skipped_trend_no_data'))
                 page.evaluate("async range => {$('#insightStart').value=range.start_date;$('#insightEnd').value=range.end_date;await refresh()}", dict(start_date=START, end_date=END))
                 assert page.locator('#audienceData h3').inner_text().removesuffix('ⓘ').strip() == '趋势无数据已跳过'
-                page.locator('[data-platform=baidu]').click()
+                page.locator('#platformChips [data-platform=baidu]').click()
                 assert page.locator('#audienceRanges').inner_text() == ''
                 assert '尚未接入' in page.locator('#audienceData').inner_text()
                 assert not errors, errors

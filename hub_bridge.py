@@ -139,7 +139,7 @@ def start_bridge(api):
                 message = json.loads(raw)
                 requested = message.get('command')
                 command = requested if isinstance(requested, str) and (requested in SMS_COMMANDS or requested in
-                    ('status', 'insight', 'query', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel')) else 'unknown'
+                    ('status', 'insight', 'query', 'topic', 'qr_start', 'qr_status', 'qr_image', 'qr_cancel')) else 'unknown'
                 from platforms import registry
                 platform_adapter = next((registry.get(p['id']) for p in registry.descriptions()
                                          if p['available'] and requested in getattr(registry.get(p['id']), 'bridge_commands', ())), None)
@@ -157,6 +157,8 @@ def start_bridge(api):
                     from platforms import require_platform
                     query = validate_insight(message.get('payload'))
                     answer = require_platform(query['platform']).collect_insight(api, message.get('payload'))
+                elif message.get('command') == 'topic':
+                    answer = api.topic_fetch(message.get('payload'))
                 elif message.get('command') == 'query':
                     from hub_store import validate_query
                     query = validate_query(message.get('payload'))
