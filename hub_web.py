@@ -152,6 +152,7 @@ class Hub:
         self.hotlist_task = None
         self.topic_task = None
         self._topic_inflight = set()
+        self._topic_lock = asyncio.Lock()
         self.hot_client_factory = HotListClient
 
     def _sms_pause(self, snapshot):
@@ -421,6 +422,17 @@ class Hub:
             counter = {'date': day, 'count': 0}
         return counter
 
+    async def topic_request(self, job):
+        async with self._topic_lock:
+            if self.store.get('topic_paused'):
+                raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
+            now = time.time()
+            gate = request_gate(now, self.store.get('topic_request_at'), int(self._topic_daily(now).get('count') or 0))
+            if gate != 'ok':
+                raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
+            result = await asyncio.to_thread(self.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT)
+            return record_topic_result(self.store, job, result)
+
     async def run_topic_round(self):
         """One serial round. Disabled unless INDEX_HUB_TOPIC_ENABLED is exactly 1."""
         if not topic_enabled() or self.store.get('topic_paused'):
@@ -445,13 +457,15 @@ class Hub:
                 wait = MIN_GAP_SECONDS - (now - self.store.get('topic_request_at'))
                 if wait > 0:
                     await asyncio.sleep(wait)
-            result = await asyncio.to_thread(self.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT)
+            try:
+                result = await self.topic_request(job)
+            except HubError as exc:
+                return {'ok': False, 'code': exc.code}
             if result.get('code') == 'busy':
                 if not started:
                     return {'ok': False, 'code': 'busy'}
                 break
             started = True
-            record_topic_result(self.store, job, result)
             if not result.get('ok'):
                 if not self.store.get('topic_round_at'):
                     self.store.set('topic_round_at', time.time())
@@ -607,6 +621,13 @@ def openapi():
                 'parameters': [{'in': 'query', 'name': name, 'required': False, 'schema': {'type': 'string'}}
                                for name in ('category', 'rank', 'window')],
                 'responses': {'200': {'description': '成功；items 可为空'}, '400': error, '401': error, '403': error}}}
+    for path, method, summary in (
+        ('/api/v1/topics/login', 'get', '热点宝登录状态'),
+        ('/api/v1/topics/login/qr', 'get', '放大的热点宝登录二维码 PNG'),
+        ('/api/v1/topics/login/refresh', 'post', '打开或刷新热点宝授权页'),
+        ('/api/v1/topics/categories/refresh', 'post', '请求一次热点宝垂类，受间隔、每日上限和暂停限制')):
+        paths[path] = {method: {'summary': summary + '（仅管理员）',
+                               'responses': {'200': {'description': '成功'}, '403': error, '409': error, '429': error, '503': error}}}
     paths['/api/v1/topics/collect-once'] = {'post': {
         'summary': '管理员通过现有浏览器会话打一次话题请求。不重试。',
         'responses': {'200': {'description': '状态、条数和字段名'}, '401': error, '403': error, '409': error, '429': error}}}
@@ -1020,10 +1041,6 @@ def mount(app, hub):
                           'rank': rank, 'category': category, 'live_request': False})
         if s.get('topic_paused'):
             raise HubError('paused', '话题采集已暂停，请先恢复。', 409)
-        counter = s.get('topic_daily') or {'date': dt.datetime.now(TZ).date().isoformat(), 'count': 0}
-        gate = request_gate(now, s.get('topic_request_at'), int(counter.get('count') or 0))
-        if gate != 'ok':
-            raise HubError(gate, '未到下一次话题请求时间或已达每日上限。', 429)
         found = tag_for(s, category)
         job = {'action': 'board', 'rank': rank, 'tag_id': '' if found is None else str(found['id']),
                'parent_id': '' if found is None else str(found.get('parent_id') or ''),
@@ -1031,8 +1048,7 @@ def mount(app, hub):
                'tag_name': category}
         hub._topic_inflight.add(key)
         try:
-            result = record_topic_result(s, job, await asyncio.to_thread(
-                hub.bridge, 'topic', job, hub_bridge.BRIDGE_TIMEOUT))
+            result = await hub.topic_request(job)
         finally:
             hub._topic_inflight.discard(key)
         status = 'ok' if result.get('ok') else (result.get('code') or 'browser_unavailable')
@@ -1041,6 +1057,39 @@ def mount(app, hub):
                       'fields': result.get('fields') or [], 'rank': rank, 'category': category,
                       'message': messages.get(status),
                       'live_request': bool(result.get('requested'))})
+
+    async def topic_login(request):
+        require(request, admin=True)
+        action = request.match_info.get('action', 'status')
+        if request.method == 'POST' and await read_json(request) != {}:
+            raise HubError('invalid_parameters', '请求体必须为空对象。')
+        try:
+            result = await asyncio.to_thread(hub.bridge, 'topic_login', action, hub_bridge.BRIDGE_TIMEOUT)
+            state = result.get('state')
+            if state not in ('logged_in', 'need_scan', 'browser_unavailable'):
+                state = 'browser_unavailable'
+            available = state == 'need_scan' and result.get('qr_available') is True
+            if action == 'qr':
+                encoded = result.get('png_base64', '')
+                if not available or not isinstance(encoded, str) or len(encoded) > FRAME_BASE64_LIMIT:
+                    raise ValueError
+                png = base64.b64decode(encoded, validate=True)
+                if not png.startswith(b'\x89PNG\r\n\x1a\n'):
+                    raise ValueError
+                return web.Response(body=png, content_type='image/png', headers={'Cache-Control': 'no-store'})
+            return web.json_response({'state': state, 'qr_available': available}, headers={'Cache-Control': 'no-store'})
+        except Exception:
+            if action == 'qr':
+                raise HubError('browser_unavailable', '二维码尚未就绪。', 503) from None
+            return web.json_response({'state': 'browser_unavailable', 'qr_available': False}, headers={'Cache-Control': 'no-store'})
+
+    async def topic_categories_refresh(request):
+        require(request, admin=True)
+        if await read_json(request) != {}:
+            raise HubError('invalid_parameters', '请求体必须为空对象。')
+        result = await hub.topic_request({'action': 'tags'})
+        return reply({'status': 'ok' if result.get('ok') else result.get('code', 'browser_unavailable'),
+                      'item_count': result.get('item_count') or 0, 'live_request': bool(result.get('requested'))})
 
     async def topic_resume(request):
         require(request, admin=True)
@@ -1091,6 +1140,10 @@ def mount(app, hub):
     app.router.add_put('/api/v1/groups/{id}', group_update)
     app.router.add_delete('/api/v1/groups/{id}', group_delete)
     app.router.add_get('/api/v1/groups/{id}/score', group_score_view)
+    app.router.add_get('/api/v1/topics/login', topic_login)
+    app.router.add_get('/api/v1/topics/login/{action:qr}', topic_login)
+    app.router.add_post('/api/v1/topics/login/{action:refresh}', topic_login)
+    app.router.add_post('/api/v1/topics/categories/refresh', topic_categories_refresh)
     app.router.add_get('/api/v1/topics', topics)
     app.router.add_post('/api/v1/topics/collect-once', topic_once)
     app.router.add_post('/api/v1/topics/resume', topic_resume)

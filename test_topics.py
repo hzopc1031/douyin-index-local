@@ -155,3 +155,78 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                                          json={'rank': 'total', 'category': '全部'})
         self.assertEqual(refused.status, 400)
         self.assertEqual(calls, [])
+
+class TopicLoginTests(unittest.TestCase):
+    def test_page_state_and_expired_qr_do_not_read_cookies(self):
+        from app import Api
+        from types import SimpleNamespace
+        import threading
+        api = Api.__new__(Api)
+        api._lock = threading.Lock()
+        class Window:
+            native = SimpleNamespace(webview=object())
+            url = 'https://open.douyin.com/authorize'
+            text = '使用抖音账号登录 生活服务热点中心 二维码失效'
+            def get_current_url(self): return self.url
+            def evaluate_js(self, _script): return json.dumps({'ready': 'complete', 'text': self.text})
+            def get_cookies(self): raise AssertionError('cookie access')
+        window = Window()
+        api._topic_window = lambda: window
+        self.assertEqual(api.topic_login('status'), {'state': 'need_scan', 'qr_available': False})
+        window.url, window.text = 'https://douhot.douyin.com/', '热点宝 首页'
+        self.assertEqual(api.topic_login('status')['state'], 'logged_in')
+        window.url = 'https://evil.example/'
+        self.assertEqual(api.topic_login('status')['state'], 'browser_unavailable')
+
+
+class TopicLoginApiTests(ApiTests):
+    async def test_login_and_categories_guards_and_redaction(self):
+        admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(),
+                 'X-Hub-Request': '1'}
+        calls = []
+        def bridge(command, payload, timeout):
+            calls.append((command, payload))
+            if command == 'topic_login':
+                return {'state': 'need_scan', 'qr_available': True, 'cookie': 'secret-fixture',
+                        'png_base64': base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()}
+            return {'ok': True, 'requested': True, 'tags': [{'id': '11', 'name': '美食'}], 'item_count': 1,
+                    'cookie': 'secret-fixture'}
+        self.hub.bridge = bridge
+        self.assertEqual((await self.client.get('/api/v1/topics/login', headers=self.reader)).status, 403)
+        response = await self.client.get('/api/v1/topics/login', headers=admin)
+        self.assertEqual(await response.json(), {'state': 'need_scan', 'qr_available': True})
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        qr = await self.client.get('/api/v1/topics/login/qr', headers=admin)
+        self.assertEqual(await qr.read(), b'\x89PNG\r\n\x1a\nfixture')
+        no_csrf = dict(admin); no_csrf.pop('X-Hub-Request')
+        self.assertEqual((await self.client.post('/api/v1/topics/login/refresh', headers=no_csrf, json={})).status, 403)
+        self.assertEqual((await self.client.post('/api/v1/topics/login/refresh', headers=admin, json={})).status, 200)
+        result = await self.client.post('/api/v1/topics/categories/refresh', headers=admin, json={})
+        self.assertEqual((await result.json())['status'], 'ok')
+        self.assertEqual(self.hub.store.get('topic_categories')[0]['name'], '美食')
+        self.assertNotIn('secret-fixture', json.dumps(self.hub.store.get('topic_categories')))
+        self.assertEqual((await self.client.post('/api/v1/topics/categories/refresh', headers=admin, json={})).status, 429)
+        self.assertEqual(sum(command == 'topic' for command, _ in calls), 1)
+        self.hub.store.set('topic_paused', {'code': 'not_logged_in'})
+        self.assertEqual((await self.client.post('/api/v1/topics/categories/refresh', headers=admin, json={})).status, 409)
+
+class TopicRequestConcurrencyTests(ApiTests):
+    async def test_concurrent_tags_and_board_share_gate(self):
+        import threading
+        started, release = threading.Event(), threading.Event()
+        calls = []
+        def bridge(command, payload, timeout):
+            calls.append(payload['action'])
+            started.set()
+            release.wait(2)
+            return {'ok': True, 'requested': True, 'tags': [], 'item_count': 0}
+        self.hub.bridge = bridge
+        first = asyncio.create_task(self.hub.topic_request({'action': 'tags'}))
+        self.assertTrue(await asyncio.to_thread(started.wait, 2))
+        second = asyncio.create_task(self.hub.topic_request({'action': 'board'}))
+        release.set()
+        self.assertTrue((await first)['ok'])
+        with self.assertRaises(HubError) as error:
+            await second
+        self.assertEqual(error.exception.code, 'interval')
+        self.assertEqual(calls, ['tags'])

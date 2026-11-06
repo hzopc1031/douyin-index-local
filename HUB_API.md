@@ -337,3 +337,5 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 百度已存趋势和 CSV 导出支持 `device=all|pc|wise`，默认 `all`；抖音忽略此参数。设备筛选只读取已存数据，不发起采集。
 
 百度关联需求支持 `kind=related`，按 `end_date` 获取需求图谱单日快照；`GET /api/v1/insights` 与 `/api/v1/insights/ranges` 可用 `platform=baidu` 读取，省略平台默认为抖音。百度画像尚不支持。
+
+热点宝登录与垂类刷新接口仅限管理员 Basic 认证，POST 须带 `X-Hub-Request: 1`、同源 Origin（如提供）及空 JSON 对象。`GET /api/v1/topics/login` 返回 `state`（`logged_in`、`need_scan`、`browser_unavailable`）和 `qr_available`；`GET /api/v1/topics/login/qr` 返回窗口中检测到的放大二维码 PNG，尚未就绪返回 503，均禁止缓存。`POST /api/v1/topics/login/refresh` 打开或重新加载授权页。登录状态根据页面判断，实际登录以垂类请求结果为准；不读取或返回 Cookie。`POST /api/v1/topics/categories/refresh` 发起一次 tags 请求，与话题采集共用 15 秒间隔、上海日 30 次上限和异常暂停；暂停后须人工恢复，不自动重试。返回状态、条数和是否实际发出请求。

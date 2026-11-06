@@ -111,7 +111,52 @@ class Api:
         window = webview.create_window('热点宝', 'https://douhot.douyin.com/',
                                        width=1000, height=800, x=30, y=30, text_select=True)
         self._douhot = window
+        def closed():
+            if getattr(self, '_douhot', None) is window:
+                self._douhot = None
+        window.events.closed += closed
         return window
+
+    def topic_login(self, action):
+        """Observe only the hotspot window; never inspect its session."""
+        import base64
+        from login_driver import QtDispatcher
+        from sms_login import extract_frame_qr
+        if not self._lock.acquire(blocking=False):
+            return {'state': 'browser_unavailable', 'qr_available': False}
+        try:
+            window = self._topic_window()
+            if action == 'refresh':
+                window.load_url('https://douhot.douyin.com/')
+            view = getattr(getattr(window, 'native', None), 'webview', None)
+            if view is None:
+                return {'state': 'browser_unavailable', 'qr_available': False}
+            url = urlsplit(window.get_current_url() or '')
+            if url.scheme != 'https' or url.hostname not in ('douhot.douyin.com', 'open.douyin.com', 'www.douyin.com') or url.port not in (None, 443) or url.username or url.password:
+                return {'state': 'browser_unavailable', 'qr_available': False}
+            page = json.loads(window.evaluate_js("JSON.stringify({ready:document.readyState, text:document.body ? document.body.innerText : ''})"))
+            if page.get('ready') != 'complete' or not page.get('text', '').strip():
+                return {'state': 'browser_unavailable', 'qr_available': False}
+            if '使用抖音账号登录' not in page['text'] and '扫码授权' not in page['text']:
+                return {'state': 'logged_in' if url.hostname == 'douhot.douyin.com' else 'browser_unavailable', 'qr_available': False}
+            if '二维码失效' in page['text']:
+                return {'state': 'need_scan', 'qr_available': False}
+            def capture():
+                from PySide6.QtCore import QBuffer, QIODevice
+                buffer = QBuffer()
+                buffer.open(QIODevice.WriteOnly)
+                if not view.grab().toImage().save(buffer, 'PNG'):
+                    raise ValueError('capture failed')
+                return bytes(buffer.data())
+            qr = extract_frame_qr(QtDispatcher().call(capture))
+            result = {'state': 'need_scan', 'qr_available': bool(qr)}
+            if qr and action == 'qr':
+                result['png_base64'] = base64.b64encode(qr).decode('ascii')
+            return result
+        except Exception:
+            return {'state': 'browser_unavailable', 'qr_available': False}
+        finally:
+            self._lock.release()
 
     def topic_fetch(self, payload):
         """One douhot request inside the page. Never returns cookies."""
