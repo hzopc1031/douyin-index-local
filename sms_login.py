@@ -223,7 +223,8 @@ class SmsLoginSession:
         self.frame = None
         self.frame_id = 0
         self.frame_hash = None
-        self.frame_floor = 0
+        # shortcut: retain five frames, upgrade if network delays routinely exceed this window.
+        self.frames = deque(maxlen=5)
         self.challenge_key = None
         self.challenge_epoch = 0
         self.challenge = {}
@@ -427,10 +428,9 @@ class SmsLoginManager:
 
     @staticmethod
     def _valid_frame(session, frame_id):
-        # Every picture version in the current challenge/layout epoch has the
-        # same transform. Animation does not invalidate a human's gesture.
         return (type(frame_id) is int and session.frame is not None
-                and session.frame_floor <= frame_id <= session.frame_id)
+                and any(fid == frame_id and epoch == session.challenge_epoch
+                        for fid, epoch, _ in session.frames))
 
     def pointer(self, frame_id, kind, points):
         points = validate_points(kind, points)
@@ -852,7 +852,8 @@ class SmsLoginManager:
                         raise DriverError('not_in_verification')
                     if not self._valid_frame(session, frame_id):
                         raise DriverError('stale_frame')
-                    meta = session.frame.metadata
+                    meta = next(meta for fid, epoch, meta in session.frames
+                                if fid == frame_id and epoch == session.challenge_epoch)
                 self._replay(session, kind, points, meta)
                 if kind == 'drag':
                     session.manual_pending = self._clock()+3
@@ -895,7 +896,8 @@ class SmsLoginManager:
                 if session.frame is None or session.frame.metadata != frame.metadata:
                     if session.frame is not None:
                         session.challenge_epoch += 1
-                    session.frame_floor = self._frame_version
+                    session.frames.clear()
                 session.frame_id = self._frame_version
                 session.frame, session.frame_hash = frame, digest
+                session.frames.append((session.frame_id, session.challenge_epoch, frame.metadata))
             session.next_frame = self._clock()+.7

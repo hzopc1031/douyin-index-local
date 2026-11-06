@@ -9,7 +9,7 @@ function fixture(){
  const $=id=>nodes[id]??=(function(){let src='';const node={hidden:false,disabled:false,value:'',textContent:'',style:{},captured:null,getBoundingClientRect:()=>({left:10,top:20,width:200,height:100}),setPointerCapture(id){this.captured=id},hasPointerCapture(id){return this.captured===id},releasePointerCapture(){this.captured=null},getAttribute(key){return key==='src'?src:null},removeAttribute(key){if(key==='src')src=''}};Object.defineProperty(node,'src',{get:()=>src,set:value=>{src=value;queueMicrotask(()=>node.onload?.())}});return node})();
  const state={state:'idle',phone:'',resend_in:0,attempts_left:0,frame_id:0,challenge_epoch:0,verification_mode:null,message:'尚未开始短信登录'};
  const f={$,calls,timers,revoked,notices,state,error:null,frameError:null};
- const ctx=vm.createContext({$,Math,URL:{createObjectURL(){return 'blob:synthetic-'+(++blobs)},revokeObjectURL(url){revoked.push(url)}},
+ const ctx=vm.createContext({$,Math,Image:class{set src(value){if(f.preview)f.preview(this);else queueMicrotask(()=>this.onload())}},URL:{createObjectURL(){return 'blob:synthetic-'+(++blobs)},revokeObjectURL(url){revoked.push(url)}},
    setTimeout(fn,delay){const id=++serial;timers.set(id,{fn,delay});return id},clearTimeout(id){timers.delete(id)},
    localStorage:{setItem(){throw Error('storage write')}},sessionStorage:{setItem(){throw Error('storage write')}},
    toast(message){notices.push(message)},openDesktop(){f.desktop=true},
@@ -248,6 +248,13 @@ test('animation freezes displayed frame through gesture, epoch changes cancel',a
  await f.render({frame_id:2});assert.equal(image.src,src);image.onpointermove(f.event(80,30,140));await image.onpointerup(f.event(110,40,180));
  assert.equal(f.calls.find(c=>c.path==='login/sms/pointer').body.frame,1);
  image.onpointerdown(f.event(10,20,200));await f.render({frame_id:3,challenge_epoch:2});assert.equal(f.run('smsGesture'),null);
+});
+test('loading keeps the visible frame interactive and freezes it during a gesture',async()=>{
+ const f=fixture();await f.manual();const image=f.$('#smsImage'),src=image.src;let preview;
+ f.preview=p=>{preview=p};await f.render({frame_id:2});assert(f.run('smsFrameLoading'));assert(!image.hidden);assert.equal(image.src,src);
+ image.onpointerdown(f.event(10,20,100));preview.onload();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(image.src,src);assert(!f.run('smsFrameLoading'));await image.onpointerup(f.event(10,20,150));
+ assert.equal(f.calls.find(c=>c.path==='login/sms/pointer').body.frame,1);
 });
 test('stale-frame response refreshes and tells user to repeat gesture',async()=>{
  const f=fixture();await f.manual();f.error=Object.assign(Error('stale'),{code:'stale_frame'});const image=f.$('#smsImage');image.onpointerdown(f.event(10,20,0));await image.onpointerup(f.event(10,20,60));

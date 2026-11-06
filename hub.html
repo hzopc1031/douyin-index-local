@@ -401,13 +401,12 @@ async function loadSmsFrame(data,force=false){
   const response=await fetch('/api/v1/login/sms/frame?v='+encodeURIComponent(data.frame_id),{cache:'no-store'});
   if(!response.ok){const error=await response.json();const e=Error(error.error?.message||'截图读取失败');e.code=error.error?.code;throw e}
   url=URL.createObjectURL(await response.blob());
+  await new Promise((resolve,reject)=>{const preview=new Image();preview.onload=resolve;preview.onerror=()=>reject(Error('截图读取失败，请刷新。'));preview.src=url});
   if(request!==smsFrameRequest||smsGesture||!smsManual(smsSnapshot)||smsSnapshot.challenge_epoch!==data.challenge_epoch)return;
-  const image=$('#smsImage');image.hidden=true;
-  image.onload=()=>{if(request!==smsFrameRequest)return;if(smsFrame)URL.revokeObjectURL(smsFrame.url);smsFrame={id:data.frame_id,epoch:data.challenge_epoch,url:image.src};image.hidden=false;smsFrameLoading=false;image.onload=null};
-  image.onerror=()=>{if(request!==smsFrameRequest)return;URL.revokeObjectURL(image.src);image.hidden=true;smsFrameLoading=false;$('#smsVerifyHint').textContent='截图读取失败，请刷新。'};
-  image.src=url;url=null;
- }catch(e){if(request===smsFrameRequest){smsFrameLoading=false;$('#smsVerifyHint').textContent=e.message;if(e.code==='stale_frame')smsTimer=setTimeout(loadSms,200)}}
- finally{if(url)URL.revokeObjectURL(url)}
+  const image=$('#smsImage');if(smsFrame)URL.revokeObjectURL(smsFrame.url);
+  image.src=url;smsFrame={id:data.frame_id,epoch:data.challenge_epoch,url};image.hidden=false;url=null;
+ }catch(e){if(request===smsFrameRequest){$('#smsVerifyHint').textContent=e.message;if(e.code==='stale_frame')smsTimer=setTimeout(loadSms,200)}}
+ finally{if(url)URL.revokeObjectURL(url);if(request===smsFrameRequest)smsFrameLoading=false}
 }
 async function loadSms(){
  if(!smsEnabled||smsLoading)return;if(smsActing||smsCancelling){clearTimeout(smsTimer);smsTimer=setTimeout(loadSms,1000);return}
@@ -437,7 +436,7 @@ $('#smsRefresh').onclick=async()=>{await loadSms();if(smsSnapshot)await loadSmsF
 function smsPoint(event,stamp){const r=$('#smsImage').getBoundingClientRect();return [Math.max(0,Math.min(1,(event.clientX-r.left)/r.width)),Math.max(0,Math.min(1,(event.clientY-r.top)/r.height)),stamp]}
 function smsFeedback(point){const dot=$('#smsFinger');dot.hidden=false;dot.style.left=point[0]*100+'%';dot.style.top=point[1]*100+'%'}
 $('#smsImage').onpointerdown=e=>{
- if(e.isPrimary===false||(e.button!==undefined&&e.button!==0)||smsGesture||smsActing||smsCancelling||smsFrameLoading||!smsFrame||!smsManual(smsSnapshot))return;
+ if(e.isPrimary===false||(e.button!==undefined&&e.button!==0)||smsGesture||smsActing||smsCancelling||!smsFrame||!smsManual(smsSnapshot))return;
  e.preventDefault();const first=smsPoint(e,0);smsGesture={pointer:e.pointerId,started:e.timeStamp,frame:smsFrame.id,epoch:smsFrame.epoch,points:[first],moved:false,timer:setTimeout(resetSmsGesture,10000)};
  $('#smsImage').setPointerCapture(e.pointerId);smsFeedback(first);
 };

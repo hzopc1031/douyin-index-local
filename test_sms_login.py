@@ -1020,8 +1020,13 @@ class StateTests(unittest.TestCase):
         self.manager._action(session, action)
         self.assertFalse(action.error)
         self.assertIn(('click', 150, 75), self.driver.actions)
-        self.step(page(verification=True, challenge_key='synthetic-two'))
+        for index in range(5):
+            self.driver.capture = Capture(f'animation-{index}'.encode(), self.driver.capture.metadata)
+            self.manager._capture(session)
         self.error('stale_frame', self.manager.pointer, old, 'tap', [[.5, .5, 0]])
+        recent = session.frame_id
+        self.step(page(verification=True, challenge_key='synthetic-two'))
+        self.error('stale_frame', self.manager.pointer, recent, 'tap', [[.5, .5, 0]])
 
     def test_fallback_order_auto_manual_then_remote_and_rotation_direct(self):
         solver = Mock()
