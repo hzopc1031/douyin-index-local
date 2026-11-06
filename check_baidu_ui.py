@@ -54,6 +54,7 @@ def run(output=None):
                                     'related_period': {'start_date': '2025-11-09', 'end_date': '2026-11-01', 'days': 358}}}}
                         else: data = {'status': 'no_data'}
                     elif path == 'jobs': data = {'jobs': []}
+                    elif path == 'groups': data = {'groups': [], 'live_request': False}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'series':
                         params = parse_qs(url.query)
@@ -80,7 +81,7 @@ def run(output=None):
                     page.locator('#chartMeta .info-button').hover()
                     page.screenshot(path=str(output/'hub-douyin-tips-desktop.png'))
                     page.keyboard.press('Escape')
-                page.locator('[data-platform=baidu]').click()
+                page.locator('#platformChips [data-platform=baidu]').click()
                 page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
                 page.locator('#insightEnd').fill(q['end_date'])

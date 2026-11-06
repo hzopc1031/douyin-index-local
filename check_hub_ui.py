@@ -41,7 +41,8 @@ def run(output=None):
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
                 errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None}
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None,
+                           'groups': [dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])]}
 
                 def route(request_route):
                     request = request_route.request
@@ -59,6 +60,18 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif request.method == 'POST' and path == 'topics/collect-once':
+                            body = request.post_data_json or {}
+                            data = dict(status='ok', item_count=0, fields=[], live_request=True,
+                                        rank=body.get('rank'), category=body.get('category'))
+                        elif request.method == 'PUT' and path.startswith('groups/') and path.count('/') == 1:
+                            body = request.post_data_json or {}
+                            gid = path.split('/', 1)[1]
+                            updated = dict(id=gid, name=body.get('name'), keywords=list(body.get('keywords') or []))
+                            fixture['groups'] = [updated if item['id'] == gid else item for item in fixture['groups']]
+                            if not any(item['id'] == gid for item in fixture['groups']):
+                                fixture['groups'].insert(0, updated)
+                            data = dict(group=updated, live_request=False, note='已更新关键词组，未提交搜索指数任务。')
                     elif path == 'platforms': data = dict(platforms=PLATFORMS)
                     elif path == 'status':
                         status_reads.append(request.url)
@@ -74,6 +87,42 @@ def run(output=None):
                     elif path == 'insights':
                         kind = query['kind'][0]
                         data = dict(status=fixture[kind],result=dict(metadata=META,data=dict(search_related=RELATED,content_related=RELATED[10:]) if kind=='related' else dict(dimensions=AUDIENCE)))
+                    elif path == 'hot/latest':
+                        data = dict(board='word_list', fetched_at='2026-11-04T12:00:00+08:00', live_request=False,
+                                    note='热榜热度不是搜索指数，也不是创作者中心综合指数。',
+                                    items=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00'),
+                                           dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
+                    elif path == 'hot/word':
+                        data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
+                    elif path == 'groups' and request.method == 'GET':
+                        data = dict(groups=fixture['groups'],
+                                    note='工作台热度分，不是搜索次数，也不是抖音综合指数。')
+                    elif path.startswith('groups/') and path.endswith('/score'):
+                        words = fixture['groups'][0]['keywords']
+                        data = dict(note='工作台热度分，不是搜索次数，也不是抖音综合指数。',
+                                    weights=dict(search=0.7, hot=0.3),
+                                    search=dict(score=None, missing=[dict(day='2026-11-03', keyword=words[-1])]),
+                                    hot=dict(score=None, snapshot_status='available',
+                                             members=[dict(keyword=words[0], status='exact', ratio=1),
+                                                      dict(keyword=words[-1], status='未上榜', ratio=None)],
+                                             substring_hits=[dict(keyword=words[-1], word=words[-1] + '醋鱼')]),
+                                    fusion=dict(score=None))
+                    elif path == 'topics':
+                        data = dict(status='available', status_label='尚未采集', window='1d', window_label='近1天',
+                                    rank=query.get('rank', ['total'])[0],
+                                    rank_label='飙升' if query.get('rank', ['total'])[0] == 'rising' else '总榜',
+                                    category=query.get('category', ['全部'])[0],
+                                    categories=['全部', '美食', '旅行', '科技', '科技科普', '科技产品'], items=[], fetched_at=None,
+                                    live_request=False, note='热点宝话题不是搜索指数，待联调，不伪造话题。')
+                    elif path == 'hot/rising':
+                        data = dict(live_request=False, note='这是本库热榜快照的计算结果，不是搜索指数，也不是官方飙升榜。',
+                                    current_fetched_at='2026-11-04T12:00:00+08:00', baseline_fetched_at=None,
+                                    thresholds=dict(min_age_seconds=1800, max_age_seconds=21600, lookback_seconds=86400,
+                                                    rank_rise=10, rank_max=15, heat_pct=0.5, heat_delta=500000,
+                                                    z_min_samples=8, z_min=2),
+                                    items=[dict(word='合成话题甲', position=1, new_entry=True, rank_rise=None,
+                                                rank_rise_hit=None, heat_pct=None, heat_hit=None, z_score=None,
+                                                z_hit=None, search_index_ratio=None)])
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
@@ -280,17 +329,127 @@ def run(output=None):
                 fixture['audience']='missing'
                 page.evaluate('loadInsights()')
                 assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
-                page.locator('[data-platform=baidu]').click()
+                page.locator('#platformChips [data-platform=baidu]').click()
                 page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
                 assert '尚未接入' in page.locator('#trendSummary').inner_text()
-                page.locator('[data-platform=douyin]').click()
+                assert page.locator('#viewChips').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                assert page.locator('#overviewHot').is_hidden()
+                page.locator('#platformChips [data-platform=douyin]').click()
+                assert page.locator('#viewChips').is_visible()
+                assert '搜索指数' in page.locator('#viewChips').inner_text()
+                assert '热搜榜' not in page.locator('#platformChips').inner_text()
+                assert page.locator('[data-tab=hot]').count() == 0
+                assert '热榜' not in page.locator('.nav').inner_text()
+                page.locator('[data-source=hot_search]').click()
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
+                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '热点宝' in page.locator('#hotIntro').inner_text()
+                assert page.locator('#hotResume').is_hidden()
+                assert page.locator('#hotRows tr').nth(0).locator('td').nth(0).inner_text() == '1'
+                assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
+                assert page.locator('#hotRows tr').nth(1).locator('td').nth(0).inner_text() == '2'
+                assert page.locator('#hotRows tr').nth(1).locator('td').nth(2).inner_text() == '—'
+                page.locator('#hotSentence').fill('s1')
+                page.locator('#hotWordButton').click()
+                page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")
+                page.locator('#hotRisingButton').click()
+                page.wait_for_function("document.querySelector('#hotRisingRows').textContent.includes('合成话题甲')")
+                assert '本库热榜快照' in page.locator('#hotRisingNote').inner_text()
+                assert '不是搜索指数' in page.locator('#hotRisingNote').inner_text()
+                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
+                assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
+                assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
+                assert page.locator('#topicCategory').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                page.locator('[data-source=index]').click()
+                assert page.locator('#groupPanel').is_visible()
+                assert page.locator('[data-tab=groups]').count() == 0
+                assert '关键词组' not in page.locator('.nav').inner_text()
+                page.locator('[data-tab=overview]').click()
+                page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
+                assert '工作台热度分' in page.locator('#groupIntro').inner_text()
+                assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
+                assert '名称只用于显示' in page.locator('#groupIntro').inner_text()
+                assert '不会触发搜索查询' in page.locator('#groupIntro').inner_text()
+                assert page.locator('#groupEdit').inner_text() == '编辑这组'
+                page.locator('#groupScoreButton').click()
+                page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('未上榜')")
+                assert '0.7' in page.locator('#groupWeights').inner_text()
+                assert page.locator('#groupFusionScore').inner_text() == '—'
+                assert '西湖醋鱼' in page.locator('#groupMembers').inner_text()
+                page.locator('#groupEdit').click()
+                assert page.locator('#groupName').input_value() == '合成组'
+                assert page.locator('#groupWords').input_value() == '杭州\n西湖'
+                assert page.locator('#groupCreate').inner_text() == '更新关键词组'
+                page.locator('#groupWords').fill('杭州\n灵隐寺')
+                group_writes = len(writes)
+                page.locator('#groupCreate').click()
+                page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('灵隐寺')")
+                assert '灵隐寺醋鱼' in page.locator('#groupMembers').inner_text()
+                assert '未上榜' in page.locator('#groupMembers').inner_text()
+                assert page.locator('#groupFusionScore').inner_text() == '—'
+                assert page.locator('#groupSearchScore').inner_text() == '—'
+                assert page.locator('#groupHotScore').inner_text() == '—'
+                assert '合成组' in page.locator('#groupSelect').inner_text()
+                assert page.locator('#groupCreate').inner_text() == '保存关键词组'
+                assert page.locator('#groupWords').input_value() == ''
+                assert writes[group_writes] == ('groups/' + 'a' * 32, dict(name='合成组', keywords=['杭州', '灵隐寺']))
+                assert all(item[0] not in ('queries', 'insights/queries') for item in writes[group_writes:])
+                page.locator('[data-source=hot_search]').click()
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert '—' in page.locator('#hotRows').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
+                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert page.locator('#keywordSelect').is_hidden()
+                assert page.locator('#resultTab-summary').is_hidden()
+                assert page.locator('#groupPanel').is_hidden()
+                assert page.locator('#topicCategory').is_hidden()
+                page.locator('[data-source=topic]').click()
+                page.locator('#topicCategory').click()
+                page.wait_for_function("document.querySelector('#topicCategoryList').textContent.includes('美食')")
+                assert page.locator('#topicWindow').inner_text() == '近1天'
+                assert '尚未采集' in page.locator('#topicStatus').inner_text()
+                assert page.locator('label[for="topicCategory"]').inner_text() == '垂类'
+                assert page.locator('#topicCategoryQuery').count() == 0
+                page.locator('#topicCategory').fill('科技')
+                page.wait_for_function("()=>[...document.querySelectorAll('#topicCategoryList [role=option]')].map(o=>o.textContent).join(',')==='科技,科技科普,科技产品'")
+                page.locator('#topicCategory').fill('   ')
+                page.wait_for_function("()=>document.querySelector('#topicCategoryList').textContent.includes('全部')&&document.querySelector('#topicCategoryList').textContent.includes('旅行')")
+                page.locator('#topicCategory').fill('科技')
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicCategory').press('Enter')
+                page.wait_for_function("!document.querySelector('#topicStatus').textContent.includes('正在采集')")
+                assert writes[-1] == ('topics/collect-once', dict(rank='total', category='科技'))
+                page.locator('#topicCategory').fill('')
+                page.wait_for_function("()=>[...document.querySelectorAll('#topicCategoryList [role=option]')].some(o=>o.textContent==='旅行')")
+                assert '不是搜索指数' in page.locator('#topicIntro').inner_text()
+                assert '待联调' in page.locator('#topicStatus').inner_text()
+                before_topic = len(writes)
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicCategoryList [role=option]').filter(has_text='旅行').click()
+                page.wait_for_function("!document.querySelector('#topicStatus').textContent.includes('正在采集')")
+                assert writes[before_topic][0] == 'topics/collect-once'
+                assert writes[before_topic][1] == dict(rank='total', category='旅行')
+                with page.expect_response(lambda r: 'topics/collect-once' in r.url and r.request.method == 'POST'):
+                    page.locator('#topicRankRising').click()
+                page.wait_for_function("document.querySelector('#topicRankRising').getAttribute('aria-pressed')==='true'")
+                assert writes[before_topic + 1][1] == dict(rank='rising', category='旅行')
+                assert '合成话题' not in page.locator('#topicRows').inner_text()
+                assert '0' not in page.locator('#topicRows').inner_text()
+                page.locator('#platformChips [data-platform=douyin]').click()
+                assert page.locator('#openQuery').is_visible()
+                assert page.locator('#groupPanel').is_visible()
+                assert page.locator('#overviewTopic').is_hidden()
+                page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
                 page.locator('#submitButton').click()
                 page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
-                assert len(writes)==3
-                assert [path for path,_ in writes]==['queries','insights/queries','insights/queries']
-                assert writes[0][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
+                assert len(writes)==7, writes
+                assert [path for path,_ in writes]==['groups/'+'a'*32,'topics/collect-once','topics/collect-once','topics/collect-once','queries','insights/queries','insights/queries']
+                assert writes[4][1]==dict(platform='douyin',keywords=['杭州'],start_date=START,end_date=END)
                 assert not page.locator('#queryDialog').is_visible()
                 page.wait_for_function('!refreshing')
                 fixture.update(login='expired', paused=dict(code='authentication_required'))
@@ -306,7 +465,7 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#historyRows').textContent.includes('暂无结果')")
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
-                assert len(writes)==3
+                assert len(writes)==7, writes
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
