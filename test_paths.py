@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -76,3 +77,72 @@ class PathsTests(unittest.TestCase):
                 with self.subTest(mode=oct(mode)):
                     passwd.chmod(mode)
                     self.assertEqual(check().returncode == 0, valid)
+
+    @unittest.skipUnless(shutil.which('bash'), 'bash unavailable')
+    def test_vnc_auth_toggle_builds_args_without_starting_vnc(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_dir = Path(temp) / 'logs'
+            state = Path(temp) / 'state'
+            log_dir.mkdir()
+            state.mkdir()
+            env = os.environ.copy()
+            env['STATE_DIR'] = str(state)
+            env['LOG_DIR'] = str(log_dir)
+            script = '''
+set -euo pipefail
+source ./tencent-processes.sh
+prepare_vnc_auth
+printf '%s\\n' "${vnc_auth_args[@]}"
+'''
+
+            def run(value=None):
+                current = env.copy()
+                current.pop('INDEX_HUB_VNC_AUTH', None)
+                if value is not None:
+                    current['INDEX_HUB_VNC_AUTH'] = value
+                return subprocess.run(['bash', '-c', script], cwd=ROOT, env=current,
+                                       capture_output=True, text=True)
+
+            missing = run()
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn('缺少 VNC 口令文件', missing.stderr)
+            self.assertFalse((log_dir / 'desktop.log').exists())
+            for value in ('', '1', 'false', '00', 'no'):
+                with self.subTest(value=value):
+                    refused = run(value)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn('缺少 VNC 口令文件', refused.stderr)
+
+            secret = b'synthetic-secret-not-a-real-password'
+            blocked = state / 'vnc.passwd'
+            blocked.write_bytes(secret)
+            blocked.chmod(0)
+            disabled = run('0')
+            self.assertEqual(disabled.returncode, 0, disabled.stderr)
+            self.assertEqual(disabled.stdout.splitlines(), ['-nopw'])
+            self.assertNotIn('vnc.passwd', disabled.stdout)
+            log = (log_dir / 'desktop.log').read_bytes()
+            self.assertEqual(log.count(b'\n'), 1)
+            self.assertIn(b'INDEX_HUB_VNC_AUTH is 0', log)
+            self.assertIn(b'without a password', log)
+            self.assertNotIn(secret, log)
+
+            blocked.chmod(0o600)
+            enabled = run('1')
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(enabled.stdout.splitlines(), ['-rfbauth', str(blocked)])
+            self.assertEqual((log_dir / 'desktop.log').read_bytes().count(b'\n'), 1)
+
+        command = ('x11vnc -display :107 -localhost -rfbport 5907 -forever -shared '
+                   '"${vnc_auth_args[@]}" -quiet')
+        for name in ('tencent-desktop.sh', 'tencent-start.sh'):
+            text = (ROOT / name).read_text()
+            self.assertIn('prepare_vnc_auth\n' + 'start_child ' + command, text)
+            self.assertNotIn('-nopw', text)
+            self.assertNotIn('rfbauth', text)
+        page = (ROOT / 'hub.html').read_text()
+        urls = re.findall(r'/desktop/vnc\.html\?[^"\'<\s]+', page)
+        self.assertGreaterEqual(len(urls), 1)
+        for url in urls:
+            self.assertIn('autoconnect=1', url)
+            self.assertNotIn('password', url)

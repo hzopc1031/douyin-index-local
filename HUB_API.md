@@ -136,6 +136,76 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 
 任务来源：新建任务记录管理端/API 密钥类型、密钥名称与前缀、连接来源 IP 和最多 512 字符 User-Agent，仅管理登录可查看。忽略 X-Forwarded-For 等未信任代理头。管理端认证也可来自脚本，不声称必定是网页。User-Agent 是客户端声明，不是设备证明。不存认证头、完整密钥或 Cookie。幂等重提交保留首次来源；旧任务显示未记录。
 
+## 热榜快照（第一期）
+
+热榜与搜索指数分开。数据来自免登录的 `https://aweme.snssdk.com/aweme/v1/hot/search/list/`，不走创作者中心，不使用浏览器 Cookie，也不占用每日 50 次搜索指数额度。热度不是搜索指数，也不是创作者中心综合指数。缺失为 null；未上榜不记为 0 或第 50 名。
+
+调度在网关进程内，默认关闭。只有环境变量 `INDEX_HUB_HOTLIST_ENABLED` 精确为 `1` 时才启动循环，约每 5 秒检查一次是否到期，到期才发请求。`INDEX_HUB_HOTLIST_INTERVAL_SECONDS` 默认 3600，小于 1800 时按 1800 执行，非法值回退 3600。没有更早的尝试记录时，开启后的第一轮会抓取；之后至少间隔上述秒数。每个上海自然日最多 48 次成功抓取。失败不补跑。HTTP 429、403 或响应不是 JSON 时暂停热榜，暂停状态写在 SQLite，重启后仍然有效。须管理员调用 `POST /api/v1/hot/resume`（需要 `X-Hub-Request: 1`）后才会再抓；恢复本身不会立刻补一次。
+
+| 方法 / 路径 | 权限 | 作用 |
+|---|---|---|
+| GET `/hot/latest` | read | 最近一次完整快照，不触发抓取 |
+| GET `/hot/word?sentence_id=` 或 `?word=` | read | 该话题实际上榜记录；两者只能填一个 |
+| POST `/hot/resume` | 仅管理登录 | 解除热榜暂停，不消耗搜索指数额度 |
+
+`GET /status` 增加 `hotlist`：`enabled`、`paused`、`interval_seconds`、`daily_success_limit`、`daily_successes`。搜索指数的 `daily_online_attempts` 与此无关。
+
+## 飙升词（第二期）
+
+`GET /hot/rising` 只读取本库 `hot_snapshots` 和已保存的搜索指数，不抓热榜，不把官方 `trending_list` 当作飙升，也不创建搜索指数任务、不增加 `daily`。Bearer `read` 即可。响应含 `thresholds`、`current_fetched_at`、`baseline_fetched_at` 和每个当前上榜话题的各列。缺失为 null。页面「飙升」视图把 null 显示为 —。
+
+当前榜是最新一张完整快照。基线是早于它至少 `min_age_seconds`、至多 `max_age_seconds` 的最近一张；默认 1800 和 21600 秒。没有合格基线时，名次上升、热度变化及其命中为 null，不把缺失名次写成 50。
+
+- 新上榜：主键（有 `sentence_id` 用 `id:` 加该值，否则 `word:` 加精确词）在当前快照之前、回看 `lookback_seconds`（默认 86400）内没有出现。
+- 名次上升：`rise = 基线名次 - 当前名次`。默认命中为 `rise >= 10` 且当前名次 `<= 15`。
+- 热度变化：两边 `hot_value` 都为正时，`pct = (当前 - 基线) / 基线`。默认命中为 `pct >= 0.5` 且增量 `>= 500000`。0 或缺失不算正数。
+- z：只用同一 `sentence_id` 在当前快照之前的非空热度。少于 `z_min_samples`（默认 8）或样本标准差为 0 时 z 为 null。标准差用 n-1。默认 `z >= 2` 记为辅助命中。没有 `sentence_id` 的话题不计算 z。
+- 搜索指数环比：按话题原文精确匹配已存搜索指数，取最近一个非空日和它的前一个日历日。前一日缺失、为 null 或不大于 0 时环比为 null，不用更早的日期代替，也不读综合指数。
+
+阈值环境变量：`INDEX_HUB_RISING_MIN_AGE_SECONDS`、`INDEX_HUB_RISING_MAX_AGE_SECONDS`、`INDEX_HUB_RISING_LOOKBACK_SECONDS`、`INDEX_HUB_RISING_RANK_RISE`、`INDEX_HUB_RISING_RANK_MAX`、`INDEX_HUB_RISING_HEAT_PCT`、`INDEX_HUB_RISING_HEAT_DELTA`、`INDEX_HUB_RISING_Z_MIN_SAMPLES`、`INDEX_HUB_RISING_Z_MIN`。非法值回退默认。settings 键 `hot_rising_thresholds` 里字段合法时覆盖对应环境变量。若最小基线年龄大于最大年龄，这两个字段回退默认。接口和页面都返回实际生效的阈值。
+
+部署时不要在未确认前打开开关。开启步骤：只给 gateway 单元增加 `INDEX_HUB_HOTLIST_ENABLED=1`（间隔可选），然后重启 gateway。desktop 单元不用改，热榜不经过 Unix 桥。`hub.html` 由每次请求读盘，页面更新后刷新即可；调度和 API 随 gateway 进程生效。从 `server-snapshot-2026-10-30` 升到本分支的完整步骤见 [docs/UPGRADE.md](docs/UPGRADE.md)。
+
+## 关键词组（第三期）
+
+`keyword_groups` 只保存组名和关键词。三个分数在读取时计算，不写入 `points.composite`，不创建采集任务，不增加每日 50 次额度。搜索指数仍由用户在趋势页或 `POST /queries` 手动提交。
+
+| 方法 / 路径 | 权限 | 作用 |
+|---|---|---|
+| GET `/groups` | read | 列出关键词组 |
+| POST `/groups` | query，或带管理登录 | 创建。管理员 POST 仍要 `X-Hub-Request: 1` |
+| PUT `/groups/{id}` | query，或带管理登录 | 更新名称和关键词。不新建组，不提交搜索指数任务，不删除已存搜索指数。管理员 PUT 仍要 `X-Hub-Request: 1` |
+| DELETE `/groups/{id}` | query，或带管理登录 | 删除组，不删除已存搜索指数 |
+| GET `/groups/{id}/score` | read | 计算三个分数 |
+
+更新沿用创建时的 `name`、`keywords` 校验，组 id 与创建时间不变。保存后三个分数按新的关键词列表重算；缺数据仍为 null，不补 0。
+
+## 热点宝·话题采集
+
+话题榜不自动轮询。`INDEX_HUB_TOPIC_ENABLED` 仍默认关闭，即使设为 `1` 也不会启动定时轮次。工作台在选中具体垂类时，或在该垂类上切换总榜/飙升时，调用一次 `POST /api/v1/topics/collect-once`。选「全部」只读已保存快照，这个接口也拒绝 `category=全部`。同一榜（总榜或飙升、垂类、近 1 天）在 10 分钟内，或已有请求在进行时，不再打浏览器。请求仍由 desktop 里的热点宝页面自己 `fetch`，不签名、不读取 Cookie。两次请求至少间隔 15 秒，上海日最多 30 次。垂类保存父级和叶子。请求体与热点宝话题页一致，带 `tag_version: "v2"`。「全部」仍是 `tags: []`。父级（例如科技）发送 `[{"value": 父级数字, "children": [{"value": 每个子级数字}]}]`。叶子发送 `[{"value": 父级数字, "children": [{"value": 叶子数字}]}]`。名称对不上已保存分类时直接返回 400 `invalid_parameters`，不请求浏览器。业务码 5（参数不合法）记为 `invalid_params`，只让这一次失败，不暂停。未登录、验证码、限频、拒绝访问或无法识别的响应仍会暂停，不自动重试。`POST /api/v1/topics/resume` 只清除暂停。
+
+手动打一次（不开启调度），在 desktop 服务已经运行、浏览器进程持有 Unix socket 时，用服务账号执行：
+
+```bash
+cd /srv/work-ecs-projects/douyin-index-local
+sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_DIR=/var/log/douyin-index \
+  .venv/bin/python topic_board.py --probe --rank total --category 全部
+```
+
+先拉垂类用 `--probe --tags`。输出含 `status`、`item_count`、`fields` 和 `summary`。`summary` 只有 HTTP 状态、最终 URL 的主机和路径、content-type、顶层 code/message，以及 JSON 的键和类型；不包含正文字符串、普通数字、Cookie 或 token。同一份摘要追加到 `topic.log`。`request.through_page_fetch` 表示请求由热点宝页面的 `fetch` 发出；`fetch_hooked` 表示该函数已被页面替换；`extra_query_keys` 只列出实际 URL 比我们多出来的参数名（例如 `a_bogus`），不含参数值。打开页面时先用首页，若 `fetch` 仍是原生函数，再依次试 `/ranking`、`/topic`、`/analysis`，仍不自行签名。`status` 为 `ok`、`not_logged_in`、`verification_required`、`rate_limited`、`access_denied`、`schema_mismatch`、`invalid_params`、`invalid_parameters`、`paused`、`interval`、`daily_limit` 或 `browser_unavailable`。父级示例：`--probe --rank total --category 科技`。叶子用已保存的子级名称。需要先 `--probe --tags` 重拉垂类，父级和叶子都会出现在列表里。管理员也可以 `POST /api/v1/topics/collect-once`，JSON 为 `{"rank":"total","category":"全部"}`。
+
+搜索指数分：同一日历日每个词都有非空搜索指数才计算。当前日取最新的齐全日，基线取最早的齐全日并记为 100。基线合计为 0 时不归一化，搜索分为 null，原始合计仍返回。没有齐全日时搜索分为 null，并列出参考日缺了哪些词。
+
+热榜分：没有完整快照时为 null，这时不能把词标成未上榜。有快照时，精确相等的词用 `hot_value / 榜内最大热度`，全组都有正热度才取平均再乘 100。任一未精确上榜或热度缺失，热榜分为 null；未上榜词单独列出。子串关系只出现在 `substring_hits`，不进入分数。
+
+融合分：搜索分和热榜分都有值时为 `search_weight × 搜索分 + hot_weight × 热榜分`，否则 null。默认权重 0.7 和 0.3。环境变量 `INDEX_HUB_GROUP_SEARCH_WEIGHT`、`INDEX_HUB_GROUP_HOT_WEIGHT` 取 0 到 1 的有限数；settings 键 `group_score_weights` 的合法字段再覆盖。页面显示实际权重。文案固定为工作台热度分，不是搜索次数，也不是抖音综合指数。
+
+关键词组的新建、编辑、删除和查看分数在趋势总览里完成，侧栏不再单开一页。
+
+## 热点宝·话题（待联调）
+
+`GET /topics` 只读 `topic_snapshots`。默认 `window=1d`（近1天）、`rank=total`（总榜，另一值为 `rising` 飙升）、`category=全部`。垂类必须是响应里的 `categories` 之一。没有快照时 `items` 为空。调度开关 `INDEX_HUB_TOPIC_ENABLED` 仍只表示定时轮次是否允许，`enabled` 照实返回；它不决定按需页面的文案。尚未采集时 `status=available`、`status_label=尚未采集`。已经成功返回空榜时 `status_label=该垂类暂无话题`。已暂停仍是 `paused`。调度开着且从未采集时仍是 `not_logged_in`（未登录）。这个开关不会发起抓取。真实采集要等服务器 Qt 浏览器登录后联调，当前不调用浏览器、不自动重试，也不伪造话题。已存快照里的热度缺失仍是 null，不补 0。话题、热搜榜和搜索指数彼此分开。
+
 ## 扩展数据（试验接入）
 POST /api/v1/insights/queries：与 queries 相同的 Bearer/query 权限及 Idempotency-Key，增加 kind=related 或 audience，keywords 恰好一个；支持 start_date/end_date。每个模块独立任务、一次在线尝试，复用全局 50 次日限额、15 秒间隔与 24 小时缓存。结果通过 jobs/{id} 获取。
 GET /api/v1/insights?keyword=酵素&kind=related&start_date=2026-10-21&end_date=2026-10-27：仅历史读取；status=available 或 not_collected，result 含 data、metadata。关联词包含 content_related、search_related；画像包含 dimensions[].labels[].name/value/tgi。value 是接口原值，尚未核实百分比单位。无内容时不伪造数据。
