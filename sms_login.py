@@ -89,7 +89,7 @@ FRAME_PNG_LIMIT = FRAME_BASE64_LIMIT // 4 * 3
 def validate_sms_payload(action, body):
     """Shared strict bridge/HTTP schemas; never include input in errors."""
     fields = {'start': {'phone'}, 'code': {'code'}, 'text': {'text'},
-              'pointer': {'frame', 'kind', 'points'}, 'frame': {'frame'},
+              'pointer': {'frame', 'kind', 'points'}, 'frame': {'frame'}, 'qr': {'frame'},
               'resend': set(), 'cancel': set(), 'status': set()}
     if action not in fields or type(body) is not dict or set(body) != fields[action]:
         raise SmsLoginError('invalid_payload')
@@ -99,7 +99,7 @@ def validate_sms_payload(action, body):
         key, pattern = patterns[action]
         if not isinstance(body[key], str) or re.fullmatch(pattern, body[key]) is None:
             raise SmsLoginError('invalid_' + key)
-    if action in ('frame', 'pointer'):
+    if action in ('frame', 'qr', 'pointer'):
         if type(body['frame']) is not int or not 1 <= body['frame'] <= 2**53-1:
             raise SmsLoginError('invalid_frame')
     if action == 'pointer':
@@ -129,7 +129,34 @@ def public_sms_status(value):
         if type(number) is not int or not 0 <= number <= 2**53-1:
             raise SmsLoginError('browser_unavailable')
         result[key] = number
+    available = value.get('qr_available', False)
+    if type(available) is not bool:
+        raise SmsLoginError('browser_unavailable')
+    result['qr_available'] = available if mode == 'manual' and result['frame_id'] else False
     return result
+
+
+def extract_frame_qr(png):
+    try:
+        import cv2
+        import numpy as np
+        image = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            return None
+        image = cv2.resize(image, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        content, points, _ = cv2.QRCodeDetectorAruco().detectAndDecode(image)
+        if not content or points is None:
+            return None
+        x, y, width, height = cv2.boundingRect(points)
+        crop = image[y:y+height, x:x+width]
+        border = max(10, round(max(width, height) / 80) * 10)
+        crop = cv2.copyMakeBorder(crop, border, border, border, border, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        scale = max(1, math.ceil(600 / min(crop.shape[:2])))
+        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+        ok, encoded = cv2.imencode('.png', crop)
+        return encoded.tobytes() if ok else None
+    except Exception:
+        return None
 
 
 class SmsLoginError(ValueError):
@@ -221,6 +248,7 @@ class SmsLoginSession:
         self.creator_return_started = None
         self.navigation_started = None
         self.frame = None
+        self.qr_png = None
         self.frame_id = 0
         self.frame_hash = None
         # shortcut: retain five frames, upgrade if network delays routinely exceed this window.
@@ -250,7 +278,7 @@ class SmsLoginSession:
         return dict(state=self.state, phone=self.masked_phone,
                     resend_in=max(0, math.ceil(self.resend_at-now)) if self.state not in TERMINAL else 0,
                     attempts_left=max(0, 3-self.submissions) if self.nonce and self.state not in TERMINAL else 0,
-                    frame_id=self.frame_id if self.frame else 0, message=message,
+                    frame_id=self.frame_id if self.frame else 0, qr_available=bool(self.frame and self.qr_png and self.verification_mode == 'manual'), message=message,
                     challenge_epoch=self.challenge_epoch,
                     verification_mode=self.verification_mode if self.state in VERIFY else None,
                     frame_width=self.frame.metadata.width if self.frame else 0,
@@ -473,6 +501,14 @@ class SmsLoginManager:
             return dict(frame_id=session.frame_id, challenge_epoch=session.challenge_epoch, width=frame.metadata.width,
                         height=frame.metadata.height, png=frame.png)
 
+    def qr(self, frame_id):
+        with self._lock:
+            self.frame(frame_id)
+            session = self._verification()
+            if session.verification_mode != 'manual' or not session.qr_png:
+                raise SmsLoginError('qr_not_ready')
+            return session.qr_png
+
     def refresh_frame(self):
         with self._lock:
             session = self._verification()
@@ -493,6 +529,7 @@ class SmsLoginManager:
         if state not in VERIFY:
             session.frame = None
             session.frame_hash = None
+            session.qr_png = None
             session.challenge_key = None
             session.auto_pending = session.manual_pending = None
             session.desktop_requested = False
@@ -665,7 +702,7 @@ class SmsLoginManager:
                     session.challenge_key = key
                     session.challenge_epoch += 1
                     session.challenge_since = self._clock()
-                    session.frame = session.frame_hash = None
+                    session.frame = session.frame_hash = session.qr_png = None
                     session.next_frame = 0
                     identity = (phase, probe.get('challenge_key'))
                     if identity != session.challenge.get('identity'):
@@ -681,14 +718,14 @@ class SmsLoginManager:
                 if kind == 'rotation' or session.desktop_requested:
                     session.desktop_requested = True
                     session.verification_mode = 'desktop'
-                    session.frame = session.frame_hash = None
+                    session.frame = session.frame_hash = session.qr_png = None
                 elif session.manual_pending is not None:
                     # Allow a short page-response interval. Taps may be part of
                     # a multi-click puzzle; only a completed drag is a submission.
                     if probe.get('verification_failed') or self._clock() >= session.manual_pending:
                         session.desktop_requested = True
                         session.verification_mode = 'desktop'
-                        session.frame = session.frame_hash = None
+                        session.frame = session.frame_hash = session.qr_png = None
                 elif probe.get('verification_failed') or (session.auto_pending is not None
                                                          and self._clock() >= session.auto_pending):
                     self._manual(session)
@@ -867,7 +904,7 @@ class SmsLoginManager:
                     elif action.kind == 'pointer' and session.state in VERIFY:
                         session.desktop_requested = True
                         session.verification_mode = 'desktop'
-                        session.frame = session.frame_hash = None
+                        session.frame = session.frame_hash = session.qr_png = None
                     else:
                         self._finish(session, 'failed')
         finally:
@@ -888,6 +925,7 @@ class SmsLoginManager:
         # Picture versions drive refresh; only a challenge/transform change
         # invalidates coordinates. Do not reject gestures because of animation.
         digest = hashlib.sha256(frame.png).digest(), frame.metadata
+        qr_png = extract_frame_qr(frame.png) if digest != session.frame_hash else None
         with self._lock:
             if session.state not in VERIFY:
                 return
@@ -899,5 +937,6 @@ class SmsLoginManager:
                     session.frames.clear()
                 session.frame_id = self._frame_version
                 session.frame, session.frame_hash = frame, digest
+                session.qr_png = qr_png
                 session.frames.append((session.frame_id, session.challenge_epoch, frame.metadata))
             session.next_frame = self._clock()+.7

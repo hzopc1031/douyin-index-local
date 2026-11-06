@@ -92,7 +92,7 @@ def create_app(root=ROOT, *, bridge=None, desktop_dir='/usr/share/novnc', auth_t
                 # Give those admin-only reads a separate bounded bucket so
                 # they cannot exhaust the action budget (e.g. cancel/code).
                 sms_read = (principal.get('admin') and request.method == 'GET'
-                            and request.path in ('/api/v1/login/sms', '/api/v1/login/sms/frame'))
+                            and request.path in ('/api/v1/login/sms', '/api/v1/login/sms/frame', '/api/v1/login/sms/qr'))
                 rate_key = (principal['id'], 'sms_read') if sms_read else principal['id']
                 recent = [t for t in rates.get(rate_key, []) if now - t < 60]
                 if len(recent) >= (180 if sms_read else 120):

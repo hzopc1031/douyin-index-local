@@ -258,11 +258,11 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 | POST `/pointer` | `{"frame":N,"kind":"tap或drag","points":[[u,v,t],…]}` | 人工回放后快照，最多等待 12 秒 |
 | POST `/text` | `{"text":"A1"}`（合成示例） | 向截图中当前焦点输入，最多 8 位字母或数字 |
 
-快照只允许 state、phone（如 `138****8000`）、resend_in、attempts_left、message、frame_id、frame_width、frame_height、challenge_epoch、verification_mode。验证码从不回显；裁剪原点、缩放元数据、DOM 题目身份摘要和 nonce 不离开 app。`verification_mode` 为 `auto`（自动验证中）、`manual`（人工截图）或 `desktop`（需远程桌面），非验证状态为 null。
+快照只允许 state、phone（如 `138****8000`）、resend_in、attempts_left、message、frame_id、frame_width、frame_height、challenge_epoch、verification_mode、qr_available。验证码从不回显；裁剪原点、缩放元数据、DOM 题目身份摘要和 nonce 不离开 app。`verification_mode` 为 `auto`（自动验证中）、`manual`（人工截图）或 `desktop`（需远程桌面），非验证状态为 null。
 
 可选识别依赖见 `requirements-solver.txt`：本地 MIT 库 captcha-recognizer 1.0.2 及随包 ONNX 模型，只处理普通缺口滑块，不联网、不下载模型、不调用第三方解题服务。每个完整登录轮次最多 **3 次自动提交**，verify_send / verify_login 共用计数；没有依赖/模型、低置信度、异常或未确认通过时转人工截图，人工拖动仍失败则转远程桌面。旋转题直接转远程桌面。人工和自动轨迹共用 Qt 回放器；页面独立确认倒计时或登录成功，模型输出本身不算通过。
 
-`frame_id` 随图片变化增加；`challenge_epoch` 只在题目或布局/缩放变化时增加。GET 图片必须匹配当前 frame_id；人工输入接受同 epoch 内较旧的 frame_id，动画本身不会触发 stale_frame。前端在手势期间固定当前图片；换题后取消手势。轨迹使用 0–1 相对坐标和毫秒原始节奏，采样至少 16ms、最多 200 点、最长 10 秒。Qt 主线程执行截图/输入，派发超时 5 秒；手机号与验证码只通过按键输入。截图编码后最多 300KB。
+`frame_id` 随图片变化增加；`challenge_epoch` 只在题目或布局/缩放变化时增加。GET `/api/v1/login/sms/qr?v=<frame_id>` 仅管理员可读取当前人工验证帧中检测到的二维码 PNG；`qr_available` 为 false 时不可读取。二维码仅在内存中处理。GET 图片必须匹配当前 frame_id；人工输入接受同 epoch 内较旧的 frame_id，动画本身不会触发 stale_frame。前端在手势期间固定当前图片；换题后取消手势。轨迹使用 0–1 相对坐标和毫秒原始节奏，采样至少 16ms、最多 200 点、最长 10 秒。Qt 主线程执行截图/输入，派发超时 5 秒；手机号与验证码只通过按键输入。截图编码后最多 300KB。
 
 400：invalid_payload / invalid_phone / invalid_code / invalid_text / invalid_frame / invalid_pointer / out_of_bounds。409：login_busy / busy_fetching / sms_disabled / login_not_active / code_consumed / stale_frame / not_in_verification / verification_busy / remote_desktop_required / frame_not_ready。429：resend_too_early / sms_rate_limited（本服务保护），以及原网关认证和请求限频。503：桥接不可用、回放超时或截图不可用。不设手机号白名单。
 

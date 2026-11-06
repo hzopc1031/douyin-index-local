@@ -247,7 +247,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.manager._observe(self.session, page(countdown=60), generation=self.session.state_generation)
 
     async def test_every_route_admin_basic_only_and_csrf(self):
-        routes = [('GET', '', None), ('GET', '/frame?v=1', None),
+        routes = [('GET', '', None), ('GET', '/frame?v=1', None), ('GET', '/qr?v=1', None),
                   *[('POST', '/'+a, b) for a, b in [('start', {'phone': PHONE}), ('code', {'code': CODE}),
                     ('resend', {}), ('pointer', {'frame': 1, 'kind': 'tap', 'points': [[0, 0, 0]]}),
                     ('text', {'text': 'abc'}), ('cancel', {})]]]
@@ -277,7 +277,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         for raw in ('{"phone":"13800138000","phone":"13800138000"}', '{"phone":NaN}'):
             response = await self.client.post('/api/v1/login/sms/start', headers={**self.admin, 'Content-Type': 'application/json'}, data=raw)
             self.assertEqual(response.status, 400)
-        for path in ('/frame', '/frame?v=0', '/frame?v=true', '/frame?v=1&v=2', '?phone=synthetic'):
+        for path in ('/qr', '/qr?v=0', '/qr?v=1&v=2', '/frame', '/frame?v=0', '/frame?v=true', '/frame?v=1&v=2', '?phone=synthetic'):
             response = await self.client.get('/api/v1/login/sms'+path, headers=self.admin)
             self.assertEqual(response.status, 400, path)
         response = await self.client.get('/api/v1/login/sms', headers=self.admin, json={'phone': PHONE})
@@ -439,6 +439,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['verification_mode'], 'manual')
         self.assertGreater(data['challenge_epoch'], 0)
         old_frame, epoch = data['frame_id'], data['challenge_epoch']
+        self.session.qr_png = PNG
+        response = await self.client.get('/api/v1/login/sms', headers=self.admin)
+        self.assertTrue((await response.json())['qr_available'])
+        response = await self.client.get('/api/v1/login/sms/qr?v='+str(old_frame), headers=self.admin)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), PNG)
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
         response = await self.client.get('/api/v1/login/sms/frame?v='+str(old_frame), headers=self.admin)
         self.assertEqual(response.status, 200)
         self.assertEqual(await response.read(), PNG)
@@ -447,6 +454,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.driver.capture = Capture(PNG+b'animation', self.driver.capture.metadata)
         self.manager._capture(self.session)
         self.assertEqual(self.session.challenge_epoch, epoch)
+        response = await self.client.get('/api/v1/login/sms/qr?v='+str(old_frame), headers=self.admin)
+        self.assertEqual(response.status, 409)
+        response = await self.client.get('/api/v1/login/sms/qr?v='+str(self.session.frame_id), headers=self.admin)
+        self.assertEqual(response.status, 409)
         self.assertTrue(self.manager._valid_frame(self.session, old_frame))
         response = await self.client.get('/api/v1/login/sms/frame?v='+str(old_frame), headers=self.admin)
         self.assertEqual(response.status, 409)

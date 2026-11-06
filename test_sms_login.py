@@ -865,7 +865,7 @@ class StateTests(unittest.TestCase):
         self.error('stale_frame', self.manager.frame, frame['frame_id'])
         self.error('stale_frame', self.manager.pointer, frame['frame_id'], 'tap', [[.5, .5, 0]])
         self.assertEqual(set(self.manager.status()), {'state', 'phone', 'resend_in', 'attempts_left',
-                         'frame_id', 'message', 'verification_mode', 'challenge_epoch', 'frame_width', 'frame_height'})
+                         'frame_id', 'message', 'verification_mode', 'challenge_epoch', 'frame_width', 'frame_height', 'qr_available'})
         self.assertEqual(self.manager.status()['phone'], '138****8000')
         self.assertNotIn(PHONE, repr(self.manager.status())+repr(self.manager._session))
         self.assertNotIn(CODE, repr(self.manager.status())+repr(self.manager._session))

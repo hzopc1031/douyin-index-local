@@ -24,7 +24,7 @@ def _socket_path():
 MAX = 8 * 1024 * 1024
 BRIDGE_TIMEOUT = 75
 SMS_COMMANDS = frozenset('sms_' + action for action in
-                        ('start', 'status', 'frame', 'code', 'resend', 'pointer', 'text', 'cancel'))
+                        ('start', 'status', 'frame', 'qr', 'code', 'resend', 'pointer', 'text', 'cancel'))
 JS_MARGIN = 20  # Allow for evaluate_js calls and local processing.
 # Worst case for one browser-side task: total deadline plus one blocking read plus JS margin.
 if BRIDGE_TIMEOUT < client.REQUEST_TOTAL_DEADLINE + client.REQUEST_READ_TIMEOUT + JS_MARGIN:
@@ -77,8 +77,10 @@ def sms_command(api, command, payload=None):
             payload = {}
         body = validate_sms_payload(action, payload)
         manager = api._sms_manager()
-        if action == 'frame':
+        if action in ('frame', 'qr'):
             frame = manager.frame(body['frame'])
+            if action == 'qr':
+                frame['png'] = manager.qr(body['frame'])
             png = base64.b64encode(frame['png']).decode('ascii')
             if len(png) > FRAME_BASE64_LIMIT:
                 raise SmsLoginError('frame_too_large')

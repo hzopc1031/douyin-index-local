@@ -107,6 +107,7 @@ SMS_ERRORS = {
     'cancelled': (409, '登录操作已取消。'),
     'verification_busy': (409, '自动验证中，请稍候。'),
     'remote_desktop_required': (409, '请改用远程桌面完成验证。'),
+    'qr_not_ready': (409, '二维码尚未就绪。'),
     'frame_not_ready': (409, '截图尚未就绪，请稍后刷新。'),
     'resend_too_early': (429, '请等待倒计时结束后重发。'),
     'sms_rate_limited': (429, '已达到本服务操作频率限制，请稍后再试。'),
@@ -167,7 +168,7 @@ class Hub:
                                              12 if action == 'pointer' else 2)
             if not result.get('ok'):
                 raise sms_error(result.get('code'))
-            if action == 'frame':
+            if action in ('frame', 'qr'):
                 encoded = result['png_base64']
                 if not isinstance(encoded, str) or len(encoded) > FRAME_BASE64_LIMIT:
                     raise ValueError
@@ -652,10 +653,10 @@ def mount(app, hub):
         action = request.match_info.get('action', 'status')
         if request.method != 'POST' and request.can_read_body:
             raise sms_error('invalid_payload')
-        if request.query and (action != 'frame' or set(request.query) != {'v'}
+        if request.query and (action not in ('frame', 'qr') or set(request.query) != {'v'}
                               or len(request.query.getall('v')) != 1):
             raise sms_error('invalid_payload')
-        if action == 'frame':
+        if action in ('frame', 'qr'):
             version = request.query.get('v', '')
             if re.fullmatch(r'[0-9]{1,16}', version) is None:
                 raise sms_error('invalid_frame')
@@ -685,11 +686,11 @@ def mount(app, hub):
                 hub._sms_pause(result)
         else:
             result = await hub.sms_call(action, body)
-            if action != 'frame':
+            if action not in ('frame', 'qr'):
                 # Re-read under the lock: an older terminal response must not
                 # clear a new start's login pause.
                 await hub.sync_sms_pause()
-        if action == 'frame':
+        if action in ('frame', 'qr'):
             return web.Response(body=result, content_type='image/png', headers={'Cache-Control': 'no-store'})
         if action == 'status':
             result['browser'] = (await hub.browser_status() if result['state'] in TERMINAL | {'idle'}
@@ -1057,7 +1058,7 @@ def mount(app, hub):
 
     app.router.add_get('/', index)
     app.router.add_get('/api/v1/login/sms', sms_login)
-    app.router.add_get('/api/v1/login/sms/{action:frame}', sms_login)
+    app.router.add_get('/api/v1/login/sms/{action:frame|qr}', sms_login)
     app.router.add_post('/api/v1/login/sms/{action:start|code|resend|pointer|text|cancel}', sms_login)
     app.router.add_get('/api/v1/login/qr', qr_login)
     app.router.add_get('/api/v1/login/qr/{action:image}', qr_login)

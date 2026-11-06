@@ -22,6 +22,16 @@ function fixture(){
  return f;
 }
 
+
+test('manual QR follows frame and disappears with verification',async()=>{
+ const f=fixture();await f.manual();await f.render({qr_available:true});
+ assert(!f.$('#smsQrPanel').hidden);assert.equal(f.$('#smsQrImage').src,'/api/v1/login/sms/qr?v=1');
+ assert.equal(f.$('#smsQrDownload').href,'/api/v1/login/sms/qr?v=1');
+ await f.render({frame_id:2});assert.equal(f.$('#smsQrImage').src,'/api/v1/login/sms/qr?v=2');
+ await f.render({qr_available:false});assert(f.$('#smsQrPanel').hidden);
+ await f.render({qr_available:true,verification_mode:'desktop'});assert(f.$('#smsQrPanel').hidden);
+});
+
 test('all states and buttons, masked number only',async()=>{
  for(const state of ['idle','opening','sending','verify_send','code_sent','submitting','code_invalid','verify_login','succeeded','already_logged_in','rate_limited','failed','timeout','cancelled']){
   const f=fixture();f.run('smsEnabled=true');
