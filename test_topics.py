@@ -170,9 +170,11 @@ class TopicLoginTests(unittest.TestCase):
             def get_current_url(self): return self.url
             def evaluate_js(self, _script): return json.dumps({'ready': 'complete', 'text': self.text})
             def get_cookies(self): raise AssertionError('cookie access')
+            def load_url(self, url): self.loaded = url
         window = Window()
         api._topic_window = lambda: window
-        self.assertEqual(api.topic_login('status'), {'state': 'need_scan', 'qr_available': False})
+        self.assertEqual(api.topic_login('status'), {'state': 'expired', 'qr_available': False})
+        self.assertEqual(window.loaded, 'https://douhot.douyin.com/')
         window.url, window.text = 'https://douhot.douyin.com/', '热点宝 首页'
         self.assertEqual(api.topic_login('status')['state'], 'logged_in')
         window.url = 'https://evil.example/'
@@ -196,6 +198,11 @@ class TopicLoginApiTests(ApiTests):
         response = await self.client.get('/api/v1/topics/login', headers=admin)
         self.assertEqual(await response.json(), {'state': 'need_scan', 'qr_available': True})
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.hub.bridge = lambda *args: {'state': 'expired', 'qr_available': True}
+        response = await self.client.get('/api/v1/topics/login', headers=admin)
+        self.assertEqual(await response.json(), {'state': 'expired', 'qr_available': False})
+        self.assertEqual((await self.client.get('/api/v1/topics/login/qr', headers=admin)).status, 503)
+        self.hub.bridge = bridge
         qr = await self.client.get('/api/v1/topics/login/qr', headers=admin)
         self.assertEqual(await qr.read(), b'\x89PNG\r\n\x1a\nfixture')
         no_csrf = dict(admin); no_csrf.pop('X-Hub-Request')

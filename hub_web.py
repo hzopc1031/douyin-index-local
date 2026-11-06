@@ -1066,7 +1066,7 @@ def mount(app, hub):
         try:
             result = await asyncio.to_thread(hub.bridge, 'topic_login', action, hub_bridge.BRIDGE_TIMEOUT)
             state = result.get('state')
-            if state not in ('logged_in', 'need_scan', 'browser_unavailable'):
+            if state not in ('logged_in', 'need_scan', 'expired', 'browser_unavailable'):
                 state = 'browser_unavailable'
             available = state == 'need_scan' and result.get('qr_available') is True
             if action == 'qr':

@@ -115,6 +115,9 @@ def run(output=None):
                     elif path == 'topics/login':
                         data = dict(state=fixture['topic_login'], qr_available=fixture['topic_login']=='need_scan')
                     elif path == 'topics/login/qr':
+                        if fixture.get('topic_qr_error'):
+                            request_route.fulfill(status=503, content_type='application/json', body='{}')
+                            return
                         request_route.fulfill(content_type='image/png', body=(ROOT/'tests/fixtures/topic-qr-synthetic.png').read_bytes())
                         return
                     elif path == 'topics':
@@ -484,6 +487,22 @@ def run(output=None):
                 page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
                 assert page.locator('#topicLoginCard').is_visible()
                 assert '/api/v1/topics/login/qr?' in page.locator('#topicQrDownload').get_attribute('href')
+                fixture['topic_login'] = 'expired'
+                page.evaluate('loadTopicLogin()')
+                page.wait_for_function("document.querySelector('#topicLoginStatus').textContent.includes('二维码已失效，正在刷新')")
+                assert page.locator('#topicQrPanel').is_hidden()
+                assert page.locator('#topicQrImage').get_attribute('src') is None
+                assert page.locator('#topicQrDownload').get_attribute('href') is None
+                fixture['topic_login'] = 'need_scan'
+                page.evaluate('loadTopicLogin()')
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
+                fixture['topic_qr_error'] = True
+                page.evaluate('loadTopicLogin()')
+                page.wait_for_function("document.querySelector('#topicQrPanel').hidden && !document.querySelector('#topicQrImage').hasAttribute('src')")
+                assert page.locator('#topicQrDownload').get_attribute('href') is None
+                fixture['topic_qr_error'] = False
+                page.evaluate('loadTopicLogin()')
+                page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
                 if output and width == 1280:
                     page.screenshot(path=str(output/'H46-after.png'), full_page=True)
                 fixture['topic_error'] = False

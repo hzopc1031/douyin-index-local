@@ -183,10 +183,12 @@ let topicLoginState='browser_unavailable', topicLoginTimer=null, topicLoginBusy=
 async function loadTopicLogin(){
  clearTimeout(topicLoginTimer);
  const revision=++topicLoginRevision;if(chosenSource!=='topic')return;
- try{const data=await api('topics/login');if(revision!==topicLoginRevision||chosenSource!=='topic')return;topicLoginState=data.state;const card=$('#topicLoginCard');card.hidden=topicLoginState==='logged_in'&&topicCategories.length>1;$('#topicLoginStatus').textContent=({logged_in:'已登录，请拉取垂类。',need_scan:'请使用抖音扫码授权。',browser_unavailable:'浏览器尚未就绪，请稍候或打开远程桌面。'})[data.state]||'浏览器尚未就绪。';$('#topicQrPanel').hidden=!data.qr_available;if(data.qr_available){const url='/api/v1/topics/login/qr?v='+Date.now();$('#topicQrImage').src=url;$('#topicQrDownload').href=url}}
- catch(e){if(revision!==topicLoginRevision||chosenSource!=='topic')return;$('#topicLoginCard').hidden=false;$('#topicLoginStatus').textContent=e.message}
+ try{const data=await api('topics/login');if(revision!==topicLoginRevision||chosenSource!=='topic')return;topicLoginState=data.state;const card=$('#topicLoginCard');card.hidden=topicLoginState==='logged_in'&&topicCategories.length>1;$('#topicLoginStatus').textContent=({logged_in:'已登录，请拉取垂类。',need_scan:'请使用抖音扫码授权。',expired:'二维码已失效，正在刷新。',browser_unavailable:'浏览器尚未就绪，请稍候或打开远程桌面。'})[data.state]||'浏览器尚未就绪。';$('#topicQrPanel').hidden=!data.qr_available;if(data.qr_available){const url='/api/v1/topics/login/qr?v='+Date.now();$('#topicQrImage').src=url;$('#topicQrDownload').href=url}else{clearTopicQr()}}
+ catch(e){if(revision!==topicLoginRevision||chosenSource!=='topic')return;clearTopicQr();$('#topicLoginCard').hidden=false;$('#topicLoginStatus').textContent=e.message}
  if(chosenSource==='topic'&&!$('#topicLoginCard').hidden)topicLoginTimer=setTimeout(loadTopicLogin,5000);
 }
+function clearTopicQr(){$('#topicQrPanel').hidden=true;$('#topicQrImage').removeAttribute('src');$('#topicQrDownload').removeAttribute('href')}
+$('#topicQrImage').onerror=()=>{clearTopicQr();$('#topicLoginStatus').textContent='二维码尚未就绪，请稍候。'};
 $('#topicLoginRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{await api('topics/login/refresh',{method:'POST',body:{}});await loadTopicLogin()}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
 $('#topicCategoriesRefresh').onclick=async()=>{if(topicLoginBusy)return;topicLoginBusy=true;try{const result=await api('topics/categories/refresh',{method:'POST',body:{}});if(result.status!=='ok')toast(result.status);await loadTopics(false)}catch(e){toast(e.message)}finally{topicLoginBusy=false}};
 async function loadTopics(collect){loadTopicLogin();const data=await api('topics?'+new URLSearchParams({category:topicCategory||'全部',rank:topicRank,window:'1d'}));if(readingInfo())return;paintTopics(data);loadTopicLogin();if(collect&&await collectTopicIfNeeded(data))await loadTopics(false)}

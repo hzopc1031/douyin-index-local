@@ -121,7 +121,7 @@ class Api:
         """Observe only the hotspot window; never inspect its session."""
         import base64
         from login_driver import QtDispatcher
-        from sms_login import extract_frame_qr
+        from topic_qr import extract_topic_qr
         if not self._lock.acquire(blocking=False):
             return {'state': 'browser_unavailable', 'qr_available': False}
         try:
@@ -137,10 +137,16 @@ class Api:
             page = json.loads(window.evaluate_js("JSON.stringify({ready:document.readyState, text:document.body ? document.body.innerText : ''})"))
             if page.get('ready') != 'complete' or not page.get('text', '').strip():
                 return {'state': 'browser_unavailable', 'qr_available': False}
-            if '使用抖音账号登录' not in page['text'] and '扫码授权' not in page['text']:
+            login_page = '使用抖音账号登录' in page['text'] or '扫码授权' in page['text']
+            if login_page and any(text in page['text'] for text in ('二维码失效', '二维码已失效', '二维码已过期', '点击刷新')):
+                import time
+                now = time.monotonic()
+                if now - getattr(self, '_topic_expired_refresh', 0) >= 5:
+                    self._topic_expired_refresh = now
+                    window.load_url('https://douhot.douyin.com/')
+                return {'state': 'expired', 'qr_available': False}
+            if not login_page:
                 return {'state': 'logged_in' if url.hostname == 'douhot.douyin.com' else 'browser_unavailable', 'qr_available': False}
-            if '二维码失效' in page['text']:
-                return {'state': 'need_scan', 'qr_available': False}
             def capture():
                 from PySide6.QtCore import QBuffer, QIODevice
                 buffer = QBuffer()
@@ -148,7 +154,9 @@ class Api:
                 if not view.grab().toImage().save(buffer, 'PNG'):
                     raise ValueError('capture failed')
                 return bytes(buffer.data())
-            qr = extract_frame_qr(QtDispatcher().call(capture))
+            qr = extract_topic_qr(QtDispatcher().call(capture))
+            if window.get_current_url() != url.geturl() or json.loads(window.evaluate_js("JSON.stringify({ready:document.readyState, text:document.body ? document.body.innerText : ''})")) != page:
+                return {'state': 'browser_unavailable', 'qr_available': False}
             result = {'state': 'need_scan', 'qr_available': bool(qr)}
             if qr and action == 'qr':
                 result['png_base64'] = base64.b64encode(qr).decode('ascii')
