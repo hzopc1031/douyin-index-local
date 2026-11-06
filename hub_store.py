@@ -2,6 +2,7 @@
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -136,9 +137,32 @@ class Store:
                 value TEXT,composite TEXT,fetched REAL,dataset TEXT,
                 PRIMARY KEY(platform,metric,region,keyword,day));
             CREATE TABLE IF NOT EXISTS insights(id TEXT PRIMARY KEY,qhash TEXT,fetched REAL,result TEXT);
+            CREATE TABLE IF NOT EXISTS hot_snapshots(
+                id TEXT NOT NULL, fetched REAL NOT NULL, board TEXT NOT NULL,
+                item_key TEXT NOT NULL, key_kind TEXT NOT NULL, sentence_id TEXT,
+                word TEXT NOT NULL, position INTEGER NOT NULL, hot_value TEXT,
+                label TEXT, event_time TEXT, video_count TEXT, sentence_tag TEXT,
+                word_type TEXT, group_id TEXT, source TEXT NOT NULL,
+                PRIMARY KEY(id, item_key));
             CREATE INDEX IF NOT EXISTS dataset_cache ON datasets(qhash,fetched);
             CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status,created);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_fetch ON hot_snapshots(board, fetched);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_sentence ON hot_snapshots(sentence_id, fetched);
+            CREATE INDEX IF NOT EXISTS hot_snapshots_word ON hot_snapshots(word, fetched);
+            CREATE TABLE IF NOT EXISTS keyword_groups(
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, keywords TEXT NOT NULL, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS topic_snapshots(
+                id TEXT NOT NULL, fetched REAL NOT NULL, rank TEXT NOT NULL,
+                window TEXT NOT NULL, category TEXT NOT NULL, item_key TEXT NOT NULL,
+                title TEXT NOT NULL, position INTEGER NOT NULL, hot_value TEXT,
+                source TEXT NOT NULL, PRIMARY KEY(id, item_key));
+            CREATE INDEX IF NOT EXISTS topic_snapshots_fetch
+                ON topic_snapshots(rank, window, category, fetched);
         ''')
+        topic_columns = {row['name'] for row in self.db.execute('PRAGMA table_info(topic_snapshots)')}
+        for name in ('publish_count', 'play_count', 'avg_play', 'cover'):
+            if name not in topic_columns:
+                self.db.execute(f'ALTER TABLE topic_snapshots ADD COLUMN {name} TEXT')
         if 'request_source' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
             self.db.execute('ALTER TABLE jobs ADD COLUMN request_source TEXT')
         if 'requeues' not in {r['name'] for r in self.db.execute('PRAGMA table_info(jobs)')}:
@@ -497,3 +521,220 @@ class Store:
                 'keyword': keyword, 'region': '全国', 'unit': '指数', 'points': values,
                 'source': 'creator.douyin.com', 'live_request': False,
                 'note': '仅返回已保存数据；缺失为 null，搜索指数不是实际搜索次数。'}
+
+    def save_hot_snapshot(self, snapshot):
+        """Store one complete hot-list observation. Incomplete input is rejected."""
+        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True or snapshot.get('board') != 'word_list':
+            raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+        items = snapshot.get('items')
+        source = snapshot.get('source')
+        if not isinstance(items, list) or not items or not isinstance(source, str) or len(source) > 200:
+            raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+        try:
+            stamp = dt.datetime.fromisoformat(snapshot['fetched_at'])
+            if stamp.tzinfo is None:
+                raise ValueError
+            fetched = stamp.timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise HubError('incomplete_snapshot', '热榜采集时间无效，本次快照不入库。') from None
+        seen_words, seen_positions, seen_keys = set(), set(), set()
+        rows = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
+            word, position = item.get('word'), item.get('position')
+            key, kind = item.get('item_key'), item.get('key_kind')
+            if (not isinstance(word, str) or not word or word in seen_words
+                    or type(position) is not int or position < 1 or position in seen_positions
+                    or kind not in ('sentence_id', 'word') or not isinstance(key, str) or key in seen_keys):
+                raise HubError('incomplete_snapshot', '热榜词或名次无法核验，本次快照不入库。')
+            sentence_id = item.get('sentence_id')
+            if kind == 'sentence_id' and (not isinstance(sentence_id, str) or not sentence_id or key != 'id:' + sentence_id):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+            if kind == 'word' and (sentence_id is not None or key != 'word:' + word):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+            seen_words.add(word)
+            seen_positions.add(position)
+            seen_keys.add(key)
+            heat = item.get('hot_value')
+            if heat is not None and (isinstance(heat, bool) or not isinstance(heat, (int, float)) or isinstance(heat, float) and not math.isfinite(heat) or heat < 0):
+                raise HubError('incomplete_snapshot', '热榜热度无法核验，本次快照不入库。')
+            group_id = item.get('group_id')
+            if group_id is not None and (not isinstance(group_id, str) or len(group_id) > 64):
+                raise HubError('incomplete_snapshot', '热榜标识无法核验，本次快照不入库。')
+
+            def stored_int(value):
+                if value is None:
+                    return encode(None)
+                if isinstance(value, bool) or type(value) is not int:
+                    raise HubError('incomplete_snapshot', '热榜字段无法核验，本次快照不入库。')
+                return encode(value)
+
+            rows.append((key, kind, sentence_id, word, position, encode(heat),
+                         stored_int(item.get('label')), stored_int(item.get('event_time')),
+                         stored_int(item.get('video_count')), stored_int(item.get('sentence_tag')),
+                         stored_int(item.get('word_type')), group_id))
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.executemany('''INSERT INTO hot_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                                [(identifier, fetched, 'word_list', *row, source) for row in rows])
+        return identifier
+
+    @staticmethod
+    def _hot_item(row):
+        return {'item_key': row['item_key'], 'key_kind': row['key_kind'], 'sentence_id': row['sentence_id'],
+                'word': row['word'], 'position': row['position'], 'hot_value': json.loads(row['hot_value']),
+                'label': json.loads(row['label']), 'event_time': json.loads(row['event_time']),
+                'video_count': json.loads(row['video_count']), 'sentence_tag': json.loads(row['sentence_tag']),
+                'word_type': json.loads(row['word_type']), 'group_id': row['group_id'],
+                'fetched_at': dt.datetime.fromtimestamp(row['fetched'], TZ).isoformat()}
+
+    def latest_hot(self):
+        row = self.db.execute(
+            "SELECT id FROM hot_snapshots WHERE board='word_list' ORDER BY fetched DESC, id DESC LIMIT 1").fetchone()
+        if row is None:
+            return {'board': 'word_list', 'source': None, 'fetched_at': None, 'items': []}
+        rows = self.db.execute("SELECT * FROM hot_snapshots WHERE id=? ORDER BY position", (row['id'],)).fetchall()
+        return {'board': 'word_list', 'source': rows[0]['source'],
+                'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
+                'items': [self._hot_item(item) for item in rows]}
+
+    def hot_history(self, *, sentence_id=None, word=None):
+        if bool(sentence_id) == bool(word):
+            raise HubError('invalid_parameters', '请指定 sentence_id 或精确话题之一。')
+        if sentence_id is not None:
+            rows = self.db.execute(
+                "SELECT * FROM hot_snapshots WHERE sentence_id=? ORDER BY fetched DESC LIMIT 500", (sentence_id,))
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM hot_snapshots WHERE word=? ORDER BY fetched DESC LIMIT 500", (word,))
+        points = [self._hot_item(item) for item in rows][::-1]
+        return {'sentence_id': sentence_id, 'word': word, 'points': points}
+
+    @staticmethod
+    def _group(row):
+        return {'id': row['id'], 'name': row['name'], 'keywords': json.loads(row['keywords']),
+                'created': row['created']}
+
+    def create_group(self, name, keywords):
+        if self.db.execute('SELECT COUNT(*) FROM keyword_groups').fetchone()[0] >= 100:
+            raise HubError('group_limit', '关键词组已达 100 个上限。', 429)
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.execute('INSERT INTO keyword_groups VALUES(?,?,?,?)',
+                            (identifier, name, encode(keywords), time.time()))
+        return self.get_group(identifier)
+
+    def list_groups(self):
+        rows = self.db.execute('SELECT * FROM keyword_groups ORDER BY created DESC, id DESC')
+        return [self._group(row) for row in rows]
+
+    def get_group(self, identifier):
+        row = self.db.execute('SELECT * FROM keyword_groups WHERE id=?', (identifier,)).fetchone()
+        if row is None:
+            raise HubError('group_not_found', '关键词组不存在。', 404)
+        return self._group(row)
+
+    def update_group(self, identifier, name, keywords):
+        self.get_group(identifier)
+        with self.db:
+            self.db.execute('UPDATE keyword_groups SET name=?, keywords=? WHERE id=?',
+                            (name, encode(keywords), identifier))
+        return self.get_group(identifier)
+
+    def delete_group(self, identifier):
+        self.get_group(identifier)
+        with self.db:
+            self.db.execute('DELETE FROM keyword_groups WHERE id=?', (identifier,))
+
+    def save_topic_snapshot(self, snapshot):
+        """Store one complete topic board. Incomplete input is rejected.
+
+        No caller in the gateway fetches this yet. The Qt login integration
+        must pass only rows observed on the live page.
+        """
+        from topic_board import TOPIC_RANKS, TOPIC_WINDOW, category_name_ok
+        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True:
+            raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+        rank, window, category = snapshot.get('rank'), snapshot.get('window'), snapshot.get('category')
+        items, source = snapshot.get('items'), snapshot.get('source')
+        if (rank not in TOPIC_RANKS or window != TOPIC_WINDOW or not category_name_ok(category)
+                or not isinstance(items, list) or not items
+                or not isinstance(source, str) or not source or len(source) > 200):
+            raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+        try:
+            stamp = dt.datetime.fromisoformat(snapshot['fetched_at'])
+            if stamp.tzinfo is None:
+                raise ValueError
+            fetched = stamp.timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise HubError('incomplete_snapshot', '话题采集时间无效，本次快照不入库。') from None
+        seen_titles, seen_positions = set(), set()
+        rows = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise HubError('incomplete_snapshot', '不完整的话题快照不会入库。')
+            title, position = item.get('title'), item.get('position')
+            if (not isinstance(title, str) or not title or title in seen_titles
+                    or any(ord(char) < 32 or ord(char) == 127 for char in title)
+                    or type(position) is not int or position < 1 or position in seen_positions):
+                raise HubError('incomplete_snapshot', '话题或名次无法核验，本次快照不入库。')
+            heat = item.get('hot_value', None)
+            if heat is not None and (isinstance(heat, bool) or not isinstance(heat, (int, float))
+                                      or isinstance(heat, float) and not math.isfinite(heat) or heat < 0):
+                raise HubError('incomplete_snapshot', '话题热度无法核验，本次快照不入库。')
+
+            def optional_number(value):
+                if value is None:
+                    return encode(None)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise HubError('incomplete_snapshot', '话题计数字段无法核验，本次快照不入库。')
+                if isinstance(value, float) and not math.isfinite(value) or value < 0:
+                    raise HubError('incomplete_snapshot', '话题计数字段无法核验，本次快照不入库。')
+                return encode(value)
+
+            cover = item.get('cover')
+            if cover is not None and (not isinstance(cover, str) or not cover.startswith('https://') or len(cover) > 500):
+                raise HubError('incomplete_snapshot', '话题封面无法核验，本次快照不入库。')
+            seen_titles.add(title)
+            seen_positions.add(position)
+            key = item.get('item_key') if isinstance(item.get('item_key'), str) else 'title:' + title
+            rows.append((key, title, position, encode(heat), optional_number(item.get('publish_count')),
+                         optional_number(item.get('play_count')), optional_number(item.get('avg_play')),
+                         cover))
+        identifier = uuid.uuid4().hex
+        with self.db:
+            self.db.executemany(
+                '''INSERT INTO topic_snapshots
+                   (id, fetched, rank, window, category, item_key, title, position, hot_value, source,
+                    publish_count, play_count, avg_play, cover)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                [(identifier, fetched, rank, window, category, row[0], row[1], row[2], row[3], source,
+                  row[4], row[5], row[6], row[7]) for row in rows])
+        return identifier
+
+    def latest_topics(self, *, rank, window, category):
+        row = self.db.execute(
+            '''SELECT id FROM topic_snapshots
+               WHERE rank=? AND window=? AND category=?
+               ORDER BY fetched DESC, id DESC LIMIT 1''',
+            (rank, window, category)).fetchone()
+        if row is None:
+            return {'rank': rank, 'window': window, 'category': category,
+                    'fetched_at': None, 'source': None, 'items': []}
+        rows = self.db.execute(
+            'SELECT * FROM topic_snapshots WHERE id=? ORDER BY position', (row['id'],)).fetchall()
+        def load_number(raw):
+            return None if raw is None else json.loads(raw)
+
+        return {'rank': rank, 'window': window, 'category': category,
+                'source': rows[0]['source'],
+                'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
+                'items': [{'title': item['title'], 'position': item['position'],
+                           'hot_value': json.loads(item['hot_value']),
+                           'publish_count': load_number(item['publish_count']),
+                           'play_count': load_number(item['play_count']),
+                           'avg_play': load_number(item['avg_play']),
+                           'cover': item['cover'],
+                           'fetched_at': dt.datetime.fromtimestamp(item['fetched'], TZ).isoformat()}
+                          for item in rows]}
