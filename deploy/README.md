@@ -18,6 +18,19 @@ Environment=INDEX_HUB_AUTH_ENABLED=0
 
 启动桌面前，以服务账号运行 x11vnc -storepasswd，将口令保存到状态目录的 vnc.passwd 并 chmod 600；缺失或权限过宽会拒绝启动。
 
+`INDEX_HUB_VNC_AUTH` 默认 `1`（x11vnc 使用 `vnc.passwd`）；仅精确值 `0` 关闭 VNC 口令，其他值（含空串、`false`、`00`）仍要求口令文件。关闭时不读取、不检查 `vnc.passwd`，启动参数把 `-rfbauth` 换成 `-nopw`，`-localhost`、端口、`-forever`、`-shared` 和 `-quiet` 保持不变，并向 `desktop.log` 写一行无口令警告。noVNC 页面仍是 `autoconnect=1` 且不带 password 参数；服务器不要求认证时不会弹出密码框。网关的一次性 WebSocket 票据流程不变。
+
+若同时把 `INDEX_HUB_AUTH_ENABLED` 设为 `0`，任何能访问 :8443 的人都可以操作已登录的浏览器。请依赖防火墙或安全组限制来源，不要对公网放开。
+
+临时关闭只配置在服务器 `/etc/systemd/system/douyin-index-desktop.service.d/90-vnc-auth.conf`：
+
+```ini
+[Service]
+Environment=INDEX_HUB_VNC_AUTH=0
+```
+
+由 root 写入后执行 `systemctl daemon-reload && systemctl restart douyin-index-desktop.service`。恢复时将值改为 `1` 并执行相同命令。服务模板和源码始终默认开启，仓库不保存服务器的关闭配置。`tencent-start.sh` 与 `tencent-desktop.sh` 使用同一判断。
+
 ### 实验短信与扫码登录
 
 Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`，显示手机号登录卡片并隐藏扫码卡片；设为 `desktop` 沿用远程桌面登录，设为 `qr` 启用接入页扫码卡片与管理员扫码接口。两服务的设置必须一致。直接运行 Python 的默认值仍是 desktop，其他值退回 desktop 并仅警告一次。QR 模式按需启动浏览器，无 QR 会话时仍可使用远程桌面；安全验证需回远程桌面处理。
