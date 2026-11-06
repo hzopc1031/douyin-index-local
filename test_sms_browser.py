@@ -23,7 +23,7 @@ from aiohttp import ClientSession, web
 
 import hub_bridge
 from login_driver import CREATOR_PAGE, QtLoginDriver
-from sms_login import LoginCoordinator, SmsLoginManager
+from sms_login import FRAME_PNG_LIMIT, LoginCoordinator, SmsLoginManager
 
 PHONE, CODE, WRONG_CODE = '13800138000', '246810', '135790'
 
@@ -295,10 +295,16 @@ class SmsBrowserTests(unittest.TestCase):
         status = self.status()
         png = self.request('GET', 'login/sms/frame?v='+str(status['frame_id']))
         self.assertTrue(png.startswith(b'\x89PNG\r\n\x1a\n'))
-        self.assertLessEqual(len(png), 225*1024)
+        self.assertLessEqual(len(png), FRAME_PNG_LIMIT)
         # Human gesture fixture: independently known target, no solver/model.
         # Map from the screenshot's crop, as the phone UI does after display scaling.
         meta = self.manager._session.frame.metadata
+        from PySide6.QtGui import QImage
+        image = QImage.fromData(png)
+        self.assertEqual((image.width(), image.height()), (meta.width, meta.height))
+        self.assertEqual(meta.image_scale, 1)
+        self.assertAlmostEqual(meta.width, meta.logical_width * meta.dpr, delta=1)
+        self.assertAlmostEqual(meta.height, meta.logical_height * meta.dpr, delta=1)
         x, y = handle['x']+handle['width']/2, handle['y']+handle['height']/2
         points = [[(x+distance*i/40-meta.x0)*meta.x_scale/meta.width,
                    (y-meta.y0)*meta.y_scale/meta.height, i*25] for i in range(41)]
@@ -663,6 +669,34 @@ class SmsBrowserTests(unittest.TestCase):
         self.wait_state('succeeded')
         self.assert_trusted(1)
         self.assertEqual(self.manager._session.auto_submissions, 0)
+
+    def test_noisy_capture_keeps_pixels_and_fractional_crop_coordinates(self):
+        from PySide6.QtGui import QImage
+        self.load()
+        self.view.setZoomFactor(1.25)
+        self.js('''(() => { const c=document.createElement('canvas'); c.width=600; c.height=400;
+          c.style.cssText='position:fixed;left:0;top:0;z-index:9999';
+          const ctx=c.getContext('2d'), data=ctx.createImageData(c.width,c.height);
+          for(let i=0;i<data.data.length;i+=4){data.data[i]=Math.random()*256;
+            data.data[i+1]=Math.random()*256;data.data[i+2]=Math.random()*256;data.data[i+3]=255}
+          ctx.putImageData(data,0,0);document.body.appendChild(c);return true;})()''')
+        deadline = time.monotonic() + 5
+        while True:
+            capture = self.work(lambda: self.driver.grab(dict(x=10.2, y=20.3, width=400.2, height=300.3)))
+            if len(capture.png) > 225*1024 or time.monotonic() >= deadline:
+                break
+        meta = capture.metadata
+        image = QImage.fromData(capture.png)
+        self.assertGreater(len(capture.png), 225*1024)
+        self.assertEqual(meta.image_scale, 1)
+        self.assertEqual((meta.logical_width, meta.logical_height), (501, 376))
+        self.assertEqual((meta.x0, meta.y0, meta.zoom), (12/1.25, 25/1.25, 1.25))
+        self.assertEqual((image.width(), image.height()), (meta.width, meta.height))
+        self.assertAlmostEqual(meta.width, meta.logical_width * meta.dpr, delta=1)
+        self.assertAlmostEqual(meta.height, meta.logical_height * meta.dpr, delta=1)
+        self.assertEqual(meta.css_point(0, 0), (meta.x0, meta.y0))
+        self.assertAlmostEqual(meta.css_point(1, 1)[0], meta.x0 + meta.logical_width / meta.zoom)
+        self.assertAlmostEqual(meta.css_point(1, 1)[1], meta.y0 + meta.logical_height / meta.zoom)
 
     def test_three_automatic_submissions_across_phases_then_manual(self):
         self.start('?second=1&login_challenges=3')

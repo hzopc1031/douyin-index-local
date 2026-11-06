@@ -82,7 +82,7 @@ _MESSAGES = {
 TERMINAL = frozenset(('already_logged_in', 'succeeded', 'rate_limited', 'failed', 'timeout', 'cancelled'))
 VERIFY = frozenset(('verify_send', 'verify_login'))
 SHANGHAI = ZoneInfo('Asia/Shanghai')
-FRAME_BASE64_LIMIT = 300 * 1024
+FRAME_BASE64_LIMIT = 7 * 1024 * 1024
 FRAME_PNG_LIMIT = FRAME_BASE64_LIMIT // 4 * 3
 
 

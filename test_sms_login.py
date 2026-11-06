@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from login_driver import Capture, DriverError, DriverTimeout, FakeDriver, FrameMetadata
-from sms_login import (LoginBusy, LoginCoordinator, SmsLoginError, SmsLoginManager,
+from sms_login import (FRAME_PNG_LIMIT, LoginBusy, LoginCoordinator, SmsLoginError, SmsLoginManager,
                        SmsLoginSession, TERMINAL, VERIFY)
 
 PHONE = '13800138000'
@@ -876,7 +876,7 @@ class StateTests(unittest.TestCase):
         self.driver.current = page(rects={})
         self.manager._capture(self.manager._session)
         self.assertEqual(self.driver.actions[-1], ('grab', None))
-        self.driver.capture = Capture(b'x'*(300*1024+1), FrameMetadata(0, 0, 300, 150))
+        self.driver.capture = Capture(b'x'*(FRAME_PNG_LIMIT+1), FrameMetadata(0, 0, 300, 150))
         with self.assertRaisesRegex(DriverError, 'frame_too_large'):
             self.manager._capture(self.manager._session)
 

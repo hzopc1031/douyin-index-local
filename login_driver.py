@@ -424,7 +424,7 @@ class QtLoginDriver:
 
     def grab(self, rect=None):
         from sms_login import FRAME_PNG_LIMIT
-        from PySide6.QtCore import QBuffer, QIODevice, QRect, Qt
+        from PySide6.QtCore import QBuffer, QIODevice, QRect
         from PySide6.QtGui import QColor, QPainter
         def capture(private_rects):
             zoom, dpr = self._view.zoomFactor(), self._view.devicePixelRatioF()
@@ -450,22 +450,15 @@ class QtLoginDriver:
                 w, h = math.ceil(r['width']*zoom*dpr)+2, math.ceil(r['height']*zoom*dpr)+2
                 painter.fillRect(QRect(x-1, y-1, w, h), QColor('#202020'))
             painter.end()
-            factor = 1
-            while True:
-                w, h = bitmap.width()//factor, bitmap.height()//factor
-                if min(w, h) < 1:
-                    raise DriverError('capture_failed')
-                # Crop the remainder so one scale describes both axes exactly.
-                output = bitmap.copy(0, 0, w*factor, h*factor).scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-                buffer = QBuffer()
-                buffer.open(QIODevice.WriteOnly)
-                if not output.save(buffer, 'PNG'):
-                    raise DriverError('capture_failed')
-                png = bytes(buffer.data())
-                if len(png) <= FRAME_PNG_LIMIT:
-                    return Capture(png, FrameMetadata(left/zoom, top/zoom, w, h, zoom, dpr, 1/factor,
-                        (right-left)*w*factor/bitmap.width(), (bottom-top)*h*factor/bitmap.height()))
-                factor *= 2
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            if not bitmap.save(buffer, 'PNG'):
+                raise DriverError('capture_failed')
+            png = bytes(buffer.data())
+            if len(png) > FRAME_PNG_LIMIT:
+                raise DriverError('frame_too_large')
+            return Capture(png, FrameMetadata(left/zoom, top/zoom, bitmap.width(), bitmap.height(), zoom, dpr, 1,
+                right-left, bottom-top))
         script = '''Array.from(document.querySelectorAll(%s)).map(e => {
           const r = e.getBoundingClientRect();
           return {x:r.x,y:r.y,width:r.width,height:r.height}; })''' % json.dumps(self._selectors['private_fields'])
