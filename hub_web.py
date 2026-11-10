@@ -21,6 +21,7 @@ from group_score import GROUP_NOTE, group_score, validate_group
 from topic_board import (apply_empty_mark, category_names, record_topic_result, snapshot_is_fresh,
                          tag_for, topic_enabled, topic_view, validate_topic_query)
 from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
+from baidu_hotlist_client import BaiduHotListClient, DEFAULT_TABS, KNOWN_TABS, SOURCE
 from hot_rising import RISING_NOTE, rising_report
 from hotlist_client import HOT_LIST_URL, HotListClient, HotListError
 from qr_login import login_mode
@@ -93,6 +94,28 @@ def hotlist_interval_seconds():
     except (TypeError, ValueError):
         value = HOT_INTERVAL_DEFAULT
     return max(HOT_INTERVAL_FLOOR, value)
+def baidu_hotlist_enabled():
+    return os.environ.get('INDEX_HUB_BAIDU_HOTLIST_ENABLED') == '1'
+
+
+def baidu_hotlist_interval_seconds():
+    raw = os.environ.get('INDEX_HUB_BAIDU_HOTLIST_INTERVAL_SECONDS', '3600')
+    try:
+        value = int(raw) if raw.isascii() and raw.isdecimal() else 3600
+    except ValueError:
+        value = 3600
+    return max(1800, value)
+
+
+def baidu_hotlist_tabs():
+    raw = os.environ.get('INDEX_HUB_BAIDU_HOTLIST_TABS')
+    return list(dict.fromkeys(tab.strip() for tab in (raw.split(',') if raw is not None else DEFAULT_TABS)
+                              if tab.strip() in KNOWN_TABS))
+
+
+BAIDU_NOTE = '百度热搜热度不是百度搜索指数，缺失为 null，未上榜不记 0。'
+
+
 SMS_ERRORS = {
     'invalid_payload': (400, '请求字段无效。'), 'invalid_phone': (400, '请输入有效的手机号。'),
     'invalid_code': (400, '请输入 4 至 8 位数字验证码。'), 'invalid_text': (400, '仅允许 1 至 8 位数字或字母。'),
@@ -150,6 +173,8 @@ class Hub:
         self.bridge = bridge
         self.worker_task = None
         self.hotlist_task = None
+        self.baidu_hotlist_task = None
+        self.baidu_hot_client_factory = BaiduHotListClient
         self.topic_task = None
         self._topic_inflight = set()
         self._topic_lock = asyncio.Lock()
@@ -405,6 +430,56 @@ class Hub:
         self.store.set('hot_last_success_at', now)
         return {'ok': True, 'fetched_at': snapshot['fetched_at']}
 
+    async def run_baidu_hot_once(self, *, client=None, now=None):
+        if not baidu_hotlist_enabled():
+            return {'ok': False, 'code': 'disabled'}
+        if self.store.get('baidu_hot_paused'):
+            return {'ok': False, 'code': 'paused'}
+        now = time.time() if now is None else now
+        if now - (self.store.get('baidu_hot_last_attempt_at') or 0) < baidu_hotlist_interval_seconds():
+            return {'ok': False, 'code': 'interval'}
+        day = dt.datetime.fromtimestamp(now, TZ).date().isoformat()
+        counter = self.store.get('baidu_hot_daily') or {'date': day, 'count': 0}
+        if counter.get('date') != day:
+            counter = {'date': day, 'count': 0}
+        if counter.get('count', 0) >= HOT_DAILY_SUCCESS_LIMIT:
+            return {'ok': False, 'code': 'daily_limit'}
+        self.store.set('baidu_hot_last_attempt_at', now)
+        owns_client = client is None
+        client = client or self.baidu_hot_client_factory()
+        stored = 0
+        try:
+            for tab in baidu_hotlist_tabs():
+                try:
+                    snapshot = await asyncio.to_thread(client.fetch, tab)
+                    self.store.save_hot_snapshot(snapshot)
+                    stored += 1
+                except HotListError as exc:
+                    if exc.code in HOT_PAUSE_CODES:
+                        paused = {'code': exc.code, 'since': now}
+                        if type(exc.http_status) is int:
+                            paused['http_status'] = exc.http_status
+                        self.store.set('baidu_hot_paused', paused)
+                        break
+                    logger.warning('baidu hotlist stopped code=%s', exc.code)
+        finally:
+            if owns_client:
+                client.close()
+        if stored:
+            self.store.set('baidu_hot_daily', {'date': day, 'count': counter['count'] + 1})
+            self.store.set('baidu_hot_last_success_at', now)
+        return {'ok': bool(stored), 'stored': stored}
+
+    async def baidu_hotlist_worker(self):
+        while True:
+            try:
+                await self.run_baidu_hot_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error('baidu hotlist %s', exc_summary(exc))
+            await asyncio.sleep(HOT_POLL_SECONDS)
+
     async def hotlist_worker(self):
         while True:
             try:
@@ -513,11 +588,13 @@ class Hub:
         self.worker_task = asyncio.create_task(self.worker(), name='index-hub-worker')
         if hotlist_enabled():
             self.hotlist_task = asyncio.create_task(self.hotlist_worker(), name='index-hub-hotlist')
+        if baidu_hotlist_enabled():
+            self.baidu_hotlist_task = asyncio.create_task(self.baidu_hotlist_worker(), name='index-hub-baidu-hotlist')
         # Topic boards are collected only when the workbench asks for one vertical.
         # INDEX_HUB_TOPIC_ENABLED does not start this loop.
 
     async def close(self, app):
-        for task in (self.worker_task, self.hotlist_task, self.topic_task):
+        for task in (self.worker_task, self.hotlist_task, self.baidu_hotlist_task, self.topic_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -572,6 +649,16 @@ def _hotlist_status(store, day):
             'note': '热榜调度默认关闭，与搜索指数每日 50 次分开计数。' + HOT_NOTE}
 
 
+def _baidu_hotlist_status(store, day):
+    counter = store.get('baidu_hot_daily') or {}
+    return {'enabled': baidu_hotlist_enabled(), 'paused': store.get('baidu_hot_paused'),
+            'interval_seconds': baidu_hotlist_interval_seconds(), 'daily_success_limit': HOT_DAILY_SUCCESS_LIMIT,
+            'daily_successes': counter.get('count', 0) if counter.get('date') == day else 0,
+            'last_attempt_at': store.get('baidu_hot_last_attempt_at'),
+            'last_success_at': store.get('baidu_hot_last_success_at'),
+            'boards': ['baidu_' + tab for tab in baidu_hotlist_tabs()], 'source': SOURCE + '<tab>', 'note': BAIDU_NOTE}
+
+
 def openapi():
     error = {'description': '结构化错误；不包含认证信息', 'content': {'application/json': {'schema': {'type': 'object'}}}}
     paths = {}
@@ -611,12 +698,15 @@ def openapi():
         if path.endswith(('series', 'export.csv')):
             operation['parameters'] = [{'in': 'query', 'name': k, 'required': k == 'keyword',
                                         'schema': {'type': 'string'}} for k in ('platform', 'keyword', 'start_date', 'end_date')]
+        if path in ('/api/v1/hot/latest', '/api/v1/hot/rising'):
+            operation['parameters'] = [{'in': 'query', 'name': 'board', 'schema': {'type': 'string', 'default': 'word_list'}}]
         if path == '/api/v1/hot/word':
             operation['parameters'] = [{'in': 'query', 'name': name, 'required': False,
-                                        'schema': {'type': 'string'}} for name in ('sentence_id', 'word')]
+                                        'schema': {'type': 'string'}} for name in ('sentence_id', 'word', 'board')]
         paths[path] = {method: operation}
     paths['/api/v1/hot/resume'] = {'post': {
-        'summary': '人工恢复热榜调度。不立即补抓，不消耗搜索指数额度。',
+        'summary': '人工恢复热榜调度；scope 或 platform 为 baidu 时仅恢复百度。不立即补抓。',
+        'requestBody': {'required': False, 'content': {'application/json': {'schema': {'type': 'object', 'properties': {'scope': {'type': 'string'}, 'platform': {'type': 'string'}}}}}},
         'responses': {'200': {'description': '已恢复'}, '401': error, '403': error}}}
     paths['/api/v1/groups'] = {
         'get': {'summary': '列出关键词组，不计算分数也不触发采集',
@@ -806,6 +896,7 @@ def mount(app, hub):
                                  'online_attempts_per_day': 50, 'cache_hours': 24,
                                  'note': '以上为本服务保护设置，不是抖音官方配额。'},
                       'hotlist': _hotlist_status(s, day),
+                      'baidu_hotlist': _baidu_hotlist_status(s, day),
                       'topics': {'enabled': topic_enabled(), 'paused': s.get('topic_paused'),
                                  'interval_seconds': round_interval_seconds(),
                                  'min_interval_seconds': MIN_GAP_SECONDS,
@@ -971,35 +1062,43 @@ def mount(app, hub):
     def hot_public(value):
         return {**value, 'live_request': False, 'note': HOT_NOTE}
 
+    def hot_board(request, allowed):
+        if set(request.query) - allowed or any(len(request.query.getall(key)) != 1 for key in request.query):
+            raise HubError('invalid_parameters', '热榜查询参数无效。')
+        board = request.query.get('board', 'word_list')
+        if board != 'word_list' and board not in {'baidu_' + tab for tab in KNOWN_TABS}:
+            raise HubError('invalid_parameters', '热榜类型无效。')
+        return board
+
     async def hot_latest(request):
         require(request)
-        if request.query:
-            raise HubError('invalid_parameters', '最新热榜不接受查询参数。')
-        return reply(hot_public(s.latest_hot()))
+        board = hot_board(request, {'board'})
+        result = hot_public(s.latest_hot(board))
+        if board != 'word_list':
+            result['note'] = BAIDU_NOTE
+        return reply(result)
 
     async def hot_word(request):
         require(request)
-        if set(request.query) - {'sentence_id', 'word'} or any(len(request.query.getall(key)) != 1 for key in request.query):
-            raise HubError('invalid_parameters', '请只提供一个 sentence_id 或一个精确话题。')
+        board = hot_board(request, {'sentence_id', 'word', 'board'})
         sentence_id, word = request.query.get('sentence_id'), request.query.get('word')
-        if bool(sentence_id) == bool(word):
+        if bool(sentence_id) == bool(word) or (board != 'word_list' and sentence_id is not None):
             raise HubError('invalid_parameters', '请指定 sentence_id 或精确话题之一。')
         if sentence_id is not None and _HOT_ID.fullmatch(sentence_id) is None:
             raise HubError('invalid_parameters', 'sentence_id 无效。')
         if word is not None and (word != word.strip() or not 1 <= len(word) <= 200
                                  or any(ord(char) < 32 or ord(char) == 127 for char in word)):
             raise HubError('invalid_parameters', '话题须为 1—200 字的精确文本。')
-        history = s.hot_history(sentence_id=sentence_id, word=word)
-        history['note'] = HOT_NOTE + '仅返回实际上榜记录。'
+        history = s.hot_history(sentence_id=sentence_id, word=word, board=board)
+        history['note'] = (HOT_NOTE if board == 'word_list' else BAIDU_NOTE) + '仅返回实际上榜记录。'
         history['live_request'] = False
         return reply(history)
 
     async def hot_rising(request):
         require(request)
-        if request.query:
-            raise HubError('invalid_parameters', '飙升结果不接受查询参数。')
-        report = rising_report(s)
-        report.update(live_request=False, note=RISING_NOTE)
+        board = hot_board(request, {'board'})
+        report = rising_report(s, board=board)
+        report.update(live_request=False, note=RISING_NOTE + (BAIDU_NOTE if board != 'word_list' else ''))
         return reply(report)
 
     def group_id(request):
@@ -1118,7 +1217,13 @@ def mount(app, hub):
 
     async def hot_resume(request):
         require(request, admin=True)
-        s.set('hot_paused', None)
+        body = await read_json(request) if request.can_read_body else {}
+        if not isinstance(body, dict) or set(body) - {'platform', 'scope'} or set(request.query) - {'platform', 'scope'}:
+            raise HubError('invalid_parameters', '恢复范围无效。')
+        scopes = list(body.values()) + list(request.query.values())
+        if any(value not in ('baidu', 'douyin', 'hotlist') for value in scopes) or ('baidu' in scopes and any(value != 'baidu' for value in scopes)):
+            raise HubError('invalid_parameters', '恢复范围无效。')
+        s.set('baidu_hot_paused' if 'baidu' in scopes else 'hot_paused', None)
         return reply({'ok': True, 'note': '已恢复热榜调度。不会立即补抓，仍受间隔和每日成功上限约束。'})
 
     async def schema(request):
