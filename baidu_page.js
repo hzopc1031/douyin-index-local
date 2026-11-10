@@ -1,6 +1,6 @@
 async (query) => {
   const fail = status => ({status});
-  const schemaKeys = new Set(['status','data','uniqid','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio','wordlist','wordGraph']);
+  const schemaKeys = new Set(['status','data','uniqid','index','key','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio','wordlist','wordGraph']);
   const digest = (value, depth = 0) => {
     const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
     if (type === 'array') return {type, length:value.length, ...(value.length && depth < 3 ? {items:digest(value[0], depth)} : {})};
@@ -283,24 +283,38 @@ async (query) => {
     const feed = await get('/api/FeedSearchApi/getFeedIndex?' + params, {'Cipher-Text':signature});
     if (feed.status !== 'ok') return feed;
     const feedData = feed.data;
-    if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index) || feedData.index.length > query.keywords.length) return schema(feedData);
+    if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index) || feedData.index.length > query.keywords.length) return schema(feedData, {ptbk_length:0, name_matches:false});
     const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}));
     if (feedTable.status !== 'ok') return feedTable;
     const mapping = feedTable.data;
-    if (typeof mapping !== 'string' || !mapping.length || mapping.length > 256 || mapping.length % 2) return schema(feedData, {reason:'ptbk'});
+    const feedInfo = {ptbk_length:typeof mapping === 'string' ? mapping.length : 0, name_matches:false};
+    if (typeof mapping !== 'string' || !mapping.length || mapping.length > 256 || mapping.length % 2) return schema(feedData, {...feedInfo, reason:'ptbk'});
     const middle = mapping.length / 2, from = mapping.slice(0, middle), to = mapping.slice(middle);
-    if (new Set(from).size !== middle || new Set(to).size !== middle) return schema(feedData, {reason:'ptbk'});
+    if (new Set(from).size !== middle || new Set(to).size !== middle) return schema(feedData, {...feedInfo, reason:'ptbk'});
     const feeds = new Map();
     for (const item of feedData.index) {
-      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !query.keywords.includes(item.key) || feeds.has(item.key)) return schema(feedData, {reason:'word'});
-      if (item.startDate !== query.start_date || typeof item.endDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(item.endDate)) return schema(feedData, {reason:'series_shape'});
+      if (!item || typeof item !== 'object' || Array.isArray(item) || ![Object.prototype, null].includes(Object.getPrototypeOf(item))) return schema(feedData, {...feedInfo, reason:'word'});
+      const identities = [];
+      for (const field of ['key', 'name', 'word']) if (Object.hasOwn(item, field)) {
+        let value = item[field];
+        if (field === 'word' && Array.isArray(value)) {
+          if (value.length === 1 && Array.isArray(value[0])) value = value[0];
+          value = value.length === 1 && value[0] && typeof value[0] === 'object' && !Array.isArray(value[0]) &&
+            (!Object.hasOwn(value[0], 'wordType') || value[0].wordType === 1) ? value[0].name : null;
+        }
+        identities.push(value);
+      }
+      const word = identities[0];
+      const detail = {...feedInfo, name_matches:typeof word === 'string' && !!word && query.keywords.includes(word) && identities.every(value => value === word)};
+      if (!detail.name_matches || feeds.has(word)) return schema(feedData, {...detail, reason:'word'});
+      if (item.startDate !== query.start_date || typeof item.endDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(item.endDate)) return schema(feedData, {...detail, reason:'series_shape'});
       const last = Date.parse(item.endDate + 'T00:00:00Z');
-      if (!Number.isFinite(last) || new Date(last).toISOString().slice(0,10) !== item.endDate || last < start || last > end || typeof item.data !== 'string' || item.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(feedData, {reason:'series_shape'});
+      if (!Number.isFinite(last) || new Date(last).toISOString().slice(0,10) !== item.endDate || last < start || last > end || typeof item.data !== 'string' || item.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(feedData, {...detail, reason:'series_shape'});
       let plain = '';
-      for (const char of item.data) { const n = from.indexOf(char); if (n < 0) return schema(feedData, {reason:'token'}); plain += to[n]; }
+      for (const char of item.data) { const n = from.indexOf(char); if (n < 0) return schema(feedData, {...detail, reason:'token'}); plain += to[n]; }
       const tokens = plain === '' ? Array((last - start) / 86400000 + 1).fill('') : plain.split(',');
-      if (tokens.length !== (last - start) / 86400000 + 1 || tokens.some(token => token && !/^[0-9]{1,15}$/.test(token))) return schema(feedData, {reason:'point_count'});
-      feeds.set(item.key, tokens);
+      if (tokens.length !== (last - start) / 86400000 + 1 || tokens.some(token => token && !/^[0-9]{1,15}$/.test(token))) return schema(feedData, {...detail, reason:'point_count'});
+      feeds.set(word, tokens);
     }
     const feedRows = [];
     for (const word of query.keywords) {
