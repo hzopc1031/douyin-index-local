@@ -35,3 +35,13 @@
 资讯指数是全国日指标，不分 PC/移动，与搜索指数口径不同，也不等于搜索次数；结果待官方页面独立核对。关闭采集后已存数据仍可读取、导出。页面切换只读取数据库，不触发采集。
 
 上线开关需 root 写 systemd drop-in 并执行 daemon-reload，再重启 gateway 与 desktop（页内脚本在 desktop）。devbot 的免密 sudo 不能写 `/etc/systemd` 或执行 daemon-reload，与热搜开关相同。重启 desktop 可能中断当前百度浏览器窗口；持久 profile 通常还在，但进行中的登录和任务会被打断。
+
+### 媒体指数（默认关闭，待核对）
+
+[百度官方 Helper](http://index.baidu.com/Helper/) 将媒体指数定义为百度新闻频道收录的互联网媒体报道中，新闻标题包含关键词的数量；它与搜索指数的来源及计算方法无直接关系，也不区分 PC/移动。官方 FAQ 称搜索指数太低时无法计算媒体指数；官方不提供开放 API。
+
+请求路径与解析参考公开第三方 [qdata](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/extended_baidu_index.py)、[qdata common](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/common.py)、[baidux](https://github.com/iamsk/baidux/blob/master/baidux/extended_baidu_index.py) 和 [抓包笔记](https://blog.csdn.net/CY19980216/article/details/107650145)：`GET /api/NewsApi/getNewsIndex` 使用 `word`、`startDate`、`endDate`、`area` 及现有页内签名，公开响应形状为 `data.uniqid`、`data.index[]`（`key`、`startDate`、`endDate`、加密 `data`），再用对应 `/Interface/api/ptbk` 解密。词条支持 `key`/`word`/`name` 字符串或单词条数组，必须匹配查询词、不重复，出现 `wordType` 时须为 1。真实响应形状、词条字段实际形态、官方页面数值和自定义地域是否真能出媒体指数均未用本项目真实账号核对；baidux 称不支持细分地域，官方帮助对自定义地域的描述同时提到三种指数。本实现仅全国、日粒度、整体。
+
+网关仅在 `INDEX_HUB_BAIDU_NEWS_ENABLED=1` 时开启，其他值或未设置关闭；关联词和画像不采集媒体指数。每个搜索日期分片额外预占 2 HTTP，与搜索和资讯共用 120/400 工程额度：仅搜索为 2，加资讯或媒体为 4，两者都加为 6。资讯先于媒体；任一结构失败整个任务停止，不自动重试，空序列保存 missing，不补 0。24 小时完整缓存中，开启资讯须有 `feed_rows`，开启媒体须有 `news_rows`，两者同时开启须同时存在，即使全部 missing 也可命中。
+
+`GET /api/v1/series?platform=baidu&keyword=…&metric=news_index` 和同参数 `/api/v1/export.csv` 只读取已存数据，`device` 仅可省略或为 `all`，CSV 的 metric 为 `news_index`；关闭开关后仍可读取及导出。结果待官方页面独立核对。上线更新需重启 gateway（读取开关）和 desktop（页内脚本），本次未部署。
