@@ -297,7 +297,7 @@ async (query) => {
       const identities = [];
       for (const field of ['key', 'name', 'word']) if (Object.hasOwn(item, field)) {
         let value = item[field];
-        if (field === 'word' && Array.isArray(value)) {
+        if ((field === 'word' || field === 'key') && Array.isArray(value)) {
           if (value.length === 1 && Array.isArray(value[0])) value = value[0];
           value = value.length === 1 && value[0] && typeof value[0] === 'object' && !Array.isArray(value[0]) &&
             (!Object.hasOwn(value[0], 'wordType') || value[0].wordType === 1) ? value[0].name : null;
