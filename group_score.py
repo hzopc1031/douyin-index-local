@@ -121,6 +121,7 @@ def _search_score(store, keywords):
 
 
 def _latest_board(store):
+    # Fusion uses Douyin heat only.
     row = store.db.execute(
         "SELECT id, fetched FROM hot_snapshots WHERE board='word_list' "
         "ORDER BY fetched DESC, id DESC LIMIT 1").fetchone()

@@ -19,6 +19,10 @@ from platforms import registry, require_platform
 PLATFORMS = registry.descriptions()
 
 
+def valid_hot_board(board):
+    return isinstance(board, str) and (board == 'word_list' or re.fullmatch(r'baidu_[a-z0-9_]{1,40}', board) is not None)
+
+
 class HubError(ValueError):
     def __init__(self, code, message, status=400):
         super().__init__(message)
@@ -524,7 +528,7 @@ class Store:
 
     def save_hot_snapshot(self, snapshot):
         """Store one complete hot-list observation. Incomplete input is rejected."""
-        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True or snapshot.get('board') != 'word_list':
+        if not isinstance(snapshot, dict) or snapshot.get('complete') is not True or not valid_hot_board(snapshot.get('board')):
             raise HubError('incomplete_snapshot', '不完整的热榜快照不会入库。')
         items = snapshot.get('items')
         source = snapshot.get('source')
@@ -577,7 +581,7 @@ class Store:
         identifier = uuid.uuid4().hex
         with self.db:
             self.db.executemany('''INSERT INTO hot_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                                [(identifier, fetched, 'word_list', *row, source) for row in rows])
+                                [(identifier, fetched, snapshot['board'], *row, source) for row in rows])
         return identifier
 
     @staticmethod
@@ -589,25 +593,26 @@ class Store:
                 'word_type': json.loads(row['word_type']), 'group_id': row['group_id'],
                 'fetched_at': dt.datetime.fromtimestamp(row['fetched'], TZ).isoformat()}
 
-    def latest_hot(self):
+    def latest_hot(self, board='word_list'):
         row = self.db.execute(
-            "SELECT id FROM hot_snapshots WHERE board='word_list' ORDER BY fetched DESC, id DESC LIMIT 1").fetchone()
+            "SELECT id FROM hot_snapshots WHERE board=? ORDER BY fetched DESC, id DESC LIMIT 1", (board,)).fetchone()
         if row is None:
-            return {'board': 'word_list', 'source': None, 'fetched_at': None, 'items': []}
+            return {'board': board, 'source': None, 'fetched_at': None, 'items': []}
         rows = self.db.execute("SELECT * FROM hot_snapshots WHERE id=? ORDER BY position", (row['id'],)).fetchall()
-        return {'board': 'word_list', 'source': rows[0]['source'],
+        return {'board': board, 'source': rows[0]['source'],
                 'fetched_at': dt.datetime.fromtimestamp(rows[0]['fetched'], TZ).isoformat(),
                 'items': [self._hot_item(item) for item in rows]}
 
-    def hot_history(self, *, sentence_id=None, word=None):
+    def hot_history(self, *, sentence_id=None, word=None, board=None):
         if bool(sentence_id) == bool(word):
             raise HubError('invalid_parameters', '请指定 sentence_id 或精确话题之一。')
-        if sentence_id is not None:
-            rows = self.db.execute(
-                "SELECT * FROM hot_snapshots WHERE sentence_id=? ORDER BY fetched DESC LIMIT 500", (sentence_id,))
-        else:
-            rows = self.db.execute(
-                "SELECT * FROM hot_snapshots WHERE word=? ORDER BY fetched DESC LIMIT 500", (word,))
+        column, value = ('sentence_id', sentence_id) if sentence_id is not None else ('word', word)
+        sql = f"SELECT * FROM hot_snapshots WHERE {column}=?"
+        args = [value]
+        if board is not None:
+            sql += ' AND board=?'
+            args.append(board)
+        rows = self.db.execute(sql + ' ORDER BY fetched DESC LIMIT 500', args)
         points = [self._hot_item(item) for item in rows][::-1]
         return {'sentence_id': sentence_id, 'word': word, 'points': points}
 
