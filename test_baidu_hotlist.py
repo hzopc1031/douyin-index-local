@@ -50,6 +50,22 @@ class ProjectionTests(unittest.TestCase):
                 project_baidu_hot_list(p, 'realtime')
             self.assertEqual(e.exception.code, 'incomplete')
 
+    def test_unique_pinned_rank_collision_is_omitted(self):
+        p = payload()
+        p['data']['cards'][0]['topContent'] = [{'word': '丙', 'index': 0}]
+        items = project_baidu_hot_list(p, 'realtime')['items']
+        self.assertEqual([(item['word'], item['position']) for item in items], [('甲', 1), ('乙', 2)])
+
+    def test_pinned_list_shape(self):
+        p = payload()
+        card = p['data']['cards'][0]
+        del card['topContent']
+        self.assertEqual(len(project_baidu_hot_list(p, 'realtime')['items']), 2)
+        card['topContent'] = None
+        with self.assertRaises(HotListError) as e:
+            project_baidu_hot_list(p, 'realtime')
+        self.assertEqual(e.exception.code, 'incomplete')
+
     def test_client(self):
         for body, status, code in [(payload(), 200, None), (b'', 302, 'redirect_rejected'),
                                    (b'', 403, 'access_denied'), (b'', 429, 'rate_limited'),
@@ -119,7 +135,9 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.calls, [])
             with patch.dict(os.environ, {'INDEX_HUB_BAIDU_HOTLIST_ENABLED': '1', 'INDEX_HUB_BAIDU_HOTLIST_TABS': 'realtime,novel,movie'}):
                 client.errors = {'novel': 'incomplete'}
-                self.assertEqual((await hub.run_baidu_hot_once(client=client, now=now))['stored'], 2)
+                with patch('hub_web.logger.warning') as warning:
+                    self.assertEqual((await hub.run_baidu_hot_once(client=client, now=now))['stored'], 2)
+                warning.assert_called_once_with('baidu hotlist stopped code=%s message=%s', 'incomplete', 'synthetic')
                 self.assertEqual(client.calls, ['realtime', 'novel', 'movie'])
                 self.assertIsNone(hub.store.get('baidu_hot_paused'))
                 self.assertEqual(hub.store.latest_hot('baidu_novel')['items'], [])
