@@ -53,6 +53,21 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(HubError):
             b.public_result(result)
 
+    def test_news_page_bridge_and_validation(self):
+        q = query()
+        search = b.parse_index(fixture(), PTBK, q)['rows']
+        news = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        class Page:
+            def query(self, payload):
+                assert payload['_news_enabled'] is True and payload['_feed_enabled'] is True
+                return {'rows': search, 'feed_rows': news, 'news_rows': news}
+        result = b.collect_page(q, Page(), feed_enabled=True, news_enabled=True)
+        self.assertEqual(b.public_result(result)['news_rows'], news)
+        result['news_rows'] = news * 2
+        from hub_store import HubError
+        with self.assertRaises(HubError):
+            b.public_result(result)
+
     def test_csv_escapes_formula_for_each_device(self):
         adapter = b.BaiduAdapter()
         data = {'keyword': '=合成词', 'device': 'all_devices', 'points': [

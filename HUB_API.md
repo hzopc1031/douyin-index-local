@@ -359,3 +359,11 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 `GET /api/v1/series?platform=baidu&keyword=…&metric=feed_index` 和 `GET /api/v1/export.csv` 的同样参数只读取已存资讯指数；`device` 仅支持 `all`（可省略）。CSV 的 `metric` 为 `feed_index`。关闭开关后已存数据仍可读和导出。该指标不分 PC/移动，与搜索指数口径不同，不等于搜索次数，结果待核对。
 
 启用需 root 写 systemd drop-in 并执行 daemon-reload，重启 gateway 和 desktop（页内脚本在 desktop）。devbot 的免密 sudo 不能写 `/etc/systemd` 或执行 daemon-reload，与热搜开关相同。重启 desktop 可能中断百度浏览器窗口；持久 profile 通常还在，进行中的登录和任务会被打断。
+
+### 百度媒体指数
+
+`INDEX_HUB_BAIDU_NEWS_ENABLED=1` 才开启，默认关闭；关联词和画像不采集。全国、整体、日粒度，每个搜索分片新增媒体请求及对应 ptbk，搜索、资讯、媒体共用 120/400 工程额度，分别预占：仅搜索 2，搜索加资讯或媒体 4，三者均开 6。结构失败整个任务停止，不自动重试；空值保存 missing，不补 0。开启资讯或媒体时，完整缓存分别必须含 `feed_rows` 或 `news_rows`；两者同时开启必须都有，即使全 missing 也可命中。
+
+`GET /api/v1/series?platform=baidu&keyword=…&metric=news_index` 与同参数 `/api/v1/export.csv` 仅读取已存数据；`device` 仅支持 `all` 或省略，CSV metric 为 `news_index`。关闭开关后仍可读、导出。媒体指数是百度新闻收录的新闻标题含关键词的数量，不是搜索次数，不分 PC/移动，与搜索和资讯指数口径不同，结果待核对。
+
+[官方 Helper](http://index.baidu.com/Helper/) 描述统计口径和低搜索指数时无数据；官方不提供开放 API。[qdata](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/extended_baidu_index.py)、[common](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/common.py)、[baidux](https://github.com/iamsk/baidux/blob/master/baidux/extended_baidu_index.py) 和 [抓包笔记](https://blog.csdn.net/CY19980216/article/details/107650145) 提供第三方路径和解析：`/api/NewsApi/getNewsIndex` 的 `word`、`startDate`、`endDate`、`area`，响应 `data.uniqid`、`data.index[]` 的 `key`、`startDate`、`endDate`、加密 `data` 及对应 `/Interface/api/ptbk`。真实响应形状、词条实际形态、官方页面数值和自定义地域能否出媒体指数均未用本项目账号核对；第三方称不支持细分地域，官方帮助则同时对三种指数提到自定义地域。本步仅全国。上线更新需重启读取开关的 gateway 和运行页内脚本的 desktop；本次未部署。

@@ -279,8 +279,8 @@ async (query) => {
       const count = Math.min(...['all','pc','wise'].map(device => wordRows.filter(row => row.device === device).length));
       rows.push(...wordRows.filter(row => Date.parse(row.date + 'T00:00:00Z') < start + count * 86400000));
     }
-    if (!query._feed_enabled) return {status:'ok', rows};
-    const feed = await get('/api/FeedSearchApi/getFeedIndex?' + params, {'Cipher-Text':signature});
+    async function extraIndex(path) {
+    const feed = await get(path + '?' + params, {'Cipher-Text':signature});
     if (feed.status !== 'ok') return feed;
     const feedData = feed.data;
     if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index)) return schema(feedData, {ptbk_length:0, name_matches:false});
@@ -297,13 +297,14 @@ async (query) => {
       const identities = [];
       for (const field of ['key', 'name', 'word']) if (Object.hasOwn(item, field)) {
         let value = item[field];
-        if ((field === 'word' || field === 'key') && Array.isArray(value)) {
+        if (Array.isArray(value)) {
           if (value.length === 1 && Array.isArray(value[0])) value = value[0];
           value = value.length === 1 && value[0] && typeof value[0] === 'object' && !Array.isArray(value[0]) &&
             (!Object.hasOwn(value[0], 'wordType') || value[0].wordType === 1) ? value[0].name : null;
         }
         identities.push(value);
       }
+      if (Object.hasOwn(item, 'wordType') && item.wordType !== 1) return schema(feedData, {...feedInfo, reason:'word'});
       const word = identities[0];
       const detail = {...feedInfo, name_matches:typeof word === 'string' && !!word && query.keywords.includes(word) && identities.every(value => value === word)};
       if (!detail.name_matches || feeds.has(word)) return schema(feedData, {...detail, reason:'word'});
@@ -321,6 +322,15 @@ async (query) => {
       const tokens = feeds.get(word) || Array(days).fill('');
       for (let i = 0; i < tokens.length; i++) feedRows.push({keyword:word, device:'all', date:new Date(start + i * 86400000).toISOString().slice(0,10), value:tokens[i] ? Number(tokens[i]) : null, value_status:tokens[i] ? 'available' : 'missing'});
     }
-    return {status:'ok', rows, feed_rows:feedRows};
+    return {status:'ok', rows:feedRows};
+    }
+    const result = {status:'ok', rows};
+    for (const [enabled, path, field] of [[query._feed_enabled, '/api/FeedSearchApi/getFeedIndex', 'feed_rows'], [query._news_enabled, '/api/NewsApi/getNewsIndex', 'news_rows']]) {
+      if (!enabled) continue;
+      const extra = await extraIndex(path);
+      if (extra.status !== 'ok') return extra;
+      result[field] = extra.rows;
+    }
+    return result;
   } catch (_) { return fail('network_error'); }
 }

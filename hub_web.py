@@ -962,7 +962,7 @@ def mount(app, hub):
         if device is not None and device not in (('all', 'pc', 'wise', 'all_devices') if platform == 'baidu' else ('all', 'pc', 'wise')):
             raise HubError('invalid_parameters', '不支持的设备。')
         metric = request.query.get('metric')
-        if metric is not None and (platform != 'baidu' or metric not in ('search_index', 'feed_index')):
+        if metric is not None and (platform != 'baidu' or metric not in ('search_index', 'feed_index', 'news_index')):
             raise HubError('invalid_parameters', '不支持的指标。')
         args = (s, request.query.get('keyword'), request.query.get('start_date'), request.query.get('end_date'))
         if platform == 'baidu' and (device is not None or metric is not None):
