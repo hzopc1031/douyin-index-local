@@ -3,7 +3,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8');
 const code=html.slice(html.indexOf('async function loadSeries()'),html.indexOf("document.querySelectorAll('[data-device]')"));
 const nodes={};const $=id=>nodes[id]??={value:'',style:{},dataset:{},textContent:'',innerHTML:''};
-$('#keywordSelect').value='合成词';
+$('#keywordSelect').value='合成词';$('#baiduWords').hidden=true;
 const modulesCode=html.slice(html.indexOf('function platformInfo('),html.indexOf('function drawPlatforms('));
 const modulesCtx=vm.createContext({platforms:[{id:'douyin',modules:['related','audience']},{id:'baidu',modules:['related','audience']},{id:'empty'}],chosenPlatform:'douyin'});
 vm.runInContext(modulesCode,modulesCtx);
@@ -12,7 +12,7 @@ assert.deepEqual(Array.from(modulesCtx.platformModules('baidu')),['related','aud
 assert.deepEqual(Array.from(modulesCtx.platformModules('empty')),[]);
 const calls=[],drawn=[];
 const ctx=vm.createContext({$,chosenPlatform:'douyin',platforms:[{id:'douyin',available:true},{id:'baidu',available:true}],
- baiduDevice:'all',rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
+ baiduDevice:'all',baiduWords:[],rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
  api:path=>new Promise(resolve=>calls.push({path,resolve}))});
 vm.runInContext(code,ctx);
 (async()=>{

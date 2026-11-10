@@ -49,7 +49,7 @@ def run(output=None):
                                         daily=dict(attempts=0, http_reserved=0),
                                         limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
-                        data = {'datasets': [{'metadata': raw['metadata'], 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
+                        data = {'datasets': [{'metadata': {**raw['metadata'], 'keywords': ['合成词甲', '合成词乙'], 'verification': 'pending'}, 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
                     elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
                     elif path == 'insights':
@@ -57,17 +57,23 @@ def run(output=None):
                         if params.get('platform') == ['baidu'] and params.get('kind') == ['related']:
                             data = {'status': 'available', 'result': {
                                 'data': {'search_related': [{'keyword': '合成关联词', 'relation_score': None, 'search_index': None, 'composite_index': None}], 'content_related': []},
-                                'metadata': {**q, 'source': '离线合成样例', 'fetched_at': '离线合成样例',
+                                'metadata': {**q, 'verification': 'pending', 'source': '离线合成样例', 'fetched_at': '离线合成样例',
                                     'related_period': {'start_date': '2025-11-09', 'end_date': '2026-11-01', 'days': 358}}}}
+                        elif params.get('platform') == ['baidu'] and params.get('kind') == ['audience']:
+                            data = {'status': 'available', 'result': {'data': {'value_unit': 'upstream_raw', 'dimensions': [{'dimension': 'gender', 'name': '性别', 'labels': [{'name': '合成分组', 'value': 12, 'tgi': None}]}]}, 'metadata': {**q, 'verification': 'pending', 'source': '离线合成样例', 'fetched_at': '离线合成样例', 'audience_period': {'start_date': '2026-10-01', 'end_date': '2026-10-07', 'days': 7}}}}
                         else: data = {'status': 'no_data'}
                     elif path == 'jobs': data = {'jobs': []}
                     elif path == 'groups': data = {'groups': [], 'live_request': False}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
+                    elif path == 'export.csv':
+                        params = parse_qs(url.query)
+                        assert params.get('device') == ['all_devices']
+                        return r.fulfill(content_type='text/csv', body='\ufeffkeyword,device\r\n'+params['keyword'][0]+',all\r\n'+params['keyword'][0]+',pc\r\n'+params['keyword'][0]+',wise\r\n')
                     elif path == 'series':
                         params = parse_qs(url.query)
                         platform = params['platform'][0]
                         device = params.get('device', ['all'])[0]
-                        data = {**b.DIMENSIONS, 'platform': platform, 'device': device, 'keyword': q['keywords'][0], 'points': [
+                        data = {**b.DIMENSIONS, 'platform': platform, 'device': device, 'keyword': params['keyword'][0], 'points': [
                             dict(date=row['date'], value=None if low_volume[0] else (100 + i * 20 + {'all': 0, 'pc': 30, 'wise': 60}[device]), composite_index=200+i*10 if platform == 'douyin' else None, value_status='low_volume' if low_volume[0] else 'available') for i, row in enumerate(raw['rows']) if row['device'] == 'all']}
                     else:
                         unexpected.append(path)
@@ -94,10 +100,20 @@ def run(output=None):
                 page.locator('#insightEnd').fill(q['end_date'])
                 page.evaluate('loadSeries()')
                 page.wait_for_selector('#chart svg')
-                assert page.locator('#chart svg polyline').count() > 0
+                assert page.locator('#chart svg polyline').count() >= 2
+                assert '合成词甲' in page.locator('#chart').inner_text()
+                assert '合成词乙' in page.locator('#chart').inner_text()
+                with page.expect_download() as download_info:
+                    page.locator('#exportLink').click()
+                download = download_info.value
+                csv = Path(download.path()).read_text(encoding='utf-8-sig')
+                assert csv.count('keyword,device') == 1 and all(word in csv for word in ('合成词甲', '合成词乙'))
+                page.locator('#chartMode').select_option('indexed')
+                page.wait_for_function("document.querySelector('#metricLabel').textContent.includes('独立归一化')")
+                assert page.locator('#chart svg polyline').count() >= 2
                 for device in ('all', 'pc', 'wise'):
                     page.locator(f'[data-device={device}]').click()
-                    page.wait_for_function('(device) => document.querySelector("#exportLink").href.includes("device="+device)', arg=device)
+                    page.wait_for_function('(device) => document.querySelector("#exportLink").href.includes("device=all_devices")', arg=device)
                     page.wait_for_selector('#chart svg circle')
                     assert page.locator('#chart svg circle').count() > 0
                     if output and width == 1280:
@@ -116,6 +132,13 @@ def run(output=None):
                 related.locator('.info-button').hover()
                 assert '百度相关词窗口：2025-11-09 至 2026-11-01（358 天）' in related.inner_text()
                 assert '离线合成样例' in related.inner_text()
+                assert '页面核对待记录' in related.inner_text()
+                assert page.locator('#relatedSort option[value=composite_index]').is_hidden()
+                page.locator('#resultTab-audience').click()
+                page.wait_for_function("document.querySelector('#audienceData').textContent.includes('合成分组')")
+                assert '页面核对待记录' in page.locator('#audienceData').inner_text()
+                assert '单位为上游原值、尚未与官方页核对' in page.locator('#audienceData').inner_text()
+                assert '2026-10-01 至 2026-10-07' in page.locator('#audienceData').inner_text()
                 assert '单日快照' not in related.inner_text()
                 if output and width == 1280:
                     page.screenshot(path=str(output/'2026-11-05-baidu-related-period-ui-desktop.png'))
@@ -148,6 +171,9 @@ def run(output=None):
                 page.locator('#submitButton').click()
                 page.wait_for_function('reportBatch?.entries.every(e=>e.jobId)')
                 assert writes == [('queries', q), ('insights/queries', {**q, 'kind': 'related'}), ('insights/queries', {**q, 'kind': 'audience'})], writes
+                page.locator('#platformChips [data-platform=douyin]').click()
+                assert page.locator('#baiduWords').is_hidden() and page.locator('#keywordSelect').is_visible()
+                page.wait_for_function("!document.querySelector('#showComposite').parentElement.hidden")
                 assert not errors, errors
                 assert not unexpected, unexpected
                 print(f'PASS Baidu {width}px: selectable, pending login, null/low-volume, source, trend and related tasks')
