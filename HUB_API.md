@@ -350,9 +350,9 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 
 ### 百度资讯指数
 
-`INDEX_HUB_BAIDU_FEED_ENABLED=1` 才开启资讯指数采集，默认关闭；每个搜索日期分片额外请求 `/api/FeedSearchApi/getFeedIndex` 和对应的 `/Interface/api/ptbk`，共预占 4 HTTP/分片，关闭时为 2，共用百度 120/400 工程额度。结构异常使整个任务失败并暂停；官方空序列保留缺失，不补 0。接口尚未用真实账号验证。
+`INDEX_HUB_BAIDU_FEED_ENABLED=1` 才开启资讯指数采集，默认关闭；每个搜索日期分片额外请求 `/api/FeedSearchApi/getFeedIndex` 和对应的 `/Interface/api/ptbk`，共预占 4 HTTP/分片，关闭时为 2，共用百度 120/400 工程额度。结构异常使整个任务失败并暂停；官方空序列保留缺失，不补 0。完整结果尚未用真实账号验证。
 
-词条身份兼容 `key` 字符串与 `word`/`name`（包括搜索接口同款结构），仍须等于查询词且不重复；**真实返回形状尚未用账号核对，修法基于推断**。
+词条身份兼容 `key` 字符串及搜索接口同款数组 `[{name, wordType}]` / `[[{name, wordType}]]`，也兼容 `word`/`name` 原有形状，仍须等于查询词且不重复。只读日志已见 `index[].key` 为 `[{name, wordType}]`，其中 `wordType` 为 number，但看不到 `name` 词面值及 `wordType` 是否为 1；官方页面数值仍待核对。
 
 开关打开时，24 小时内的完整缓存若无资讯指数则不命中，将重新采集搜索和资讯指数。
 
