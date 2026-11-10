@@ -7,9 +7,9 @@ from hotlist_client import (HotListError, MAX_ITEMS, MAX_POSITION, MAX_RESPONSE_
                             REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT, SHANGHAI,
                             _HEADERS, _REDIRECTS, _error, _json_loads, _optional_heat, _word)
 
-DEFAULT_TABS = ('realtime', 'novel', 'movie', 'teleplay')
-KNOWN_TABS = DEFAULT_TABS + ('livelihood', 'finance', 'sports', 'new_entertainment',
-                             'internation_news', 'challenge', 'drama', 'car', 'game')
+DEFAULT_TABS = ('realtime', 'novel', 'movie', 'teleplay', 'livelihood', 'finance', 'sports',
+                'new_entertainment', 'internation_news', 'challenge', 'car', 'game')
+KNOWN_TABS = DEFAULT_TABS + ('drama',)
 SOURCE = 'https://top.baidu.com/api/board?platform=pc&tab='
 
 

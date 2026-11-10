@@ -342,7 +342,7 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 
 ## 百度热搜榜（草稿）
 
-百度热搜来自 `https://top.baidu.com/api/board?platform=pc&tab=<tab>`，免登录；百度热搜热度不是百度搜索指数，缺失为 null，未上榜不记 0。只保存完整快照，不回填历史。初始榜单为 `baidu_realtime`、`baidu_novel`、`baidu_movie`、`baidu_teleplay`；每次采集仍须通过完整性校验。可用 `INDEX_HUB_BAIDU_HOTLIST_TABS` 指定逗号分隔的已知 tab；非法项忽略，不采集 homepage。额外分类的实时完整性仍待核实。
+百度热搜来自 `https://top.baidu.com/api/board?platform=pc&tab=<tab>`，免登录；百度热搜热度不是百度搜索指数，缺失为 null，未上榜不记 0。只保存完整快照，不回填历史。默认榜单依次为 `realtime`、`novel`、`movie`、`teleplay`、`livelihood`、`finance`、`sports`、`new_entertainment`、`internation_news`、`challenge`、`car`、`game`（API 榜单名前加 `baidu_`）；每次采集仍须通过完整性校验。默认每轮请求 12 个 tab，至少保存一个榜单时计为一次每日成功。可用 `INDEX_HUB_BAIDU_HOTLIST_TABS` 指定逗号分隔的已知 tab；默认不调度 drama、documentary、homepage，非法项忽略，homepage 不采集。
 
 独立开关 `INDEX_HUB_BAIDU_HOTLIST_ENABLED=1` 才启动；默认关闭。`INDEX_HUB_BAIDU_HOTLIST_INTERVAL_SECONDS` 默认 3600，最低 1800，非法回退 3600。一个周期逐榜各请求一次，不重试；上海自然日最多 48 个成功周期，至少保存一个榜才计一次。403、429 或非 JSON 只暂停百度调度，管理员用 `POST /api/v1/hot/resume` 和 `{"platform":"baidu"}` 单独恢复；不带范围仍只恢复抖音，恢复不会立即采集。`GET /status` 的 `baidu_hotlist` 独立列出配置和状态，不消耗抖音热榜或搜索指数额度。
 
