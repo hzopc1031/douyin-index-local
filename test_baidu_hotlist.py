@@ -56,15 +56,36 @@ class ProjectionTests(unittest.TestCase):
         items = project_baidu_hot_list(p, 'realtime')['items']
         self.assertEqual([(item['word'], item['position']) for item in items], [('甲', 1), ('乙', 2)])
 
+    def test_category_null_pinned(self):
+        p = payload()
+        card = p['data']['cards'][0]
+        card['component'] = 'textImgListVerticalNormal'
+        card['content'][1]['hotScore'] = '800'
+        card['topContent'] = None
+        for tab in ('novel', 'movie', 'teleplay'):
+            with self.subTest(tab=tab):
+                result = project_baidu_hot_list(p, tab)
+                self.assertEqual([(i['word'], i['position'], i['hot_value']) for i in result['items']],
+                                 [('甲', 1, 1200), ('乙', 2, 800)])
+
     def test_pinned_list_shape(self):
         p = payload()
         card = p['data']['cards'][0]
         del card['topContent']
         self.assertEqual(len(project_baidu_hot_list(p, 'realtime')['items']), 2)
-        card['topContent'] = None
-        with self.assertRaises(HotListError) as e:
-            project_baidu_hot_list(p, 'realtime')
-        self.assertEqual(e.exception.code, 'incomplete')
+        for value in ('invalid', {}):
+            card['topContent'] = value
+            with self.subTest(value=value), self.assertRaises(HotListError) as e:
+                project_baidu_hot_list(p, 'realtime')
+            self.assertEqual(e.exception.code, 'incomplete')
+
+    def test_invalid_content(self):
+        for value in (None, [], 'invalid'):
+            p = payload()
+            p['data']['cards'][0]['content'] = value
+            with self.subTest(value=value), self.assertRaises(HotListError) as e:
+                project_baidu_hot_list(p, 'novel')
+            self.assertEqual(e.exception.code, 'incomplete')
 
     def test_client(self):
         for body, status, code in [(payload(), 200, None), (b'', 302, 'redirect_rejected'),

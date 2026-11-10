@@ -22,6 +22,8 @@ def project_baidu_hot_list(payload, tab, *, fetched_at=None):
         raise _error('incomplete', '百度热榜卡片无法核验。')
     card = cards[0]
     rows, pinned = card.get('content'), card.get('topContent', [])
+    if pinned is None:
+        pinned = []
     if not isinstance(card.get('component'), str) or not isinstance(rows, list) or not rows or not isinstance(pinned, list):
         raise _error('incomplete', '百度热榜词列表无法核验。')
     items, words, positions = [], set(), set()
