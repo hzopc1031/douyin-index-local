@@ -1,5 +1,7 @@
 # 百度搜索指数
 
+百度热搜默认依次采集 `realtime`、`novel`、`movie`、`teleplay`、`livelihood`、`finance`、`sports`、`new_entertainment`、`internation_news`、`challenge`、`car`、`game`。默认每轮请求 12 个 tab，至少保存一个榜单时计为一次每日成功。`drama`、`documentary`、`homepage` 不在默认调度中；可用 `INDEX_HUB_BAIDU_HOTLIST_TABS` 覆盖已知 tab，homepage 始终不采集。
+
 百度使用独立的有头 Playwright Chromium 持久 profile，由桌面进程按需启动并在空闲 300 秒后关闭；`INDEX_HUB_BAIDU_IDLE_SECONDS` 可设置 1–86400 秒。默认资料目录是项目下 `.cloud-home/baidu-profile`，可用 `INDEX_HUB_BAIDU_PROFILE_DIR` 指定其他服务账号所有的私有目录。目录 0700、文件由 077 umask 限制，拒绝不安全的路径、符号链接和非本用户所有的资料；不要提交、上传或打印浏览器资料。百度与抖音 profile 和浏览器进程分开。profile 近似明文存放登录态，能够读取资料的系统用户可以获得该账号登录态。
 
 管理员在 Hub 查询对话框点击「打开百度登录窗口」，在中枢显示的二维码上扫码；二维码未就绪或失效时可刷新图片，远程桌面仍可作为备选。图片只截取百度登录页面识别到的二维码元素，在内存中传递；百度页面结构变化可能需要更新定位。登录状态使用浏览器内 Cookie 名称和有效期检查，不传出 Cookie 值；登录状态和官方签名脚本尚未在线验证，状态为 `signature_unavailable`、登录失败、验证、异常访问或限流时停止并处理。查询在官方页面中生成签名、同源请求搜索指数和 ptbk 并在页面内解码；仅日序列和状态通过私有 Unix bridge，Cookie、签名、解码表和原始正文不进入 Hub、结果或日志。单步超时 25 秒，响应最多 1 MiB，不跟随重定向、不自动重试。页面改版或风控可能使此链路失效。

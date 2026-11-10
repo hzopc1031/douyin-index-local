@@ -10,7 +10,7 @@ import requests
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from baidu_hotlist_client import BaiduHotListClient, project_baidu_hot_list
+from baidu_hotlist_client import BaiduHotListClient, DEFAULT_TABS, KNOWN_TABS, project_baidu_hot_list
 from hotlist_client import HotListError, project_hot_list
 from hot_rising import rising_report
 from group_score import group_score
@@ -30,6 +30,15 @@ def snapshot(tab='realtime'):
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_default_tabs(self):
+        self.assertEqual(DEFAULT_TABS, ('realtime', 'novel', 'movie', 'teleplay', 'livelihood', 'finance',
+                                        'sports', 'new_entertainment', 'internation_news', 'challenge', 'car', 'game'))
+        self.assertIn('drama', KNOWN_TABS)
+        for tab in ('drama', 'homepage', 'documentary'):
+            self.assertNotIn(tab, DEFAULT_TABS)
+        self.assertNotIn('homepage', KNOWN_TABS)
+        self.assertNotIn('documentary', KNOWN_TABS)
+
     def test_projection(self):
         result = snapshot()
         self.assertEqual(result['board'], 'baidu_realtime')
@@ -67,6 +76,16 @@ class ProjectionTests(unittest.TestCase):
                 result = project_baidu_hot_list(p, tab)
                 self.assertEqual([(i['word'], i['position'], i['hot_value']) for i in result['items']],
                                  [('甲', 1, 1200), ('乙', 2, 800)])
+
+    def test_new_category_fields(self):
+        p = payload()
+        card = p['data']['cards'][0]
+        card.update(component='textImgListHorizontalNormal', typeName='general_board', topContent=None)
+        card['content'][0]['price'] = 'synthetic'
+        result = project_baidu_hot_list(p, 'car')
+        self.assertEqual(result['board'], 'baidu_car')
+        self.assertEqual([(i['position'], i['hot_value']) for i in result['items']], [(1, 1200), (2, None)])
+        self.assertNotIn('price', result['items'][0])
 
     def test_pinned_list_shape(self):
         p = payload()
