@@ -537,6 +537,7 @@ class BaiduAdapter:
             data['points'] = [point for name in ('all', 'pc', 'wise')
                               for point in self.series(store, keyword, start, end, name)['points']]
             data['device'] = device
+            data['metric_name'] = '搜索指数'
             return data
         if device not in ('all', 'pc', 'wise'):
             raise HubError('invalid_parameters', '不支持的设备。')
