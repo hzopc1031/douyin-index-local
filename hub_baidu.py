@@ -88,7 +88,7 @@ def fail(store, job_id, code):
 
 def related_date(store, query):
     row = store.db.execute("""SELECT max(day) FROM baidu_points WHERE keyword=? AND region=?
-        AND value_status='available' AND day<=?""",
+        AND metric='search_index' AND value_status='available' AND day<=?""",
         (query['keywords'][0], '全国', query['end_date'])).fetchone()
     return row[0] or min(query['end_date'], (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
 
@@ -113,7 +113,8 @@ async def run_one(hub, row, query):
         if time.time() < store.get('baidu.next_attempt_at', 0):
             return False
         counter = daily(store)
-        http_reserved = 1 if query.get('kind') == 'related' else 3 if query.get('kind') == 'audience' else 2 * len(list(adapter.chunks(query)))
+        feed_enabled = os.environ.get('INDEX_HUB_BAIDU_FEED_ENABLED') == '1' and query.get('kind') not in ('related', 'audience')
+        http_reserved = 1 if query.get('kind') == 'related' else 3 if query.get('kind') == 'audience' else (4 if feed_enabled else 2) * len(list(adapter.chunks(query)))
         if counter['attempts'] >= config['logical_daily'] or counter['http_reserved'] + http_reserved > config['http_daily']:
             fail(store, row['id'], 'baidu_daily_limit')
             return True
@@ -134,6 +135,8 @@ async def run_one(hub, row, query):
         try:
             selected_date = previous_sunday(related_date(store, query)) if query.get('kind') == 'related' and os.environ.get('BAIDU_RELATED_SUNDAY_FALLBACK') == '1' else None
             payload = {**query, '_budget_day': counter['date'], '_job_id': row['id']}
+            if feed_enabled:
+                payload['_feed_enabled'] = True
             if selected_date:
                 payload['related_date'] = selected_date
             response = await asyncio.to_thread(hub.bridge, 'baidu_query', payload, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
@@ -152,6 +155,8 @@ async def run_one(hub, row, query):
                 store.save_insight(query, result)
                 store.update_job(row['id'], 'no_data' if result.get('no_data') else 'succeeded', result=result)
                 return True
+            if feed_enabled and 'feed_rows' not in response:
+                raise HubError('invalid_result', '百度资讯结果缺失。')
             result = adapter.public_result(response)
             if any(result['metadata'][k] != query[k] for k in ('platform', 'keywords', 'start_date', 'end_date')):
                 raise HubError('invalid_result', '百度结果与任务不一致。')

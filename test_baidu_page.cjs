@@ -21,6 +21,24 @@ async function run(mode) {
 }
 (async () => {
   // Synthetic fixtures only: exercise request shapes and validation offline.
+  for (const enabled of [false, true]) {
+    const paths = [];
+    const series = {startDate:query.start_date,endDate:query.end_date,data:'abcbabcbabcba'};
+    const fetch = async (url, options) => {
+      paths.push(url);
+      if (url.includes('FeedSearchApi')) assert.equal(options.headers['Cipher-Text'], 'synthetic-signature');
+      const data = url.includes('FeedSearchApi') ? {uniqid:'feed-id',index:[{key:'synthetic-word',...series,data:'abbcbabcbabc'}]} : url.includes('SearchApi/index') ? {uniqid:'search-id',userIndexes:[{word:[{name:'synthetic-word',wordType:1}],all:series,pc:series,wise:series}]} : 'abc1,2';
+      return new Response(JSON.stringify({status:0,data}), {headers:{'content-type':'application/json'}});
+    };
+    const timer = (...args) => {const h=setTimeout(...args);h.unref();return h};
+    const context = {location:{origin:query._origin},window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}},fetch,URLSearchParams,AbortController,TextDecoder,Uint8Array,Response,setTimeout:timer,clearTimeout};
+    const result = await vm.runInNewContext(script,context)({...query,_feed_enabled:enabled});
+    assert.equal(result.status,'ok');
+    assert.equal(paths.length,enabled?4:2);
+    assert.equal(paths.filter(p=>p.includes('FeedSearchApi')).length,enabled?1:0);
+    assert.equal(paths.filter(p=>p.includes('/ptbk?')).length,enabled?2:1);
+    if (enabled) { assert.equal(result.feed_rows.length,7); assert.equal(result.feed_rows[1].value,null); assert.equal(result.feed_rows[0].value,1); }
+  }
   async function audience(overrides = {}) {
     const paths = [];
     const social = {result:[{word:'synthetic-word', gender:[{desc:'男',rate:0.6,tgi:120}], age:[{desc:'青年',rate:0.4,tgi:90}]}]};

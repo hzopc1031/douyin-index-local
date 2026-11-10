@@ -347,3 +347,11 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 独立开关 `INDEX_HUB_BAIDU_HOTLIST_ENABLED=1` 才启动；默认关闭。`INDEX_HUB_BAIDU_HOTLIST_INTERVAL_SECONDS` 默认 3600，最低 1800，非法回退 3600。一个周期逐榜各请求一次，不重试；上海自然日最多 48 个成功周期，至少保存一个榜才计一次。403、429 或非 JSON 只暂停百度调度，管理员用 `POST /api/v1/hot/resume` 和 `{"platform":"baidu"}` 单独恢复；不带范围仍只恢复抖音，恢复不会立即采集。`GET /status` 的 `baidu_hotlist` 独立列出配置和状态，不消耗抖音热榜或搜索指数额度。
 
 `GET /hot/latest?board=baidu_realtime`、`GET /hot/word?board=baidu_realtime&word=...` 和 `GET /hot/rising?board=baidu_realtime` 只读取对应榜单；不提供 board 时默认 `word_list`（抖音）。百度没有 sentence_id，飙升阈值沿用第一期设置，可能需要按百度热度校准，百度话题的抖音搜索指数环比不显示。关键词组融合只使用抖音热搜热度。描述、链接、图片、变化和标签等额外字段暂不保存。
+
+### 百度资讯指数
+
+`INDEX_HUB_BAIDU_FEED_ENABLED=1` 才开启资讯指数采集，默认关闭；每个搜索日期分片额外请求 `/api/FeedSearchApi/getFeedIndex` 和对应的 `/Interface/api/ptbk`，共预占 4 HTTP/分片，关闭时为 2，共用百度 120/400 工程额度。结构异常使整个任务失败并暂停；官方空序列保留缺失，不补 0。接口尚未用真实账号验证。
+
+`GET /api/v1/series?platform=baidu&keyword=…&metric=feed_index` 和 `GET /api/v1/export.csv` 的同样参数只读取已存资讯指数；`device` 仅支持 `all`（可省略）。CSV 的 `metric` 为 `feed_index`。关闭开关后已存数据仍可读和导出。该指标不分 PC/移动，与搜索指数口径不同，不等于搜索次数，结果待核对。
+
+启用需 root 写 systemd drop-in 并执行 daemon-reload，重启 gateway 和 desktop（页内脚本在 desktop）。devbot 的免密 sudo 不能写 `/etc/systemd` 或执行 daemon-reload，与热搜开关相同。重启 desktop 可能中断百度浏览器窗口；持久 profile 通常还在，进行中的登录和任务会被打断。

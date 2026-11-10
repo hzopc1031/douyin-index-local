@@ -33,10 +33,12 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.calls = []
+        self.payloads = []
         self.ready = True
         self.response = {'ok': True, **result()}
         def bridge(command, payload=None, timeout=None):
             self.calls.append(command)
+            self.payloads.append(payload)
             if command == 'baidu_status':
                 return {'ok': True, 'state': 'browser_ready' if self.ready else 'login_required', 'live_enabled': True}
             if command == 'status':
@@ -65,6 +67,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.get('daily')['count'], 50)
         self.assertEqual(self.s.get('paused')['code'], 'verification_required')
         self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 2)
+        self.assertNotIn('_feed_enabled', self.payloads[-1])
         self.assertEqual(hub_baidu.daily(self.s)['attempts'], 1)
         saved = self.s.cached(query())
         for key, value in b.DIMENSIONS.items():
@@ -75,6 +78,23 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.series('baidu', query()['keywords'][0])['points'][0]['value'], 12)
         self.assertEqual(self.submit()['cache_hit'], True)
         self.assertIsNone(self.s.latest_available_date())  # Douyin date source must stay isolated.
+
+    async def test_feed_budget_and_storage(self):
+        q = query()
+        day = q['start_date']
+        self.response['feed_rows'] = [dict(keyword=q['keywords'][0], device='all', date=day, value=None, value_status='missing')]
+        job = self.submit()
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 4)
+        self.assertIs(self.payloads[-1]['_feed_enabled'], True)
+        adapter = b.BaiduAdapter()
+        feed = adapter.series(self.s, q['keywords'][0], metric='feed_index')
+        self.assertEqual(feed['points'][0]['value_status'], 'missing')
+        self.assertIsNone(feed['points'][0]['value'])
+        self.assertEqual(adapter.series(self.s, q['keywords'][0])['points'][0]['value'], 12)
+        self.assertEqual(list(adapter.csv_rows(feed))[1][1], 'feed_index')
 
     async def test_audience_budget_and_storage_synthetic(self):
         q = b.validate_insight({**query(), 'kind': 'audience'})
@@ -377,6 +397,15 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             combined_csv = await (await client.get('/api/v1/export.csv?'+args+'&device=all_devices')).text()
             for device in ('all', 'pc', 'wise'):
                 self.assertEqual(combined_csv.count(device+',day,index.baidu.com,available'), 7)
+            with self.s.db:
+                self.s.db.execute("INSERT INTO baidu_points SELECT platform,'feed_index','all',region,granularity,source,keyword,day,value,value_status,fetched,dataset FROM baidu_points WHERE device='all'")
+            feed = await (await client.get('/api/v1/series?'+args+'&metric=feed_index')).json()
+            self.assertEqual(feed['metric'], 'feed_index')
+            self.assertEqual(feed['points'][0]['value'], 12)
+            feed_csv = await (await client.get('/api/v1/export.csv?'+args+'&metric=feed_index')).text()
+            self.assertIn('baidu,feed_index,全国', feed_csv)
+            self.assertEqual((await client.get('/api/v1/series?'+args+'&metric=feed_index&device=pc')).status, 400)
+            self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&metric=feed_index')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?'+args+'&device=phone')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&device=all_devices')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&device=pc')).status, 200)
@@ -386,7 +415,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(platforms['platforms'][1]['live_enabled'])
             state = await (await client.get('/api/v1/status')).json()
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
-            self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 21))
+            self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 28))
             self.assertEqual(state['platform_status']['baidu']['limits']['http_daily'], 400)
             related = b.validate_insight(query() | {'kind': 'related'})
             self.s.save_insight(related, {'data': b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', 'sim': 0.5, 'pv': 12, 'ratio': -0.2}]}]}),
