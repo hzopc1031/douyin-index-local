@@ -283,7 +283,7 @@ async (query) => {
     const feed = await get('/api/FeedSearchApi/getFeedIndex?' + params, {'Cipher-Text':signature});
     if (feed.status !== 'ok') return feed;
     const feedData = feed.data;
-    if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index) || feedData.index.length > query.keywords.length) return schema(feedData, {ptbk_length:0, name_matches:false});
+    if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index)) return schema(feedData, {ptbk_length:0, name_matches:false});
     const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}));
     if (feedTable.status !== 'ok') return feedTable;
     const mapping = feedTable.data;

@@ -39,6 +39,58 @@ async function run(mode) {
     assert.equal(paths.filter(p=>p.includes('/ptbk?')).length,enabled?2:1);
     if (enabled) { assert.equal(result.feed_rows.length,7); assert.equal(result.feed_rows[1].value,null); assert.equal(result.feed_rows[0].value,1); }
   }
+  async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词']) {
+    const series = {startDate:query.start_date, endDate:query.end_date, data:'abcbabcbabcba'};
+    const fetch = async url => {
+      const data = url.includes('FeedSearchApi') ? {uniqid:'private-feed-id', index:items} :
+        url.includes('SearchApi/index') ? {uniqid:'search-id', userIndexes:[]} :
+        url.includes('feed-id') ? mapping : 'abc1,2';
+      return new Response(JSON.stringify({status:0, data}), {headers:{'content-type':'application/json'}});
+    };
+    const timer = (...args) => {const h=setTimeout(...args); h.unref(); return h;};
+    const context = {location:{origin:query._origin}, window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}}, fetch, URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout:timer, clearTimeout};
+    return vm.runInNewContext(script, context)({...query, keywords, _feed_enabled:true});
+  }
+  const feedSeries = {startDate:query.start_date, endDate:query.end_date, data:'abbcbabcbabc'};
+  for (const identity of [{key:'人工智能'}, {name:'人工智能'}, {word:'人工智能'},
+    {word:[{name:'人工智能',wordType:1}]}, {word:[[{name:'人工智能',wordType:1}]]},
+    {word:[{name:'人工智能'}]}, {key:'人工智能',name:'人工智能',word:[{name:'人工智能',wordType:1}]}]) {
+    const result = await feedFixture([{...identity,...feedSeries}]);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.feed_rows.length, 14);
+    assert.equal(result.feed_rows[0].keyword, '人工智能');
+    assert.equal(result.feed_rows[0].value, 1);
+    assert.equal(result.feed_rows[1].value, null);
+    assert(result.feed_rows.slice(7).every(row => row.value_status === 'missing' && row.value === null));
+  }
+  for (const [items, matches] of [
+    [[{key:'错词',...feedSeries}], false],
+    [[{key:'人工智能',...feedSeries},{word:'人工智能',...feedSeries}], true],
+    [[null], false], [[42], false], [[{key:'人工智能',name:'另一词',...feedSeries}], false],
+    [[{word:[{name:'人工智能',wordType:2}],...feedSeries}], false],
+    [[{word:[{name:'人工智能'},{name:'另一词'}],...feedSeries}], false],
+    [[{key:'',...feedSeries}], false], [[{data:'abbcbabcbabc'}], false]
+  ]) {
+    const result = await feedFixture(items);
+    assert.equal(result.status, 'response_schema');
+    assert.equal(result.schema_diag.reason, 'word');
+    assert.equal(result.schema_diag.name_matches, matches);
+    assert.equal(result.schema_diag.ptbk_length, 6);
+    for (const secret of ['人工智能','另一词','错词','private-feed-id','abbcbabcbabc','abc1,2']) assert(!JSON.stringify(result).includes(secret));
+  }
+  const duplicateSingle = await feedFixture([{key:'人工智能',...feedSeries},{key:'人工智能',...feedSeries}], 'abc1,2', ['人工智能']);
+  assert.equal(duplicateSingle.schema_diag.reason, 'word');
+  assert.equal(duplicateSingle.schema_diag.name_matches, true);
+  const badSeries = await feedFixture([{key:'人工智能', ...feedSeries, startDate:'2026-10-02'}]);
+  assert.equal(badSeries.schema_diag.reason, 'series_shape');
+  assert.equal(badSeries.schema_diag.name_matches, true);
+  assert.equal(badSeries.schema_diag.ptbk_length, 6);
+  assert.equal(badSeries.schema_digest.keys.index.items.keys.key.type, 'string');
+  assert.equal(badSeries.schema_digest.keys.index.items.keys.data.type, 'string');
+  const badMapping = await feedFixture([{key:'人工智能',...feedSeries}], 'abc');
+  assert.equal(badMapping.schema_diag.reason, 'ptbk');
+  assert.equal(badMapping.schema_diag.ptbk_length, 3);
+  assert.equal(badMapping.schema_diag.name_matches, false);
   async function audience(overrides = {}) {
     const paths = [];
     const social = {result:[{word:'synthetic-word', gender:[{desc:'男',rate:0.6,tgi:120}], age:[{desc:'青年',rate:0.4,tgi:90}]}]};

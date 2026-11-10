@@ -583,6 +583,15 @@ class ReadOnlyStatusTests(unittest.TestCase):
         finally:
             worker.close()
 
+    def test_feed_digest_whitelist(self):
+        from baidu_browser import _safe_digest
+        digest = {'type': 'object', 'keys': {'index': {'type': 'array', 'length': 1, 'items': {
+            'type': 'object', 'keys': {'key': {'type': 'string'}, 'word': {'type': 'array', 'length': 1, 'items': {'type': 'object', 'keys': {'name': {'type': 'string'}}}}, 'data': {'type': 'string'}}}}}}
+        self.assertEqual(_safe_digest(digest), digest)
+        digest['keys']['index']['items']['keys']['key']['value'] = 'synthetic-secret'
+        with self.assertRaises(ValueError):
+            _safe_digest(digest)
+
     def test_untrusted_digest_is_not_logged(self):
         from unittest.mock import Mock
         from baidu_adapter import BaiduError
