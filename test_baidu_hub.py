@@ -79,6 +79,44 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.submit()['cache_hit'], True)
         self.assertIsNone(self.s.latest_available_date())  # Douyin date source must stay isolated.
 
+    async def test_news_budget_storage_and_cache_flags(self):
+        q = query()
+        missing = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        self.s.ingest(result())
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': '0'}):
+            self.assertIsNone(self.s.cached(q))
+            self.response['news_rows'] = missing
+            job = self.submit()
+            await self.hub.run_one()
+            self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+            self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 4)
+            self.assertTrue(self.payloads[-1]['_news_enabled'])
+            self.assertEqual(self.s.cached(q)['news_rows'], missing)
+            self.assertEqual(b.BaiduAdapter().series(self.s, q['keywords'][0], metric='news_index')['points'][0]['value_status'], 'missing')
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            self.assertIsNone(self.s.cached(q))
+        feed_only = {**result(), 'feed_rows': missing}
+        self.s.ingest(feed_only)
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            self.assertIsNone(self.s.cached(q))
+        both = {**result(), 'feed_rows': missing, 'news_rows': missing}
+        self.s.ingest(both)
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            self.assertIsNotNone(self.s.cached(q))
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '0', 'INDEX_HUB_BAIDU_FEED_ENABLED': '0'}):
+            self.assertEqual(b.BaiduAdapter().series(self.s, q['keywords'][0], metric='news_index')['points'][0]['value_status'], 'missing')
+
+    async def test_both_flags_reserve_six(self):
+        q = query()
+        missing = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        self.response.update(feed_rows=missing, news_rows=missing)
+        job = self.submit()
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 6)
+        self.assertTrue(self.payloads[-1]['_feed_enabled'] and self.payloads[-1]['_news_enabled'])
+
     async def test_feed_budget_and_storage(self):
         q = query()
         day = q['start_date']
@@ -458,6 +496,14 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('baidu,feed_index,全国', feed_csv)
             self.assertEqual((await client.get('/api/v1/series?'+args+'&metric=feed_index&device=pc')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&metric=feed_index')).status, 400)
+            with self.s.db:
+                self.s.db.execute("INSERT INTO baidu_points SELECT platform,'news_index','all',region,granularity,source,keyword,day,value,value_status,fetched,dataset FROM baidu_points WHERE device='all' AND metric='search_index'")
+            news = await (await client.get('/api/v1/series?'+args+'&metric=news_index')).json()
+            self.assertEqual(news['metric'], 'news_index')
+            self.assertEqual(news['points'][0]['value'], 12)
+            self.assertIn('baidu,news_index,全国', await (await client.get('/api/v1/export.csv?'+args+'&metric=news_index')).text())
+            self.assertEqual((await client.get('/api/v1/series?'+args+'&metric=news_index&device=pc')).status, 400)
+            self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&metric=news_index')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?'+args+'&device=phone')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&device=all_devices')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&device=pc')).status, 200)
@@ -467,7 +513,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(platforms['platforms'][1]['live_enabled'])
             state = await (await client.get('/api/v1/status')).json()
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
-            self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 28))
+            self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 35))
             self.assertEqual(state['platform_status']['baidu']['limits']['http_daily'], 400)
             related = b.validate_insight(query() | {'kind': 'related'})
             self.s.save_insight(related, {'data': b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成', 'sim': 0.5, 'pv': 12, 'ratio': -0.2}]}]}),

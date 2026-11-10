@@ -375,7 +375,10 @@ class Store:
             if (result['metadata']['complete']
                     and (query.get('platform') != 'baidu'
                          or os.environ.get('INDEX_HUB_BAIDU_FEED_ENABLED') != '1'
-                         or 'feed_rows' in result)):
+                         or 'feed_rows' in result)
+                    and (query.get('platform') != 'baidu'
+                         or os.environ.get('INDEX_HUB_BAIDU_NEWS_ENABLED') != '1'
+                         or 'news_rows' in result)):
                 return result
         return None
 

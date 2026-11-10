@@ -286,23 +286,23 @@ def page_absence(query, state):
     return make_result(q, rows)
 
 
-def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=None, feed_enabled=False):
+def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=None, feed_enabled=False, news_enabled=False):
     import time
     q = validate_query(query)
     budget_day = budget_day or dt.datetime.now(TZ).date().isoformat()
-    rows, feed_rows = [], []
+    rows = []
+    extras = {field: [] for enabled, field in ((feed_enabled, 'feed_rows'), (news_enabled, 'news_rows')) if enabled}
     for i, chunk in enumerate(chunks(q)):
         if i:
             (sleep or time.sleep)(chunk_interval)
-        answer = browser.query({**chunk, '_budget_day': budget_day, **({'_feed_enabled': True} if feed_enabled else {})})
-        if feed_enabled:
+        answer = browser.query({**chunk, '_budget_day': budget_day, **({'_feed_enabled': True} if feed_enabled else {}), **({'_news_enabled': True} if news_enabled else {})})
+        if extras:
             rows.extend(answer['rows'])
-            feed_rows.extend(answer['feed_rows'])
+            for field in extras:
+                extras[field].extend(answer[field])
         else:
             rows.extend(answer)
-    result = make_result(q, rows)
-    if feed_enabled:
-        result['feed_rows'] = feed_rows
+    result = {**make_result(q, rows), **extras}
     public_result(result)
     return result
 
@@ -365,17 +365,21 @@ def public_result(result):
             note += f"百度数据截至 {derived['data_end_date']}（滞后）"
         if derived['data_end_date'] and any(key[2] < derived['data_end_date'] for key in expected):
             note += '部分日期段数据未返回。'
-        feed = []
-        if 'feed_rows' in result:
-            expected_feed = {(word, (start+dt.timedelta(days=i)).isoformat()) for word in q['keywords'] for i in range(days)}
-            for row in result['feed_rows']:
+        extras = {}
+        for field in ('feed_rows', 'news_rows'):
+            if field not in result:
+                continue
+            clean_extra = []
+            expected_extra = {(word, (start+dt.timedelta(days=i)).isoformat()) for word in q['keywords'] for i in range(days)}
+            for row in result[field]:
                 key = (row['keyword'], row['date'])
                 value, state = row['value'], row['value_status']
-                if key not in expected_feed or row.get('device') != 'all' or state not in ('available', 'missing', 'unindexed', 'low_volume') or (state == 'available' and (type(value) is not int or not 0 <= value < 10**15)) or (state != 'available' and value is not None):
+                if key not in expected_extra or row.get('device') != 'all' or state not in ('available', 'missing', 'unindexed', 'low_volume') or (state == 'available' and (type(value) is not int or not 0 <= value < 10**15)) or (state != 'available' and value is not None):
                     raise ValueError
-                expected_feed.remove(key)
-                feed.append(dict(keyword=key[0], date=key[1], device='all', value=value, value_status=state))
-        return {'rows': clean, **({'feed_rows': feed} if 'feed_rows' in result else {}), 'metadata': {**DIMENSIONS, **q, 'fetched_at': stamp.isoformat(),
+                expected_extra.remove(key)
+                clean_extra.append(dict(keyword=key[0], date=key[1], device='all', value=value, value_status=state))
+            extras[field] = clean_extra
+        return {'rows': clean, **extras, 'metadata': {**DIMENSIONS, **q, 'fetched_at': stamp.isoformat(),
             'complete': m['complete'], 'verification': 'pending', 'metric_name': '整体搜索指数', 'unit': '指数',
             'timezone': 'Asia/Shanghai', 'data_end_date': derived['data_end_date'], 'lagged': derived['lagged'], 'note': note,
             'missing_search_dates': {w: [r['date'] for r in clean if r['keyword'] == w and r['device'] == 'all' and r['search_index'] is None] for w in q['keywords']}}}
@@ -412,9 +416,10 @@ def bridge_command(command, payload=None):
     if job_id != '-' and (not isinstance(job_id, str) or not re.fullmatch(r'[0-9a-f]{32}', job_id)):
         raise BaiduError()
     feed_enabled = payload.get('_feed_enabled', False)
-    if type(feed_enabled) is not bool:
+    news_enabled = payload.get('_news_enabled', False)
+    if type(feed_enabled) is not bool or type(news_enabled) is not bool:
         raise BaiduError()
-    body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id', 'related_date', '_feed_enabled')}
+    body = {k: v for k, v in payload.items() if k not in ('_budget_day', '_job_id', 'related_date', '_feed_enabled', '_news_enabled')}
     query = validate_insight(body) if body.get('kind') in ('related', 'audience') else validate_query(body)
     if query.get('kind') == 'related' and 'related_date' in payload:
         related_date = payload['related_date']
@@ -485,7 +490,7 @@ def bridge_command(command, payload=None):
                 return {'ok': True, 'data': data, 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(),
                         'source': 'index.baidu.com', 'verification': 'pending', 'related_period': period,
                         'note': '需求图谱周期尚未与官方页面核对。'}}
-            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day, feed_enabled=feed_enabled and query.get('kind') not in ('related', 'audience'))
+            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day, feed_enabled=feed_enabled and query.get('kind') not in ('related', 'audience'), news_enabled=news_enabled and query.get('kind') not in ('related', 'audience'))
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:
@@ -537,12 +542,13 @@ class BaiduAdapter:
                     DO UPDATE SET value=excluded.value,value_status=excluded.value_status,fetched=excluded.fetched,dataset=excluded.dataset
                     WHERE excluded.fetched>=baidu_points.fetched''',
                     ('baidu', 'search_index', row['device'], '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['search_index']), row['value_status'], stamp, identifier))
-            for row in result.get('feed_rows', []):
+            for field, metric in (('feed_rows', 'feed_index'), ('news_rows', 'news_index')):
+              for row in result.get(field, []):
                 store.db.execute('''INSERT INTO baidu_points VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(platform,metric,device,region,granularity,source,keyword,day)
                     DO UPDATE SET value=excluded.value,value_status=excluded.value_status,fetched=excluded.fetched,dataset=excluded.dataset
                     WHERE excluded.fetched>=baidu_points.fetched''',
-                    ('baidu', 'feed_index', 'all', '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['value']), row['value_status'], stamp, identifier))
+                    ('baidu', metric, 'all', '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['value']), row['value_status'], stamp, identifier))
         return identifier
 
     def series(self, store, keyword, start=None, end=None, device="all", metric="search_index"):
@@ -558,7 +564,7 @@ class BaiduAdapter:
                     raise ValueError
         except (ValueError, TypeError):
             raise HubError('invalid_dates', '最多查询连续 731 天的已存储数据。') from None
-        if metric not in ('search_index', 'feed_index') or (metric == 'feed_index' and device != 'all'):
+        if metric not in ('search_index', 'feed_index', 'news_index') or (metric != 'search_index' and device != 'all'):
             raise HubError('invalid_parameters', '不支持的指标或设备。')
         if device == 'all_devices':
             data = self.series(store, keyword, start, end, 'all')
@@ -583,7 +589,7 @@ class BaiduAdapter:
             points = [by_day.get((a+dt.timedelta(days=i)).isoformat(), {'device': device, 'date': (a+dt.timedelta(days=i)).isoformat(),
                       'value': None, 'composite_index': None, 'value_status': 'missing', 'fetched_at': None, 'dataset_id': None})
                       for i in range((b-a).days+1)]
-        return {'platform': 'baidu', 'metric': metric, 'metric_name': '资讯指数' if metric == 'feed_index' else {'all': '整体搜索指数', 'pc': 'PC 搜索指数', 'wise': '移动搜索指数'}[device], 'keyword': keyword,
+        return {'platform': 'baidu', 'metric': metric, 'metric_name': {'feed_index': '资讯指数', 'news_index': '媒体指数'}.get(metric) or {'all': '整体搜索指数', 'pc': 'PC 搜索指数', 'wise': '移动搜索指数'}[device], 'keyword': keyword,
                 'region': '全国', 'device': device, 'granularity': 'day', 'unit': '指数', 'points': points,
                 'source': 'index.baidu.com', 'live_request': False, 'note': '仅返回已保存数据。'}
 
