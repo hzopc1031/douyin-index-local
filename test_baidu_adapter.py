@@ -38,6 +38,16 @@ class Browser:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_missing_news_rows_is_response_schema(self):
+        import baidu_adapter as b
+        for answer in ({'rows': []}, {'rows': [], 'news_rows': None}):
+            class MissingPage:
+                def query(self, query):
+                    return answer
+            with self.assertRaises(b.BaiduError) as caught:
+                b.collect_page(query(), MissingPage(), news_enabled=True)
+            self.assertEqual(caught.exception.code, 'response_schema')
+
     def test_feed_page_bridge_normalizes_and_validates(self):
         q = query()
         search = b.parse_index(fixture(), PTBK, q)['rows']

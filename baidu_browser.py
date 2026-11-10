@@ -298,6 +298,36 @@ def _safe_diag(value):
     return value
 
 
+def safe_message(value):
+    import re
+    words = r'timeout|timed|out|network|error|failed|failure|request|response|connection|closed|navigation|context|destroyed|invalid|unavailable|exception|message|rate|limit|denied|internal|server|service'
+    return ' '.join(re.findall(r'\b(?:' + words + r')\b', str(value), flags=re.IGNORECASE))[:80]
+
+
+def page_error(exc):
+    import baidu_adapter
+    message = str(exc).lower()
+    if 'execution context was destroyed' in message or 'cannot find context' in message:
+        category = 'context_destroyed'
+    elif 'target closed' in message or 'has been closed' in message:
+        category = 'closed'
+    elif type(exc).__name__ == 'TimeoutError' or 'timeout' in message:
+        category = 'timeout'
+    elif 'navigat' in message:
+        category = 'navigation'
+    else:
+        category = 'other'
+    error = baidu_adapter.BaiduError('page_' + category)
+    error.exception_type = type(exc).__name__ if re_safe_type(type(exc).__name__) else 'Error'
+    error.exception_message = safe_message(exc)
+    return error
+
+
+def re_safe_type(value):
+    import re
+    return bool(re.fullmatch(r'[A-Za-z]{1,40}(?:Error|Exception)', value))
+
+
 class PageTransport:
     def __init__(self, page, *, origin='https://index.baidu.com', allow_loopback=False, job_id='-'):
         from urllib.parse import urlsplit
@@ -310,6 +340,8 @@ class PageTransport:
         self.job_id = job_id
         self.page = page
         self.origin = origin
+        self.stage = 'search'
+        self.requests_sent = 0
 
     def query(self, query):
         from urllib.parse import urlsplit
@@ -319,26 +351,32 @@ class PageTransport:
         if (current.scheme, current.netloc) != (expected.scheme, expected.netloc):
             raise baidu_adapter.BaiduError('network_error')
         script = Path(__file__).with_name('baidu_page.js').read_text(encoding='utf-8')
+        self.stage = query.get('kind') if query.get('kind') in ('related', 'audience') else 'search'
+        previous = self.requests_sent
+        self.requests_sent = 'unknown'
         try:
             result = self.page.evaluate(script, {**query, '_origin': self.origin})
         except Exception as exc:
             if not _playwright_error(exc):
                 raise
-            message = str(exc).lower()
-            if 'execution context was destroyed' in message or 'cannot find context' in message:
-                category = 'context_destroyed'
-            elif 'target closed' in message or 'has been closed' in message:
-                category = 'closed'
-            elif type(exc).__name__ == 'TimeoutError' or 'timeout' in message:
-                category = 'timeout'
-            elif 'navigat' in message:
-                category = 'navigation'
-            else:
-                category = 'other'
-            raise baidu_adapter.BaiduError('page_' + category) from None
+            raise page_error(exc) from None
+        if isinstance(result, dict):
+            count = result.get('requests_sent')
+            if type(count) is int and 0 <= count <= 1000 and type(previous) is int:
+                self.requests_sent = previous + count
+            if result.get('stage') in ('search', 'search_ptbk', 'feed', 'feed_ptbk', 'news', 'news_ptbk', 'related', 'audience'):
+                self.stage = result['stage']
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
             diag = None
+            if isinstance(result, dict):
+                http = result.get('http_status')
+                business = result.get('business_status')
+                http = http if type(http) is int and 100 <= http <= 599 else None
+                business = business if type(business) is int and -2147483648 <= business <= 2147483647 else None
+                logging.getLogger('index_hub.baidu').warning('baidu_page_diag stage=%s requests_sent=%s http_status=%s business_status=%s message=%s exception_type=%s',
+                    self.stage, self.requests_sent, http, business, json.dumps(safe_message(result.get('message', ''))),
+                    result.get('exception_type') if result.get('exception_type') in ('Error', 'TypeError') else '')
             if code == 'response_schema' and 'schema_digest' in result:
                 try:
                     digest = _safe_digest(result['schema_digest'])
@@ -412,7 +450,7 @@ def wait_ready(page, origin, timeout=15):
             if not _playwright_error(exc):
                 raise
             if 'context' not in str(exc).lower() and 'navigat' not in str(exc).lower():
-                raise BaiduError('page_not_ready') from None
+                raise page_error(exc) from None
 
     while time.monotonic() < deadline:
         check_url()
@@ -424,8 +462,10 @@ def wait_ready(page, origin, timeout=15):
         except Exception as exc:
             if isinstance(exc, BaiduError):
                 raise
-            if not _playwright_error(exc) or not any(s in str(exc).lower() for s in ('execution context was destroyed', 'cannot find context')):
+            if not _playwright_error(exc):
                 raise
+            if not any(s in str(exc).lower() for s in ('execution context was destroyed', 'cannot find context')):
+                raise page_error(exc) from None
         time.sleep(min(0.1, max(0, deadline - time.monotonic())))
     check_url()
     raise BaiduError('page_not_ready')
@@ -448,7 +488,12 @@ def _page(context):
         page = pages[0] if pages else context.new_page()
     url = urlsplit(page.url)
     if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
-        page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
+        try:
+            page.goto('https://index.baidu.com/', wait_until='domcontentloaded', timeout=25000)
+        except Exception as exc:
+            if not _playwright_error(exc):
+                raise
+            raise page_error(exc) from None
     return page
 
 

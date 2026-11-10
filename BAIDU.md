@@ -45,3 +45,5 @@
 网关仅在 `INDEX_HUB_BAIDU_NEWS_ENABLED=1` 时开启，其他值或未设置关闭；关联词和画像不采集媒体指数。每个搜索日期分片额外预占 2 HTTP，与搜索和资讯共用 120/400 工程额度：仅搜索为 2，加资讯或媒体为 4，两者都加为 6。资讯先于媒体；任一结构失败整个任务停止，不自动重试，空序列保存 missing，不补 0。24 小时完整缓存中，开启资讯须有 `feed_rows`，开启媒体须有 `news_rows`，两者同时开启须同时存在，即使全部 missing 也可命中。
 
 `GET /api/v1/series?platform=baidu&keyword=…&metric=news_index` 和同参数 `/api/v1/export.csv` 只读取已存数据，`device` 仅可省略或为 `all`，CSV 的 metric 为 `news_index`；关闭开关后仍可读取及导出。结果待官方页面独立核对。上线更新需重启 gateway（读取开关）和 desktop（页内脚本），本次未部署。
+
+百度失败日志记录可获得的请求阶段、HTTP 和业务 status、异常类型及已发请求数；无法确定的计数标为 unknown。消息只保留安全词汇，不记录 Cookie、密文或关键词。

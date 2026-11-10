@@ -297,6 +297,8 @@ def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=Non
             (sleep or time.sleep)(chunk_interval)
         answer = browser.query({**chunk, '_budget_day': budget_day, **({'_feed_enabled': True} if feed_enabled else {}), **({'_news_enabled': True} if news_enabled else {})})
         if extras:
+            if not isinstance(answer, dict) or not isinstance(answer.get('rows'), list) or any(not isinstance(answer.get(field), list) for field in extras):
+                raise BaiduError('response_schema')
             rows.extend(answer['rows'])
             for field in extras:
                 extras[field].extend(answer[field])
@@ -436,9 +438,16 @@ def bridge_command(command, payload=None):
     import time
     from urllib.parse import urlsplit
     page = None
-    requests_sent = 'no'
+    stage = 'page_goto'
+    transport = None
 
-    def failure(code, sent, period_returned=False):
+    def failure(code, exc, period_returned=False):
+        sent = transport.requests_sent if transport is not None else 0
+        current_stage = transport.stage if transport is not None else stage
+        exception_type = getattr(exc, 'exception_type', type(exc).__name__)
+        if not baidu_browser.re_safe_type(exception_type):
+            exception_type = 'Error'
+        message = getattr(exc, 'exception_message', baidu_browser.safe_message(exc))
         try:
             url = urlsplit(page.url)
             on_index = (url.scheme, url.netloc) == ('https', 'index.baidu.com')
@@ -447,23 +456,25 @@ def bridge_command(command, payload=None):
         started = getattr(instance, 'started_at', None)
         since = max(0, int(time.monotonic() - started)) if type(started) in (int, float) else -1
         logging.getLogger('index_hub.baidu').warning(
-            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s datelist_sent=%s period_returned=%s',
+            'baidu_failure command=baidu_query job=%s category=%s requests_sent=%s since_start=%d on_index=%s datelist_sent=%s period_returned=%s stage=%s exception_type=%s exception_message=%s',
             job_id, code, sent, since, str(on_index).lower(),
-            'present' if query.get('related_date') else 'none', str(period_returned).lower())
+            'present' if query.get('related_date') else 'none', str(period_returned).lower(), current_stage, exception_type, repr(message))
 
     try:
         def run(context):
-            nonlocal page, requests_sent
+            nonlocal page, stage, transport
             page = baidu_browser._page(context)
+            stage = 'wait_ready'
             baidu_browser.wait_ready(page, ORIGIN)
+            stage = 'login_check'
             state = baidu_browser.status(context)['state']
             instance.last_state = state
             instance.login_checked = True
             if state != 'browser_ready' and not (query.get('kind') in ('related', 'audience') and state == 'signature_unavailable'):
                 raise BaiduError(state)
-            requests_sent = 'unknown'
+            transport = baidu_browser.PageTransport(page, job_id=job_id)
             if query.get('kind') == 'audience':
-                audience = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
+                audience = transport.query({**query, '_budget_day': day})
                 period = audience.get('period')
                 if period is not None:
                     try:
@@ -476,7 +487,7 @@ def bridge_command(command, payload=None):
                         raise BaiduError() from None
                 return {'ok': True, 'data': project_audience(audience), 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(), 'source': 'index.baidu.com', 'verification': 'pending', **({'audience_period': period} if period is not None else {})}}
             if query.get('kind') == 'related':
-                graph = baidu_browser.PageTransport(page, job_id=job_id).query({**query, '_budget_day': day})
+                graph = transport.query({**query, '_budget_day': day})
                 period = graph['period']
                 if type(period) is not dict or set(period) != {'start_date', 'end_date', 'days'}:
                     raise BaiduError()
@@ -490,14 +501,14 @@ def bridge_command(command, payload=None):
                 return {'ok': True, 'data': data, 'metadata': {**query, 'fetched_at': dt.datetime.now(TZ).isoformat(),
                         'source': 'index.baidu.com', 'verification': 'pending', 'related_period': period,
                         'note': '需求图谱周期尚未与官方页面核对。'}}
-            result = collect_page(query, baidu_browser.PageTransport(page), chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day, feed_enabled=feed_enabled and query.get('kind') not in ('related', 'audience'), news_enabled=news_enabled and query.get('kind') not in ('related', 'audience'))
+            result = collect_page(query, transport, chunk_interval=hub_baidu.limits()['chunk_interval_seconds'], budget_day=day, feed_enabled=feed_enabled and query.get('kind') not in ('related', 'audience'), news_enabled=news_enabled and query.get('kind') not in ('related', 'audience'))
             return {'ok': True, **result}
         return instance.call(run)
     except BaiduError as exc:
-        failure(exc.code, requests_sent, getattr(exc, 'period_returned', False))
+        failure(exc.code, exc, getattr(exc, 'period_returned', False))
         return {'ok': False, 'code': exc.code}
-    except Exception:
-        failure('other', 'unknown')
+    except Exception as exc:
+        failure('other', exc)
         return {'ok': False, 'code': 'page_other'}
 
 
