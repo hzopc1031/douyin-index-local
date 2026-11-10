@@ -38,6 +38,16 @@ class Browser:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_csv_escapes_formula_for_each_device(self):
+        adapter = b.BaiduAdapter()
+        data = {'keyword': '=合成词', 'device': 'all_devices', 'points': [
+            {'date': '2026-01-01', 'value': None, 'fetched_at': None, 'device': device, 'value_status': 'missing'}
+            for device in ('all', 'pc', 'wise')]}
+        rows = list(adapter.csv_rows(data))
+        self.assertEqual([row[3] for row in rows[1:]], ["'=合成词"] * 3)
+        self.assertEqual([row[8] for row in rows[1:]], ['all', 'pc', 'wise'])
+        self.assertTrue(all(row[5:7] == ['', ''] for row in rows[1:]))
+
     def test_related_entry_keys_logged_with_job_on_success_and_failure(self):
         from unittest.mock import Mock, patch
         import baidu_browser

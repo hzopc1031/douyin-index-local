@@ -958,9 +958,9 @@ def mount(app, hub):
         if unknown:
             raise HubError('invalid_parameters', '包含不支持的查询参数。')
         device = request.query.get('device')
-        if device is not None and device not in ('all', 'pc', 'wise'):
-            raise HubError('invalid_parameters', '不支持的设备。')
         platform = request.query.get('platform', 'douyin')
+        if device is not None and device not in (('all', 'pc', 'wise', 'all_devices') if platform == 'baidu' else ('all', 'pc', 'wise')):
+            raise HubError('invalid_parameters', '不支持的设备。')
         args = (s, request.query.get('keyword'), request.query.get('start_date'), request.query.get('end_date'))
         if platform == 'baidu' and device is not None:
             return require_platform(platform).series(*args, device=device)

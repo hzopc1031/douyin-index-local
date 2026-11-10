@@ -330,13 +330,13 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 
 ## 百度搜索指数
 
-`platform=baidu` 接受 1–5 个唯一词、全国、最近两年内最多 731 天；默认七天。整体/PC/移动日序列在私有表分开存储，趋势和 CSV 默认整体；缺失不视为零。关联词和画像不支持。
+`platform=baidu` 接受 1–5 个唯一词、全国、最近两年内最多 731 天；默认七天。整体/PC/移动日序列在私有表分开存储；缺失不视为零。关联词和画像按单词读取。
 
 管理员使用 `POST /api/v1/login/baidu/open` 打开或聚焦官方登录窗口，在中枢扫码（远程桌面可作备选）；`GET /api/v1/login/baidu/qr` 仅管理员可用，必须携带 `X-Hub-Request: 1`，有 Origin 时须同源，返回禁止缓存的 PNG；二维码未就绪返回 503 `qr_not_ready`；`GET /api/v1/status` 的 `platform_status.baidu.browser` 显示浏览器状态。处理登录、验证或风控后，管理员通过 `POST /api/v1/collection/resume` 指定 `{"platform":"baidu"}` 人工恢复；限频至少冷却一小时，失败任务不自动重试。接口不接收或返回百度 Cookie。配置、凭据边界、部署与七日独立页面验收见 [BAIDU.md](BAIDU.md)。离线测试不代表线上验收。
 
-百度已存趋势和 CSV 导出支持 `device=all|pc|wise`，默认 `all`；抖音忽略此参数。设备筛选只读取已存数据，不发起采集。
+百度已存趋势和 CSV 导出支持 `device=all|pc|wise|all_devices`，API 默认 `all`；`all_devices` 返回三设备的点，CSV 的 device 列分别为 `all`、`pc`、`wise`。抖音忽略前三种设备参数，拒绝 `all_devices`。网页多词趋势逐词读取已有单词接口，导出逐词合并三设备 CSV；设备切换与导出只读取已存数据，不发起采集。
 
-百度关联需求支持 `kind=related`，按 `end_date` 获取需求图谱单日快照；`GET /api/v1/insights` 与 `/api/v1/insights/ranges` 可用 `platform=baidu` 读取，省略平台默认为抖音。百度画像尚不支持。
+百度关联需求支持 `kind=related`，按 `end_date` 获取需求图谱单日快照；`GET /api/v1/insights` 与 `/api/v1/insights/ranges` 可用 `platform=baidu` 读取，省略平台默认为抖音。百度画像同样可读取已存结果；关联和画像展示核对状态，画像标注已记录的实际窗口与上游原值。
 
 热点宝登录与垂类刷新接口仅限管理员 Basic 认证，POST 须带 `X-Hub-Request: 1`、同源 Origin（如提供）及空 JSON 对象。`GET /api/v1/topics/login` 返回 `state`（`logged_in`、`need_scan`、`expired`、`browser_unavailable`）和 `qr_available`；`GET /api/v1/topics/login/qr` 返回授权窗口中定位到、按原像素整数倍放大的二维码 PNG，尚未就绪返回 503，均禁止缓存。检测到失效会重新加载授权页，刷新期间不提供旧码。二维码定位依赖 ZXing；解码失败时仍可返回通过定位角检查的二维码。`POST /api/v1/topics/login/refresh` 打开或重新加载授权页。登录状态根据页面判断，实际登录以垂类请求结果为准；不读取或返回 Cookie。`POST /api/v1/topics/categories/refresh` 发起一次 tags 请求，与话题采集共用 15 秒间隔、上海日 30 次上限和异常暂停；暂停后须人工恢复，不自动重试。返回状态、条数和是否实际发出请求。
 
