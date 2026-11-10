@@ -21,6 +21,16 @@ async function run(mode) {
 }
 (async () => {
   // Synthetic fixtures only: exercise request shapes and validation offline.
+  for (const [status, body, expected] of [[503, {}, 'http_error'], [200, {status:42, message:'server error 人工智能 fake-cookie-secret ciphertext'}, 'business_error']]) {
+    const timer = (...args) => { const h = setTimeout(...args); h.unref(); return h; };
+    const context = {location:{origin:query._origin}, window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'fixture-token')})}},
+      fetch:async()=>new Response(JSON.stringify(body), {status, headers:{'content-type':'application/json'}}), URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout:timer, clearTimeout};
+    const result = await vm.runInNewContext(script, context)({...query, keywords:['人工智能']});
+    assert.equal(result.status, expected); assert.equal(result.stage, 'search');
+    assert.equal(result.requests_sent, 1); assert.equal(result.http_status, status);
+    assert.equal(result.business_status, status === 200 ? 42 : null);
+    for (const secret of ['人工智能', 'fake-cookie-secret', 'ciphertext', 'fixture-token']) assert(!JSON.stringify(result).includes(secret));
+  }
   for (const [enabled, news] of [[false,false],[true,false],[false,true],[true,true]]) {
     const paths = [];
     const series = {startDate:query.start_date,endDate:query.end_date,data:'abcbabcbabcba'};
