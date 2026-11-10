@@ -362,7 +362,7 @@ class PageTransport:
             return result.get('data')
         if query.get('kind') == 'audience':
             return result.get('data')
-        return result.get('rows')
+        return {'rows': result.get('rows'), 'feed_rows': result.get('feed_rows')} if query.get('_feed_enabled') else result.get('rows')
 
     def _log_entry_keys(self, value):
         keys = _safe_entry_keys(value)

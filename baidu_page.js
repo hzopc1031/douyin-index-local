@@ -279,6 +279,34 @@ async (query) => {
       const count = Math.min(...['all','pc','wise'].map(device => wordRows.filter(row => row.device === device).length));
       rows.push(...wordRows.filter(row => Date.parse(row.date + 'T00:00:00Z') < start + count * 86400000));
     }
-    return {status:'ok', rows};
+    if (!query._feed_enabled) return {status:'ok', rows};
+    const feed = await get('/api/FeedSearchApi/getFeedIndex?' + params, {'Cipher-Text':signature});
+    if (feed.status !== 'ok') return feed;
+    const feedData = feed.data;
+    if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index) || feedData.index.length > query.keywords.length) return schema(feedData);
+    const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}));
+    if (feedTable.status !== 'ok') return feedTable;
+    const mapping = feedTable.data;
+    if (typeof mapping !== 'string' || !mapping.length || mapping.length > 256 || mapping.length % 2) return schema(feedData, {reason:'ptbk'});
+    const middle = mapping.length / 2, from = mapping.slice(0, middle), to = mapping.slice(middle);
+    if (new Set(from).size !== middle || new Set(to).size !== middle) return schema(feedData, {reason:'ptbk'});
+    const feeds = new Map();
+    for (const item of feedData.index) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !query.keywords.includes(item.key) || feeds.has(item.key)) return schema(feedData, {reason:'word'});
+      if (item.startDate !== query.start_date || typeof item.endDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(item.endDate)) return schema(feedData, {reason:'series_shape'});
+      const last = Date.parse(item.endDate + 'T00:00:00Z');
+      if (!Number.isFinite(last) || new Date(last).toISOString().slice(0,10) !== item.endDate || last < start || last > end || typeof item.data !== 'string' || item.data.length > Math.min(65536, Math.max(6200, days * 64))) return schema(feedData, {reason:'series_shape'});
+      let plain = '';
+      for (const char of item.data) { const n = from.indexOf(char); if (n < 0) return schema(feedData, {reason:'token'}); plain += to[n]; }
+      const tokens = plain === '' ? Array((last - start) / 86400000 + 1).fill('') : plain.split(',');
+      if (tokens.length !== (last - start) / 86400000 + 1 || tokens.some(token => token && !/^[0-9]{1,15}$/.test(token))) return schema(feedData, {reason:'point_count'});
+      feeds.set(item.key, tokens);
+    }
+    const feedRows = [];
+    for (const word of query.keywords) {
+      const tokens = feeds.get(word) || Array(days).fill('');
+      for (let i = 0; i < tokens.length; i++) feedRows.push({keyword:word, device:'all', date:new Date(start + i * 86400000).toISOString().slice(0,10), value:tokens[i] ? Number(tokens[i]) : null, value_status:tokens[i] ? 'available' : 'missing'});
+    }
+    return {status:'ok', rows, feed_rows:feedRows};
   } catch (_) { return fail('network_error'); }
 }
