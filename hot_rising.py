@@ -167,12 +167,12 @@ def _search_ratio(store, word):
             'search_index_latest': latest, 'search_index_previous': previous, 'search_index_ratio': ratio}
 
 
-def rising_report(store):
+def rising_report(store, board='word_list'):
     """Score the latest stored board. Does not read the network or write quota."""
     thresholds = effective_thresholds(store)
     rows = store.db.execute(
         "SELECT id, fetched, item_key, key_kind, sentence_id, word, position, hot_value "
-        "FROM hot_snapshots WHERE board='word_list' ORDER BY fetched, id").fetchall()
+        "FROM hot_snapshots WHERE board=? ORDER BY fetched, id", (board,)).fetchall()
     groups = _groups(rows)
     if not groups:
         return {'current_fetched_at': None, 'baseline_fetched_at': None,
@@ -239,7 +239,9 @@ def rising_report(store):
                 raw_pct >= thresholds['heat_pct'] and heat_delta >= thresholds['heat_delta']),
             'z_score': z_score,
             'z_hit': None if raw_z is None else raw_z >= thresholds['z_min'],
-            **_search_ratio(store, row['word']),
+            **(_search_ratio(store, row['word']) if board == 'word_list' else {
+                'search_index_latest_day': None, 'search_index_previous_day': None,
+                'search_index_latest': None, 'search_index_previous': None, 'search_index_ratio': None}),
         })
     return {'current_fetched_at': _iso(current['fetched']),
             'baseline_fetched_at': None if baseline is None else _iso(baseline['fetched']),
