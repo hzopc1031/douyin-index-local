@@ -53,6 +53,7 @@ async function run(mode) {
   }
   const feedSeries = {startDate:query.start_date, endDate:query.end_date, data:'abbcbabcbabc'};
   for (const identity of [{key:'人工智能'}, {name:'人工智能'}, {word:'人工智能'},
+    {key:[{name:'人工智能',wordType:1}]}, {key:[[{name:'人工智能',wordType:1}]]}, {key:[{name:'人工智能'}]},
     {word:[{name:'人工智能',wordType:1}]}, {word:[[{name:'人工智能',wordType:1}]]},
     {word:[{name:'人工智能'}]}, {key:'人工智能',name:'人工智能',word:[{name:'人工智能',wordType:1}]}]) {
     const result = await feedFixture([{...identity,...feedSeries}]);
@@ -63,8 +64,19 @@ async function run(mode) {
     assert.equal(result.feed_rows[1].value, null);
     assert(result.feed_rows.slice(7).every(row => row.value_status === 'missing' && row.value === null));
   }
+  const observedShape = await feedFixture([{key:[{name:'人工智能',wordType:1}], ...feedSeries, type:'day', generalRatio:{}}], 'abc1,2', ['人工智能']);
+  assert.equal(observedShape.status, 'ok');
+  assert.equal(observedShape.feed_rows.length, 7);
+  assert.equal(observedShape.feed_rows[0].value, 1);
+  assert.equal(observedShape.feed_rows[1].value_status, 'missing');
   for (const [items, matches] of [
     [[{key:'错词',...feedSeries}], false],
+    [[{key:[{name:'错词',wordType:1}],...feedSeries}], false],
+    [[{key:[{name:'人工智能',wordType:2}],...feedSeries}], false],
+    [[{key:[],...feedSeries}], false],
+    [[{key:[{name:'人工智能'},{name:'另一词'}],...feedSeries}], false],
+    [[{key:[{name:'人工智能',wordType:1}],name:'另一词',...feedSeries}], false],
+    [[{key:[{name:'人工智能',wordType:1}],...feedSeries},{key:[[{name:'人工智能',wordType:1}]],...feedSeries}], true],
     [[{key:'人工智能',...feedSeries},{word:'人工智能',...feedSeries}], true],
     [[null], false], [[42], false], [[{key:'人工智能',name:'另一词',...feedSeries}], false],
     [[{word:[{name:'人工智能',wordType:2}],...feedSeries}], false],
