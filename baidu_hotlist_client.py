@@ -25,12 +25,11 @@ def project_baidu_hot_list(payload, tab, *, fetched_at=None):
     if not isinstance(card.get('component'), str) or not isinstance(rows, list) or not rows or not isinstance(pinned, list):
         raise _error('incomplete', '百度热榜词列表无法核验。')
     items, words, positions = [], set(), set()
-    for row, is_pinned in [(row, False) for row in rows] + [(row, True) for row in pinned]:
+    # Pinned-only words are intentionally omitted and must not invalidate the board.
+    for row in rows:
         if not isinstance(row, dict):
             raise _error('incomplete', '百度热榜词条无效。')
         word = _word(row.get('query') if row.get('word') is None else row['word'])
-        if word in words and is_pinned:
-            continue
         index = row.get('index')
         if type(index) is not int or not 0 <= index < MAX_POSITION or word in words or index + 1 in positions:
             raise _error('incomplete', '百度热榜词或名次重复或无效。')

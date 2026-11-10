@@ -461,7 +461,7 @@ class Hub:
                             paused['http_status'] = exc.http_status
                         self.store.set('baidu_hot_paused', paused)
                         break
-                    logger.warning('baidu hotlist stopped code=%s', exc.code)
+                    logger.warning('baidu hotlist stopped code=%s message=%s', exc.code, str(exc))
         finally:
             if owns_client:
                 client.close()
