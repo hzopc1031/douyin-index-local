@@ -498,3 +498,41 @@ class SyntheticWorkerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(calls, ['baidu_status', 'baidu_query'])
                 finally:
                     hub.store.close()
+
+class LoginQrRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_permissions_validation_and_no_sensitive_logging(self):
+        import base64
+        from hub_web import require, reply
+        png = b'\x89PNG\r\n\x1a\nsynthetic-image'
+        encoded = base64.b64encode(png).decode()
+        result = {'ok': True, 'png_base64': encoded, 'cookie': SECRET}
+        hub = Mock()
+        hub.bridge.return_value = result
+        principal = {'admin': True, 'scopes': ['read']}
+        @web.middleware
+        async def auth(request, handler):
+            request[PRINCIPAL_KEY] = principal
+            try:
+                return await handler(request)
+            except HubError as exc:
+                return web.json_response({'error': {'code': exc.code}}, status=exc.status)
+        app = web.Application(middlewares=[auth])
+        hub_baidu.mount_routes(app, hub, require, reply)
+        with self.assertNoLogs(level='WARNING'):
+            async with TestClient(TestServer(app)) as client:
+                path = '/api/v1/login/baidu/qr'
+                headers = {'X-Hub-Request': '1'}
+                response = await client.get(path, headers=headers)
+                self.assertEqual(await response.read(), png)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+                self.assertEqual(response.content_type, 'image/png')
+                self.assertEqual((await client.get(path)).status, 403)
+                self.assertEqual((await client.get(path, headers={**headers, 'Origin': 'https://evil.invalid'})).status, 403)
+                principal['admin'] = False
+                self.assertEqual((await client.get(path, headers=headers)).status, 403)
+                principal['admin'] = True
+                for bad in ({'ok': False, 'cookie': SECRET}, {'ok': True, 'png_base64': base64.b64encode(b'not png').decode()}, {'ok': True, 'png_base64': 'x' * (7 * 1024 * 1024 + 1)}):
+                    hub.bridge.return_value = bad
+                    response = await client.get(path, headers=headers)
+                    self.assertEqual(response.status, 503)
+                    self.assertEqual((await response.json())['error']['code'], 'qr_not_ready')

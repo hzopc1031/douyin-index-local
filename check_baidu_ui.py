@@ -1,5 +1,6 @@
 """Offline Baidu dashboard check: every request is fulfilled or aborted locally."""
 import argparse
+import base64
 import datetime as dt
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ def run(output=None):
                 page = browser.new_page(viewport={'width': width, 'height': 940})
                 writes, errors, unexpected = [], [], []
                 low_volume = [False]
+                baidu_state = ['login_in_progress']
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def route(r):
                     url = urlsplit(r.request.url)
@@ -30,6 +32,11 @@ def run(output=None):
                     path = url.path.removeprefix('/api/v1/')
                     if url.path == '/':
                         return r.fulfill(content_type='text/html', body=Path('hub.html').read_text())
+                    if path == 'login/baidu/qr':
+                        assert r.request.headers.get('x-hub-request') == '1'
+                        return r.fulfill(content_type='image/png', body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1kAAAAASUVORK5CYII='))
+                    if path == 'login/baidu/open':
+                        return r.fulfill(content_type='application/json', body=json.dumps({'ok': True, 'state': 'login_required'}))
                     if r.request.method == 'POST':
                         writes.append((path, r.request.post_data_json))
                         data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
@@ -38,7 +45,7 @@ def run(output=None):
                         data = dict(login_mode='desktop', browser='login_required', login_state='no_session_cookie',
                                     counts=dict(keywords=1, points=0), daily_online_attempts=0,
                                     limits=dict(online_attempts_per_day=50), cooldown_remaining_seconds=0,
-                                    platform_status={'baidu': dict(browser='login_in_progress', paused=None,
+                                    platform_status={'baidu': dict(browser=baidu_state[0], paused=None,
                                         daily=dict(attempts=0, http_reserved=0),
                                         limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
@@ -121,7 +128,16 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
-                assert '远程桌面扫码登录' in page.locator('#baiduQueryNote').inner_text()
+                assert '中枢扫码登录' in page.locator('#baiduQueryNote').inner_text()
+                page.locator('#baiduLoginButton').click()
+                page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
+                assert page.locator('#baiduQrImage').is_visible()
+                page.locator('#baiduQrRefresh').click()
+                page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
+                baidu_state[0] = 'browser_ready'
+                page.evaluate('pollBaiduLogin()')
+                page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('已登录')")
+                assert page.locator('#baiduQrImage').is_hidden()
                 assert page.locator('#submitButton').inner_text() == '查询 →'
                 if output and width == 1280:
                     page.screenshot(path=str(output/'baidu-query-desktop.png'))

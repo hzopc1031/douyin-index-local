@@ -177,4 +177,24 @@ def mount_routes(app, hub, require, reply):
         if not result.get('ok'):
             raise HubError('browser_unavailable', '百度浏览器未就绪，请检查远程桌面。', 503)
         return reply(result)
+    async def login_qr(request):
+        import base64
+        from aiohttp import web
+        from sms_login import FRAME_BASE64_LIMIT
+        require(request, admin=True)
+        origin = request.headers.get('Origin')
+        if request.headers.get('X-Hub-Request') != '1' or (origin and origin != 'https://' + request.host):
+            raise HubError('csrf_rejected', '请求未通过同源校验。', 403)
+        try:
+            result = await asyncio.to_thread(hub.bridge, 'baidu_login_qr', None, 10)
+            encoded = result.get('png_base64')
+            if result.get('ok') is not True or not isinstance(encoded, str) or len(encoded) > FRAME_BASE64_LIMIT:
+                raise ValueError
+            png = base64.b64decode(encoded, validate=True)
+            if not png.startswith(b'\x89PNG\r\n\x1a\n'):
+                raise ValueError
+            return web.Response(body=png, content_type='image/png', headers={'Cache-Control': 'no-store'})
+        except Exception:
+            raise HubError('qr_not_ready', '百度二维码尚未就绪，请刷新或使用远程桌面。', 503) from None
     app.router.add_post('/api/v1/login/baidu/open', login_open)
+    app.router.add_get('/api/v1/login/baidu/qr', login_qr)
