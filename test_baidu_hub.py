@@ -96,6 +96,58 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.series(self.s, q['keywords'][0])['points'][0]['value'], 12)
         self.assertEqual(list(adapter.csv_rows(feed))[1][1], 'feed_index')
 
+    async def test_feed_cache_requires_rows_only_when_enabled(self):
+        q = query()
+        self.s.ingest(result())
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_FEED_ENABLED': '0'}):
+            cached = self.submit()
+            self.assertTrue(cached['cache_hit'])
+            self.assertEqual(cached['status'], 'succeeded')
+            self.assertFalse(await self.hub.run_one())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(hub_baidu.daily(self.s)['attempts'], 0)
+
+        self.response['feed_rows'] = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            job = self.submit()
+            self.assertFalse(job['cache_hit'])
+            self.assertEqual(job['status'], 'queued')
+            await self.hub.run_one()
+            self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+            self.assertTrue(self.payloads[-1]['_feed_enabled'])
+            self.assertEqual(self.s.cached(q)['feed_rows'], self.response['feed_rows'])
+            counter = hub_baidu.daily(self.s).copy()
+            cached = self.submit()
+            self.assertTrue(cached['cache_hit'])
+            self.assertEqual(cached['status'], 'succeeded')
+            self.assertFalse(await self.hub.run_one())
+            self.assertEqual(hub_baidu.daily(self.s), counter)
+        self.assertEqual(self.calls, ['baidu_status', 'baidu_query'])
+
+    async def test_feed_enabled_after_submit_rechecks_cache(self):
+        job = self.submit()
+        self.s.ingest(result())
+        q = query()
+        self.response['feed_rows'] = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        self.assertFalse(self.s.job(job['id'])['cache_hit'])
+        self.assertTrue(self.payloads[-1]['_feed_enabled'])
+
+    async def test_feed_flag_preserves_insight_and_douyin_cache(self):
+        self.s.ingest(public_result(dy_fixture()))
+        q = b.validate_insight({**query(), 'kind': 'related'})
+        data = b.project_wordgraph({'wordlist': [{'wordGraph': [{'word': '合成词'}]}]})
+        self.response = {'ok': True, 'data': data, 'metadata': {**q, 'fetched_at': dt.datetime.now(b.TZ).isoformat()}}
+        job = self.submit(q)
+        await self.hub.run_one()
+        self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_FEED_ENABLED': '1'}):
+            self.assertTrue(self.submit(q)['cache_hit'])
+            self.assertTrue(self.submit(DY_QUERY)['cache_hit'])
+            self.assertFalse(await self.hub.run_one())
+
     async def test_audience_budget_and_storage_synthetic(self):
         q = b.validate_insight({**query(), 'kind': 'audience'})
         data = b.project_audience({'gender': [{'desc': '男', 'rate': 0.6, 'tgi': 120}], 'age': [{'desc': '青年', 'rate': 0.4, 'tgi': 90}], 'interest': [], 'prov': {'917': 1000}, 'city': {'138': 800}})
