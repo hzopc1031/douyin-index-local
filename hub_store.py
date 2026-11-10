@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import sqlite3
@@ -371,7 +372,10 @@ class Store:
         for row in self.db.execute('SELECT result FROM datasets WHERE qhash=? AND fetched BETWEEN ? AND ? ORDER BY fetched DESC',
                                    (query_hash(query), time.time() - 86400, time.time() + 1)):
             result = json.loads(row['result'])
-            if result['metadata']['complete']:
+            if (result['metadata']['complete']
+                    and (query.get('platform') != 'baidu'
+                         or os.environ.get('INDEX_HUB_BAIDU_FEED_ENABLED') != '1'
+                         or 'feed_rows' in result)):
                 return result
         return None
 
