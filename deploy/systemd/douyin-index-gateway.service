@@ -15,6 +15,9 @@ Environment=INDEX_HUB_LOG_DIR=/var/log/douyin-index
 # 显示短信卡片；可切换 qr 或 desktop，必须与 desktop 单元一致。
 Environment=INDEX_HUB_LOGIN_MODE=sms
 Environment=INDEX_HUB_PORT=8443
+# 百度热搜默认关闭；以下仅为示例。
+#Environment=INDEX_HUB_BAIDU_HOTLIST_ENABLED=1
+#Environment=INDEX_HUB_BAIDU_HOTLIST_INTERVAL_SECONDS=3600
 # 手机号/短信码仅内存中转，不配置号码白名单或把输入放进环境变量。
 # 推荐靠防火墙只放行 tailscale0；不要在前面加反向代理（所有客户端会变成同一个 IP，认证限流会失效）。
 #Environment=INDEX_HUB_BIND=100.x.y.z

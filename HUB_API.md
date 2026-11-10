@@ -339,3 +339,11 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 百度关联需求支持 `kind=related`，按 `end_date` 获取需求图谱单日快照；`GET /api/v1/insights` 与 `/api/v1/insights/ranges` 可用 `platform=baidu` 读取，省略平台默认为抖音。百度画像尚不支持。
 
 热点宝登录与垂类刷新接口仅限管理员 Basic 认证，POST 须带 `X-Hub-Request: 1`、同源 Origin（如提供）及空 JSON 对象。`GET /api/v1/topics/login` 返回 `state`（`logged_in`、`need_scan`、`expired`、`browser_unavailable`）和 `qr_available`；`GET /api/v1/topics/login/qr` 返回授权窗口中定位到、按原像素整数倍放大的二维码 PNG，尚未就绪返回 503，均禁止缓存。检测到失效会重新加载授权页，刷新期间不提供旧码。二维码定位依赖 ZXing；解码失败时仍可返回通过定位角检查的二维码。`POST /api/v1/topics/login/refresh` 打开或重新加载授权页。登录状态根据页面判断，实际登录以垂类请求结果为准；不读取或返回 Cookie。`POST /api/v1/topics/categories/refresh` 发起一次 tags 请求，与话题采集共用 15 秒间隔、上海日 30 次上限和异常暂停；暂停后须人工恢复，不自动重试。返回状态、条数和是否实际发出请求。
+
+## 百度热搜榜（草稿）
+
+百度热搜来自 `https://top.baidu.com/api/board?platform=pc&tab=<tab>`，免登录；百度热搜热度不是百度搜索指数，缺失为 null，未上榜不记 0。只保存完整快照，不回填历史。初始榜单为 `baidu_realtime`、`baidu_novel`、`baidu_movie`、`baidu_teleplay`；每次采集仍须通过完整性校验。可用 `INDEX_HUB_BAIDU_HOTLIST_TABS` 指定逗号分隔的已知 tab；非法项忽略，不采集 homepage。额外分类的实时完整性仍待核实。
+
+独立开关 `INDEX_HUB_BAIDU_HOTLIST_ENABLED=1` 才启动；默认关闭。`INDEX_HUB_BAIDU_HOTLIST_INTERVAL_SECONDS` 默认 3600，最低 1800，非法回退 3600。一个周期逐榜各请求一次，不重试；上海自然日最多 48 个成功周期，至少保存一个榜才计一次。403、429 或非 JSON 只暂停百度调度，管理员用 `POST /api/v1/hot/resume` 和 `{"platform":"baidu"}` 单独恢复；不带范围仍只恢复抖音，恢复不会立即采集。`GET /status` 的 `baidu_hotlist` 独立列出配置和状态，不消耗抖音热榜或搜索指数额度。
+
+`GET /hot/latest?board=baidu_realtime`、`GET /hot/word?board=baidu_realtime&word=...` 和 `GET /hot/rising?board=baidu_realtime` 只读取对应榜单；不提供 board 时默认 `word_list`（抖音）。百度没有 sentence_id，飙升阈值沿用第一期设置，可能需要按百度热度校准，百度话题的抖音搜索指数环比不显示。关键词组融合只使用抖音热搜热度。描述、链接、图片、变化和标签等额外字段暂不保存。
