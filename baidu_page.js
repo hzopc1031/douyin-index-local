@@ -1,5 +1,8 @@
 async (query) => {
-  const fail = status => ({status});
+  let stage = query.kind || 'search', requestsSent = 0, httpStatus = null, businessStatus = null;
+  const safeMessage = value => typeof value === 'string' ? (value.match(/\b(?:timeout|timed|out|network|error|failed|failure|request|response|connection|closed|navigation|context|destroyed|invalid|unavailable|exception|message|rate|limit|denied|internal|server|service)\b/gi) || []).join(' ').slice(0, 80) : '';
+  const diagnostics = () => ({stage, requests_sent:requestsSent, http_status:httpStatus, business_status:businessStatus});
+  const fail = (status, message = '') => ({status, ...diagnostics(), message:safeMessage(message)});
   const schemaKeys = new Set(['status','data','uniqid','index','key','userIndexes','word','name','wordType','all','pc','wise','startDate','endDate','type','generalRatio','wordlist','wordGraph']);
   const digest = (value, depth = 0) => {
     const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
@@ -43,7 +46,7 @@ async (query) => {
   };
   const schema = (value, diag = {}) => {
     const date = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
-    return {status:'response_schema', schema_digest:digest(value), schema_diag:{
+    return {status:'response_schema', ...diagnostics(), schema_digest:digest(value), schema_diag:{
       reason:diag.reason || 'index_shape', request_start:date(query.start_date), request_end:date(query.end_date),
       response_start:date(diag.response_start), response_end:date(diag.response_end),
       word_type:Number.isFinite(diag.word_type) ? diag.word_type : null, name_matches:diag.name_matches === true,
@@ -92,13 +95,16 @@ async (query) => {
     return JSON.parse(text);
   };
   const deadline = promise => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(Error()), 25000))]);
-  const get = async (path, headers = {}) => {
+  const get = async (path, headers = {}, nextStage = stage) => {
+    stage = nextStage; httpStatus = null; businessStatus = null;
     const now = new Date(Date.now() + 8 * 3600000);
     if (now.toISOString().slice(0, 10) !== query._budget_day || (now.getUTCHours() === 23 && now.getUTCMinutes() === 59 && now.getUTCSeconds() >= 30)) return fail('baidu_daily_limit');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 25000);
     try {
+      requestsSent++;
       const response = await fetch(path, {headers, credentials: 'same-origin', redirect: 'error', signal: controller.signal});
+      httpStatus = response.status;
       if ((response.headers.get('content-type') || '').includes('html')) return fail('verification_required');
       if (!response.ok) return fail('http_error');
       const reader = response.body.getReader();
@@ -117,7 +123,8 @@ async (query) => {
       let body;
       try { body = parse(text); } catch (_) { return fail('response_schema'); }
       if (!body || !Number.isInteger(body.status)) return schema(body);
-      if (body.status !== 0) return fail(({10000:'login_required',10001:'rate_limited',10002:'bad_request',10018:'abnormal_access'})[body.status] || 'business_error');
+      businessStatus = body.status;
+      if (body.status !== 0) return fail(({10000:'login_required',10001:'rate_limited',10002:'bad_request',10018:'abnormal_access'})[body.status] || 'business_error', body.message || body.msg);
       if (!Object.prototype.hasOwnProperty.call(body, 'data')) return schema(body);
       return {status:'ok', data:body.data};
     } finally { clearTimeout(timer); }
@@ -148,7 +155,7 @@ async (query) => {
   try {
     if (query.kind === 'audience') {
       const socialParams = new URLSearchParams({'wordlist[]':query.keywords[0]});
-      const base = await get('/api/SocialApi/baseAttributes?' + socialParams);
+      const base = await get('/api/SocialApi/baseAttributes?' + socialParams, {}, 'audience');
       if (base.status !== 'ok') return base;
       const interestParams = new URLSearchParams({'wordlist[]':query.keywords[0], typeid:''});
       const interest = await get('/api/SocialApi/interest?' + interestParams);
@@ -187,7 +194,7 @@ async (query) => {
         if (parsed.periodRule) return schema(data, {reason:'audience_period', period_returned:true, period_rule:parsed.periodRule, period_days:parsed.days});
         period = {start_date:parsed.start, end_date:parsed.end, days:parsed.days};
       }
-      return {status:'ok', data:{...a.output, ...b.output, prov:item.prov, city:item.city, period}};
+      return {status:'ok', ...diagnostics(), data:{...a.output, ...b.output, prov:item.prov, city:item.city, period}};
     }
     if (query.kind === 'related') {
       const params = new URLSearchParams({'wordlist[]':query.keywords[0]});
@@ -213,7 +220,7 @@ async (query) => {
         }
         if (rule) return schema(data, {...detail, reason:'related_entry_shape', entry_rule:rule});
       }
-      return {status:'ok', meta:{entry_keys:keys}, data:{period:{start_date:start, end_date:end, days}, wordlist:[{wordGraph:items.map(item => ({word:item.word, pv:item.pv ?? null, sim:item.sim ?? null, ratio:item.ratio ?? null}))}]}};
+      return {status:'ok', ...diagnostics(), meta:{entry_keys:keys}, data:{period:{start_date:start, end_date:end, days}, wordlist:[{wordGraph:items.map(item => ({word:item.word, pv:item.pv ?? null, sim:item.sim ?? null, ratio:item.ratio ?? null}))}]}};
     }
     if (!window.Paris || typeof window.Paris.getAcsInstance !== 'function') return fail('signature_unavailable');
     let signature;
@@ -226,11 +233,11 @@ async (query) => {
       if (typeof signature !== 'string' || !signature) return fail('signature_unavailable');
     } catch (_) { return fail('signature_unavailable'); }
     const params = new URLSearchParams({word:JSON.stringify(query.keywords.map(name => [{name,wordType:1}])), area:'0', startDate:query.start_date, endDate:query.end_date});
-    const index = await get('/api/SearchApi/index?' + params, {'Cipher-Text':signature});
+    const index = await get('/api/SearchApi/index?' + params, {'Cipher-Text':signature}, 'search');
     if (index.status !== 'ok') return index;
     const data = index.data;
     if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(data.uniqid) || !Array.isArray(data.userIndexes) || data.userIndexes.length > query.keywords.length) return schema(data);
-    const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}));
+    const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}), {}, 'search_ptbk');
     if (table.status !== 'ok') return table;
     const ptbk = table.data;
     const info = {ptbk_length:typeof ptbk === 'string' ? ptbk.length : 0};
@@ -279,12 +286,12 @@ async (query) => {
       const count = Math.min(...['all','pc','wise'].map(device => wordRows.filter(row => row.device === device).length));
       rows.push(...wordRows.filter(row => Date.parse(row.date + 'T00:00:00Z') < start + count * 86400000));
     }
-    async function extraIndex(path) {
-    const feed = await get(path + '?' + params, {'Cipher-Text':signature});
+    async function extraIndex(path, name) {
+    const feed = await get(path + '?' + params, {'Cipher-Text':signature}, name);
     if (feed.status !== 'ok') return feed;
     const feedData = feed.data;
     if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index)) return schema(feedData, {ptbk_length:0, name_matches:false});
-    const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}));
+    const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}), {}, name + '_ptbk');
     if (feedTable.status !== 'ok') return feedTable;
     const mapping = feedTable.data;
     const feedInfo = {ptbk_length:typeof mapping === 'string' ? mapping.length : 0, name_matches:false};
@@ -327,10 +334,10 @@ async (query) => {
     const result = {status:'ok', rows};
     for (const [enabled, path, field] of [[query._feed_enabled, '/api/FeedSearchApi/getFeedIndex', 'feed_rows'], [query._news_enabled, '/api/NewsApi/getNewsIndex', 'news_rows']]) {
       if (!enabled) continue;
-      const extra = await extraIndex(path);
+      const extra = await extraIndex(path, field === 'feed_rows' ? 'feed' : 'news');
       if (extra.status !== 'ok') return extra;
       result[field] = extra.rows;
     }
-    return result;
-  } catch (_) { return fail('network_error'); }
+    return {...result, ...diagnostics()};
+  } catch (error) { return {...fail('network_error', error?.message), exception_type: error?.name === 'TypeError' ? 'TypeError' : 'Error'}; }
 }

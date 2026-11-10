@@ -107,11 +107,14 @@ class ReadinessTests(unittest.TestCase):
                     line = logs.output[0]
                     self.assertIn('job=' + 'a' * 32, line)
                     category = 'other' if mode == 'unexpected' else code
-                    sent = 'no' if mode == 'login' else 'unknown'
+                    sent = '0' if mode in ('login', 'unexpected') else 'unknown'
                     self.assertIn(f'category={category} requests_sent={sent} since_start=', line)
                     self.assertIn('on_index=' + ('false' if mode == 'login' else 'true'), line)
                     self.assertIn('datelist_sent=none period_returned=false', line)
-                    for secret in ('fake-cookie-secret', 'synthetic', '?', 'Target', 'exception message'):
+                    if mode == 'unexpected':
+                        self.assertIn('stage=wait_ready exception_type=RuntimeError', line)
+                        self.assertIn("exception_message='exception message'", line)
+                    for secret in ('fake-cookie-secret', 'synthetic', '?', 'Target'):
                         self.assertNotIn(secret, line)
 
     def test_related_failure_logs_safe_period_diagnostics(self):
@@ -136,6 +139,63 @@ class ReadinessTests(unittest.TestCase):
         line = next(line for line in logs.output if 'baidu_failure' in line)
         self.assertIn('datelist_sent=present period_returned=true', line)
         self.assertNotIn('synthetic-secret', str(logs.output))
+
+    def test_goto_and_ready_playwright_errors_are_classified(self):
+        from unittest.mock import Mock
+        import baidu_browser
+        from baidu_adapter import BaiduError
+        class Error(Exception): pass
+        class TimeoutError(Error): pass
+        page = Mock(url='about:blank')
+        page.goto.side_effect = TimeoutError('timeout fake-cookie-secret')
+        with self.assertRaises(BaiduError) as caught:
+            baidu_browser._page(Mock(pages=[page]))
+        self.assertEqual(caught.exception.code, 'page_timeout')
+        self.assertEqual(caught.exception.exception_type, 'TimeoutError')
+        self.assertNotIn('fake-cookie-secret', caught.exception.exception_message)
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.side_effect = Error('unexpected fake-cookie-secret')
+        with self.assertRaises(BaiduError) as caught:
+            baidu_browser.wait_ready(page, 'https://index.baidu.com')
+        self.assertEqual(caught.exception.code, 'page_other')
+        self.assertEqual(caught.exception.exception_type, 'Error')
+
+    def test_unexpected_query_error_logs_exception(self):
+        import datetime
+        from unittest.mock import Mock
+        import baidu_adapter as adapter
+        import baidu_browser
+        from test_baidu_adapter import query
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.side_effect = RuntimeError('network failure fake-cookie-secret ' + 'x' * 200)
+        worker = Mock()
+        worker.call.side_effect = lambda action: action(Mock())
+        body = {**query(), '_budget_day': datetime.datetime.now(adapter.TZ).date().isoformat()}
+        with patch.object(baidu_browser, 'browser', return_value=worker), patch.object(baidu_browser, '_page', return_value=page), \
+             patch.object(baidu_browser, 'wait_ready'), patch.object(baidu_browser, 'status', return_value={'state':'browser_ready'}), \
+             self.assertLogs('index_hub.baidu', level='WARNING') as logs:
+            answer = adapter.bridge_command('baidu_query', body)
+        self.assertEqual(answer, {'ok':False, 'code':'page_other'})
+        line = str(logs.output)
+        for text in ('category=other', 'stage=search', 'requests_sent=unknown', 'exception_type=RuntimeError', 'network failure'):
+            self.assertIn(text, line)
+        self.assertNotIn('fake-cookie-secret', line)
+        self.assertNotIn('x' * 80, line)
+
+    def test_page_failure_logs_safe_http_diagnostics(self):
+        from unittest.mock import Mock
+        from baidu_browser import PageTransport
+        from baidu_adapter import BaiduError
+        page = Mock(url='https://index.baidu.com/')
+        page.evaluate.return_value = {'status':'business_error', 'stage':'news_ptbk', 'requests_sent':6,
+            'http_status':200, 'business_status':42, 'message':'server error 人工智能 fixture-token ciphertext'}
+        with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
+            PageTransport(page).query({})
+        line = str(logs.output)
+        for field in ('stage=news_ptbk', 'requests_sent=6', 'http_status=200', 'business_status=42'):
+            self.assertIn(field, line)
+        for secret in ('人工智能', 'fixture-token', 'ciphertext'):
+            self.assertNotIn(secret, line)
 
     def test_readiness_deadline(self):
         from unittest.mock import Mock
@@ -600,7 +660,8 @@ class ReadOnlyStatusTests(unittest.TestCase):
         page.evaluate.return_value = {'status': 'response_schema', 'schema_digest': {'type': 'string', 'secret': 'synthetic-secret'}}
         with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
             PageTransport(page).query({})
-        logger.assert_not_called()
+        self.assertNotIn('synthetic-secret', str(logger.mock_calls))
+        self.assertNotIn('schema_digest=', str(logger.mock_calls))
 
     def test_untrusted_diagnostics_are_not_logged(self):
         from unittest.mock import Mock
@@ -613,7 +674,8 @@ class ReadOnlyStatusTests(unittest.TestCase):
             page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag | change}
             with patch('baidu_browser.logging.getLogger') as logger, self.assertRaises(BaiduError):
                 PageTransport(page).query({})
-            logger.assert_not_called()
+            self.assertNotIn('synthetic-secret', str(logger.mock_calls))
+            self.assertNotIn('schema_digest=', str(logger.mock_calls))
         page.evaluate.return_value = {'status':'response_schema', 'schema_digest':{'type':'string'}, 'schema_diag':diag}
         with self.assertLogs('index_hub.baidu', level='WARNING') as logs, self.assertRaises(BaiduError):
             PageTransport(page).query({})
