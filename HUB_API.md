@@ -352,6 +352,8 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 
 `INDEX_HUB_BAIDU_FEED_ENABLED=1` 才开启资讯指数采集，默认关闭；每个搜索日期分片额外请求 `/api/FeedSearchApi/getFeedIndex` 和对应的 `/Interface/api/ptbk`，共预占 4 HTTP/分片，关闭时为 2，共用百度 120/400 工程额度。结构异常使整个任务失败并暂停；官方空序列保留缺失，不补 0。接口尚未用真实账号验证。
 
+词条身份兼容 `key` 字符串与 `word`/`name`（包括搜索接口同款结构），仍须等于查询词且不重复；**真实返回形状尚未用账号核对，修法基于推断**。
+
 开关打开时，24 小时内的完整缓存若无资讯指数则不命中，将重新采集搜索和资讯指数。
 
 `GET /api/v1/series?platform=baidu&keyword=…&metric=feed_index` 和 `GET /api/v1/export.csv` 的同样参数只读取已存资讯指数；`device` 仅支持 `all`（可省略）。CSV 的 `metric` 为 `feed_index`。关闭开关后已存数据仍可读和导出。该指标不分 PC/移动，与搜索指数口径不同，不等于搜索次数，结果待核对。

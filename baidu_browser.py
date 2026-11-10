@@ -182,7 +182,7 @@ class BaiduBrowser:
 
 
 def _safe_digest(value, depth=0):
-    keys = {'status', 'data', 'uniqid', 'userIndexes', 'word', 'name', 'wordType',
+    keys = {'status', 'data', 'uniqid', 'index', 'key', 'userIndexes', 'word', 'name', 'wordType',
             'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio', 'wordlist', 'wordGraph'}
     if type(value) is not dict or value.get('type') not in ('string', 'number', 'boolean', 'null', 'array', 'object'):
         raise ValueError
