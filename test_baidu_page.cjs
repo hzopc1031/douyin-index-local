@@ -21,35 +21,38 @@ async function run(mode) {
 }
 (async () => {
   // Synthetic fixtures only: exercise request shapes and validation offline.
-  for (const enabled of [false, true]) {
+  for (const [enabled, news] of [[false,false],[true,false],[false,true],[true,true]]) {
     const paths = [];
     const series = {startDate:query.start_date,endDate:query.end_date,data:'abcbabcbabcba'};
     const fetch = async (url, options) => {
       paths.push(url);
-      if (url.includes('FeedSearchApi')) assert.equal(options.headers['Cipher-Text'], 'synthetic-signature');
-      const data = url.includes('FeedSearchApi') ? {uniqid:'feed-id',index:[{key:'synthetic-word',...series,data:'abbcbabcbabc'}]} : url.includes('SearchApi/index') ? {uniqid:'search-id',userIndexes:[{word:[{name:'synthetic-word',wordType:1}],all:series,pc:series,wise:series}]} : 'abc1,2';
+      if (url.includes('FeedSearchApi') || url.includes('NewsApi')) assert.equal(options.headers['Cipher-Text'], 'synthetic-signature');
+      const data = (url.includes('FeedSearchApi') || url.includes('NewsApi')) ? {uniqid:'feed-id',index:[{key:'synthetic-word',...series,data:'abbcbabcbabc'}]} : url.includes('SearchApi/index') ? {uniqid:'search-id',userIndexes:[{word:[{name:'synthetic-word',wordType:1}],all:series,pc:series,wise:series}]} : 'abc1,2';
       return new Response(JSON.stringify({status:0,data}), {headers:{'content-type':'application/json'}});
     };
     const timer = (...args) => {const h=setTimeout(...args);h.unref();return h};
     const context = {location:{origin:query._origin},window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}},fetch,URLSearchParams,AbortController,TextDecoder,Uint8Array,Response,setTimeout:timer,clearTimeout};
-    const result = await vm.runInNewContext(script,context)({...query,_feed_enabled:enabled});
+    const result = await vm.runInNewContext(script,context)({...query,_feed_enabled:enabled,_news_enabled:news});
     assert.equal(result.status,'ok');
-    assert.equal(paths.length,enabled?4:2);
+    assert.equal(paths.length,2 + 2*enabled + 2*news);
     assert.equal(paths.filter(p=>p.includes('FeedSearchApi')).length,enabled?1:0);
-    assert.equal(paths.filter(p=>p.includes('/ptbk?')).length,enabled?2:1);
+    assert.equal(paths.filter(p=>p.includes('NewsApi/getNewsIndex')).length,news?1:0);
+    assert.equal(paths.filter(p=>p.includes('/ptbk?')).length,1 + enabled + news);
+    assert.equal('news_rows' in result, news);
+    if (news) assert.equal(result.news_rows.length, 7);
     if (enabled) { assert.equal(result.feed_rows.length,7); assert.equal(result.feed_rows[1].value,null); assert.equal(result.feed_rows[0].value,1); }
   }
-  async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词']) {
+  async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词'], news = false) {
     const series = {startDate:query.start_date, endDate:query.end_date, data:'abcbabcbabcba'};
     const fetch = async url => {
-      const data = url.includes('FeedSearchApi') ? {uniqid:'private-feed-id', index:items} :
+      const data = (url.includes('FeedSearchApi') || url.includes('NewsApi')) ? {uniqid:'private-feed-id', index:items} :
         url.includes('SearchApi/index') ? {uniqid:'search-id', userIndexes:[]} :
         url.includes('feed-id') ? mapping : 'abc1,2';
       return new Response(JSON.stringify({status:0, data}), {headers:{'content-type':'application/json'}});
     };
     const timer = (...args) => {const h=setTimeout(...args); h.unref(); return h;};
     const context = {location:{origin:query._origin}, window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}}, fetch, URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout:timer, clearTimeout};
-    return vm.runInNewContext(script, context)({...query, keywords, _feed_enabled:true});
+    return vm.runInNewContext(script, context)({...query, keywords, ...(news ? {_news_enabled:true} : {_feed_enabled:true})});
   }
   const feedSeries = {startDate:query.start_date, endDate:query.end_date, data:'abbcbabcbabc'};
   for (const identity of [{key:'人工智能'}, {name:'人工智能'}, {word:'人工智能'},
@@ -89,6 +92,17 @@ async function run(mode) {
     assert.equal(result.schema_diag.name_matches, matches);
     assert.equal(result.schema_diag.ptbk_length, 6);
     for (const secret of ['人工智能','另一词','错词','private-feed-id','abbcbabcbabc','abc1,2']) assert(!JSON.stringify(result).includes(secret));
+  }
+
+  for (const field of ['key', 'word', 'name']) for (const identity of ['人工智能', [{name:'人工智能',wordType:1}], [[{name:'人工智能',wordType:1}]]]) {
+    const result = await feedFixture([{[field]:identity, ...feedSeries, type:'day', generalRatio:{}}], 'abc1,2', ['人工智能'], true);
+    assert.equal(result.status, 'ok'); assert.equal(result.news_rows.length, 7);
+    assert.equal(result.news_rows[0].value, 1); assert.equal(result.news_rows[1].value, null);
+  }
+  for (const items of [[{key:'错词',...feedSeries}], [{key:[{name:'人工智能',wordType:2}],...feedSeries}], [{key:'人工智能',wordType:2,...feedSeries}], [{key:'人工智能',...feedSeries},{key:'人工智能',...feedSeries}], [null]]) {
+    const result = await feedFixture(items, 'abc1,2', ['人工智能'], true);
+    assert.equal(result.status, 'response_schema');
+    for (const secret of ['人工智能','错词','private-feed-id','abbcbabcbabc','abc1,2']) assert(!JSON.stringify(result).includes(secret));
   }
   const duplicateSingle = await feedFixture([{key:'人工智能',...feedSeries},{key:'人工智能',...feedSeries}], 'abc1,2', ['人工智能']);
   assert.equal(duplicateSingle.schema_diag.reason, 'word');
