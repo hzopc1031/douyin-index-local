@@ -460,6 +460,8 @@ def login_open(context):
     if (url.scheme, url.netloc) != ('https', 'index.baidu.com'):
         raise ProfileError('Unsafe Baidu page origin')
     page.bring_to_front()
+    if status(context)['state'] in ('browser_ready', 'signature_unavailable'):
+        return {'ok': True, 'state': 'browser_ready'}
     login = page.get_by_text('登录', exact=True).first
     if login.is_visible(timeout=1000):
         try:
@@ -467,6 +469,31 @@ def login_open(context):
         except PlaywrightTimeoutError:
             pass
     return {'ok': True, 'state': 'login_required'}
+
+
+def login_qr(context):
+    import base64
+    from urllib.parse import urlsplit
+    from sms_login import FRAME_BASE64_LIMIT
+
+    if status(context)['state'] != 'login_required':
+        return {'ok': False, 'code': 'qr_not_ready'}
+    for page in context.pages:
+        for frame in page.frames:
+            url = urlsplit(frame.url)
+            if url.scheme != 'https' or url.netloc not in ('index.baidu.com', 'passport.baidu.com'):
+                continue
+            elements = frame.locator('.pass-qrcode-img img, img.pass-qrcode-img, .pass-qrcode-img canvas, .pass-login-pop-content img[id*="qrcode"], .pass-login-pop-content canvas[id*="qrcode"]')
+            for i in range(min(elements.count(), 10)):
+                element = elements.nth(i)
+                box = element.bounding_box()
+                if not box or not element.is_visible() or not (50 <= box['width'] <= 512 and 50 <= box['height'] <= 512 and .8 <= box['width'] / box['height'] <= 1.25):
+                    continue
+                png = element.screenshot(type='png', timeout=3000)
+                encoded = base64.b64encode(png).decode('ascii')
+                if png.startswith(b'\x89PNG\r\n\x1a\n') and len(encoded) <= FRAME_BASE64_LIMIT:
+                    return {'ok': True, 'png_base64': encoded}
+    return {'ok': False, 'code': 'qr_not_ready'}
 
 
 def status(context, *, origin='https://index.baidu.com', allow_loopback=False):

@@ -376,6 +376,11 @@ def bridge_command(command, payload=None):
         return instance.call(baidu_browser.status, touch='status')
     if command == 'baidu_login_open':
         return baidu_browser.browser().call(baidu_browser.login_open, hold=True)
+    if command == 'baidu_login_qr':
+        instance = baidu_browser.browser()
+        if not instance.started:
+            return {'ok': False, 'code': 'qr_not_ready'}
+        return instance.call(baidu_browser.login_qr, touch=False)
     if not isinstance(payload, dict):
         raise BaiduError()
     day = payload.get('_budget_day')
@@ -477,7 +482,7 @@ class BaiduAdapter:
                    'region': '全国', 'timezone': 'Asia/Shanghai', 'modules': ['related', 'audience'],
                    'description': '全国百度搜索指数；指数不等于搜索次数。'}
 
-    bridge_commands = ('baidu_status', 'baidu_query', 'baidu_login_open')
+    bridge_commands = ('baidu_status', 'baidu_query', 'baidu_login_open', 'baidu_login_qr')
     dispatch_bridge = staticmethod(bridge_command)
 
     def initialize(self, store):
@@ -573,7 +578,8 @@ class BaiduAdapter:
         return hub_baidu.status_snapshot(store)
 
     def openapi_paths(self):
-        return {'/api/v1/login/baidu/open': {'post': {'summary': '管理员打开百度登录窗口（需同源校验）', 'security': [{'BasicAuth': []}], 'responses': {'200': {'description': '窗口已打开'}, '403': {'description': '无管理员权限'}, '503': {'description': '浏览器不可用'}}}}}
+        return {'/api/v1/login/baidu/open': {'post': {'summary': '管理员打开百度登录窗口（需同源校验）', 'security': [{'BasicAuth': []}], 'responses': {'200': {'description': '窗口已打开'}, '403': {'description': '无管理员权限'}, '503': {'description': '浏览器不可用'}}}},
+                '/api/v1/login/baidu/qr': {'get': {'summary': '管理员读取百度登录二维码（需同源请求头）', 'security': [{'BasicAuth': []}], 'parameters': [{'name': 'X-Hub-Request', 'in': 'header', 'required': True, 'schema': {'type': 'string', 'enum': ['1']}}], 'responses': {'200': {'description': 'PNG 二维码'}, '403': {'description': '无权限或同源校验失败'}, '503': {'description': '二维码未就绪'}}}}}
 
     def mount_routes(self, app, hub, require, reply):
         import hub_baidu

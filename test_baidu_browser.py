@@ -176,6 +176,14 @@ class PageTransportTests(unittest.TestCase):
         with self.assertRaises(BaiduError):
             PageTransport(Page()).query({})
 
+    def test_login_open_preserves_existing_session(self):
+        from unittest.mock import Mock
+        from baidu_browser import login_open
+        page = Mock(url='https://index.baidu.com/')
+        with patch('baidu_browser._page', return_value=page), patch('baidu_browser.status', return_value={'state': 'browser_ready'}):
+            self.assertEqual(login_open(None)['state'], 'browser_ready')
+        page.get_by_text.assert_not_called()
+
     def test_login_open_click_timeout(self):
         from unittest.mock import Mock
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -184,10 +192,10 @@ class PageTransportTests(unittest.TestCase):
         login = page.get_by_text.return_value.first
         login.is_visible.return_value = True
         login.click.side_effect = PlaywrightTimeoutError('synthetic timeout')
-        with patch('baidu_browser._page', return_value=page):
+        with patch('baidu_browser._page', return_value=page), patch('baidu_browser.status', return_value={'state': 'login_required'}):
             self.assertEqual(login_open(None), {'ok': True, 'state': 'login_required'})
         login.click.side_effect = RuntimeError('other error')
-        with patch('baidu_browser._page', return_value=page), self.assertRaises(RuntimeError):
+        with patch('baidu_browser._page', return_value=page), patch('baidu_browser.status', return_value={'state': 'login_required'}), self.assertRaises(RuntimeError):
             login_open(None)
 
 
@@ -784,3 +792,32 @@ class AudienceDiagnosticSyntheticTests(unittest.TestCase):
         self.assertIn('span_out_of_range', output)
         self.assertNotIn('2026-10-01', output)
         self.assertNotIn('2027-10-02', output)
+
+class LoginQrTests(unittest.TestCase):
+    def test_only_visible_qr_element_is_captured(self):
+        from unittest.mock import Mock
+        import base64
+        import baidu_browser
+        png = b'\x89PNG\r\n\x1a\nsynthetic'
+        element = Mock()
+        element.bounding_box.return_value = {'width': 180, 'height': 180}
+        element.is_visible.return_value = True
+        element.screenshot.return_value = png
+        locator = Mock()
+        locator.count.return_value = 1
+        locator.nth.return_value = element
+        frame = Mock(url='https://passport.baidu.com/login')
+        frame.locator.return_value = locator
+        page = Mock(frames=[frame])
+        context = Mock(pages=[page])
+        with patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}):
+            result = baidu_browser.login_qr(context)
+            self.assertEqual(base64.b64decode(result['png_base64']), png)
+            element.screenshot.assert_called_once_with(type='png', timeout=3000)
+            element.is_visible.return_value = False
+            self.assertEqual(baidu_browser.login_qr(context)['code'], 'qr_not_ready')
+        with patch.object(baidu_browser, 'status', return_value={'state': 'browser_ready'}):
+            self.assertEqual(baidu_browser.login_qr(context)['code'], 'qr_not_ready')
+        frame.url = 'https://example.invalid/'
+        with patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}):
+            self.assertEqual(baidu_browser.login_qr(context)['code'], 'qr_not_ready')
