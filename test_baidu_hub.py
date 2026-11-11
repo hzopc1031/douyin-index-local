@@ -4,6 +4,7 @@ import contextlib
 import copy
 import datetime as dt
 import json
+import os
 import tempfile
 import threading
 import time
@@ -525,6 +526,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('baidu,search_index,北京', await (await client.get('/api/v1/export.csv?'+args+'&region=北京')).text())
             self.assertEqual((await client.get('/api/v1/series?'+args+'&region=未知')).status, 400)
             self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&region=北京')).status, 400)
+            self.assertEqual((await client.get('/api/v1/export.csv?platform=douyin&keyword=x&region=北京')).status, 400)
             with self.s.db:
                 self.s.db.execute("DELETE FROM baidu_points WHERE region='北京'")
             combined = await (await client.get('/api/v1/series?'+args+'&device=all_devices')).json()
@@ -557,6 +559,15 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('/api/v1/login/baidu/open', schema['paths'])
             platforms = await (await client.get('/api/v1/platforms')).json()
             self.assertTrue(platforms['platforms'][1]['live_enabled'])
+            from baidu_area_codes import PROVINCE_CODE, CITY_CODE
+            for enabled in ('0', '1'):
+                with patch.dict(os.environ, {'INDEX_HUB_BAIDU_REGION_ENABLED': enabled}):
+                    items = (await (await client.get('/api/v1/platforms')).json())['platforms']
+                douyin, baidu = items[:2]
+                self.assertNotIn('regions', douyin)
+                self.assertNotIn('region_enabled', douyin)
+                self.assertEqual(baidu['region_enabled'], enabled == '1')
+                self.assertEqual(baidu['regions'], list(dict.fromkeys([*PROVINCE_CODE, *CITY_CODE])))
             state = await (await client.get('/api/v1/status')).json()
             self.assertEqual(state['limits']['online_attempts_per_day'], 50)
             self.assertEqual((state['counts']['keywords'], state['counts']['points']), (1, 35))
