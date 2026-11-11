@@ -49,8 +49,29 @@ async function run(mode) {
     assert.equal(paths.filter(p=>p.includes('NewsApi/getNewsIndex')).length,news?1:0);
     assert.equal(paths.filter(p=>p.includes('/ptbk?')).length,1 + enabled + news);
     assert.equal('news_rows' in result, news);
+    assert(!('region_rows' in result));
     if (news) assert.equal(result.news_rows.length, 7);
     if (enabled) { assert.equal(result.feed_rows.length,7); assert.equal(result.feed_rows[1].value,null); assert.equal(result.feed_rows[0].value,1); }
+  }
+  {
+    const paths = [];
+    const series = {startDate:query.start_date,endDate:query.end_date,data:'abbcbabcbabc'};
+    const fetch = async (url, options) => {
+      paths.push(url);
+      const area = new URL(url, query._origin).searchParams.get('area');
+      if (area !== null) assert.equal(options.headers['Cipher-Text'], 'synthetic-signature');
+      const data = area !== null ? {uniqid:'private-id', userIndexes:area === '930' ? [] : [{word:[{name:'synthetic-word',wordType:1}],all:series,pc:series,wise:series}]} : 'abc1,2';
+      return new Response(JSON.stringify({status:0,data}), {headers:{'content-type':'application/json'}});
+    };
+    const timer = (...args) => {const h=setTimeout(...args);h.unref();return h};
+    const context = {location:{origin:query._origin},window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}},fetch,URLSearchParams,AbortController,TextDecoder,Uint8Array,Response,setTimeout:timer,clearTimeout};
+    const result = await vm.runInNewContext(script,context)({...query,_regions:[{name:'海南',code:'930'},{name:'北京',code:'911'}]});
+    assert.equal(result.status,'ok'); assert.equal(paths.length,6);
+    assert.deepEqual(paths.filter(p=>p.includes('SearchApi/index')).map(p=>new URL(p,query._origin).searchParams.get('area')),['0','930','911']);
+    assert(result.region_rows.filter(r=>r.region==='海南').every(r=>r.search_index===null && r.value_status==='missing'));
+    assert.equal(result.region_rows.find(r=>r.region==='北京' && r.date==='2026-10-02').search_index,null);
+    assert.equal(result.region_shapes[0].empty_points,21);
+    for (const secret of ['synthetic-word','private-id','abbcbabcbabc','abc1,2','synthetic-signature']) assert(!JSON.stringify(result.region_shapes).includes(secret));
   }
   async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词'], news = false, users = undefined) {
     const series = {startDate:query.start_date, endDate:query.end_date, data:'abcbabcbabcba'};

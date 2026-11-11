@@ -233,11 +233,15 @@ async (query) => {
       if (typeof signature !== 'string' || !signature) return fail('signature_unavailable');
     } catch (_) { return fail('signature_unavailable'); }
     const params = new URLSearchParams({word:JSON.stringify(query.keywords.map(name => [{name,wordType:1}])), area:'0', startDate:query.start_date, endDate:query.end_date});
-    const index = await get('/api/SearchApi/index?' + params, {'Cipher-Text':signature}, 'search');
+    async function searchIndex(area, region) {
+    const searchParams = new URLSearchParams(params);
+    searchParams.set('area', area);
+    const index = await get('/api/SearchApi/index?' + searchParams, {'Cipher-Text':signature}, region ? 'region' : 'search');
+    const indexStatus = {http_status:httpStatus, business_status:businessStatus};
     if (index.status !== 'ok') return index;
     const data = index.data;
     if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(data.uniqid) || !Array.isArray(data.userIndexes) || data.userIndexes.length > query.keywords.length) return schema(data);
-    const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}), {}, 'search_ptbk');
+    const table = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:data.uniqid}), {}, region ? 'region_ptbk' : 'search_ptbk');
     if (table.status !== 'ok') return table;
     const ptbk = table.data;
     const info = {ptbk_length:typeof ptbk === 'string' ? ptbk.length : 0};
@@ -255,8 +259,7 @@ async (query) => {
       if (word[0].wordType !== 1) return schema(data, {...wordInfo, reason:'word_type'});
       byWord.set(word[0].name, item);
     }
-    const start = Date.parse(query.start_date + 'T00:00:00Z'), end = Date.parse(query.end_date + 'T00:00:00Z');
-    const days = (end - start) / 86400000 + 1, rows = [];
+    const rows = [];
     for (const word of query.keywords) {
       const wordRows = [];
       for (const device of ['all','pc','wise']) {
@@ -286,6 +289,17 @@ async (query) => {
       const count = Math.min(...['all','pc','wise'].map(device => wordRows.filter(row => row.device === device).length));
       rows.push(...wordRows.filter(row => Date.parse(row.date + 'T00:00:00Z') < start + count * 86400000));
     }
+    const fields = value => Object.keys(value).filter(k => schemaKeys.has(k)).sort();
+    return {status:'ok', rows, shape: region ? {...indexStatus, region, data_fields:fields(data),
+      user_indexes_type:'array', user_indexes_length:data.userIndexes.length, ptbk_length:ptbk.length,
+      decoded_points:rows.length, empty_points:rows.filter(row => row.search_index === null).length,
+      used_fallback:data.userIndexes.length < query.keywords.length} : null};
+    }
+    const start = Date.parse(query.start_date + 'T00:00:00Z'), end = Date.parse(query.end_date + 'T00:00:00Z');
+    const days = (end - start) / 86400000 + 1;
+    const nationwide = await searchIndex('0', null);
+    if (nationwide.status !== 'ok') return nationwide;
+    const rows = nationwide.rows;
     async function extraIndex(path, name) {
     const feed = await get(path + '?' + params, {'Cipher-Text':signature}, name);
     if (feed.status !== 'ok') return feed;
@@ -352,6 +366,15 @@ async (query) => {
       if (extra.status !== 'ok') return extra;
       result[field] = extra.rows;
       result[field === 'feed_rows' ? 'feed_shape' : 'news_shape'] = extra.shape;
+    }
+    if (query._regions?.length) {
+      result.region_rows = []; result.region_shapes = [];
+      for (const item of query._regions) {
+        const regional = await searchIndex(item.code, item.name);
+        if (regional.status !== 'ok') return regional;
+        result.region_rows.push(...regional.rows.map(row => ({...row, region:item.name})));
+        result.region_shapes.push(regional.shape);
+      }
     }
     return {...result, ...diagnostics()};
   } catch (error) { return {...fail('network_error', error?.message), exception_type: error?.name === 'TypeError' ? 'TypeError' : 'Error'}; }
