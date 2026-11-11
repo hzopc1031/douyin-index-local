@@ -58,3 +58,7 @@ node_modules/
 
 vnc.passwd
 *.passwd
+
+/media-dl-out/
+/media_dl/output/
+/media_dl/.cache/
