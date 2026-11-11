@@ -24,8 +24,8 @@ COMMENTS_BUSY = "正在采集评论，稍后重试"
 INDEX_BUSY = "取数或核对正在进行，请等待。"
 LOGIN_URL = "https://www.douyin.com/"
 LOGIN_ENTRY = {"login_entry": "index_sms", "login_path": "/api/v1/login/sms"}
-LOCK_PAGES = 8
 LOCK_TIMEOUT = 30
+PROBE_TIMEOUT = 10
 BATCH_LIMIT = 25
 DAILY_LIMIT = 150
 PAUSE_STOPS = {
@@ -143,7 +143,7 @@ def lock_busy(owner):
     return {"ok": False, "code": "busy", "message": INDEX_BUSY}
 
 
-def classify_probe(page):
+def classify_probe(page, session_cookie=False):
     """Map a cookie-free page snapshot to a probe state."""
     if not isinstance(page, dict):
         return "not_logged_in"
@@ -151,7 +151,7 @@ def classify_probe(page):
         return "verification_required"
     host = (page.get("host") or "").lower().lstrip(".")
     on_site = page.get("https") is True and host in ("www.douyin.com", "douyin.com")
-    if page.get("account") and on_site:
+    if on_site and (page.get("account") or (not page.get("login") and session_cookie)):
         return "logged_in"
     return "not_logged_in"
 
@@ -344,7 +344,7 @@ class CollectJob:
 
 class CommentsHub:
     def __init__(self, *, window_factory, state_dir, sleeper=time.sleep, clock=time.monotonic,
-                 transport_factory=None, lock_pages=LOCK_PAGES, lock_timeout=LOCK_TIMEOUT,
+                 transport_factory=None, lock_timeout=LOCK_TIMEOUT,
                  acquire=None, release=None, owner=None):
         self._window_factory = window_factory
         self.state_dir = Path(state_dir)
@@ -353,7 +353,6 @@ class CommentsHub:
         self._sleeper = sleeper
         self._clock = clock
         self._transport_factory = transport_factory
-        self.lock_pages = lock_pages
         self.lock_timeout = lock_timeout
         self._acquire = acquire
         self._release = release
@@ -402,8 +401,23 @@ class CommentsHub:
             window = self._window_factory()
             self._ensure_url(window)
             self._ensure_guard(window)
-            page = parse_probe_js(window.evaluate_js(PROBE_JS))
-            state = classify_probe(page or {})
+            deadline = self._clock() + PROBE_TIMEOUT
+            while True:
+                page = parse_probe_js(window.evaluate_js(PROBE_JS))
+                if page and (page.get("ready") == "complete" or any(
+                        page.get(key) for key in ("account", "login", "verification"))):
+                    break
+                if self._clock() >= deadline:
+                    raise TimeoutError("Probe page unavailable")
+                self._sleeper(0.2)
+            session_cookie = False
+            if (page.get("ready") == "complete" and not any(
+                    page.get(key) for key in ("account", "login", "verification"))):
+                from browser_login import KEY_COOKIES
+                session_cookie = any(item.key in KEY_COOKIES and item["domain"].lower() in
+                                     (".douyin.com", "douyin.com")
+                                     for cookie in window.get_cookies() for item in cookie.values())
+            state = classify_probe(page, session_cookie)
             with self._guard:
                 self._snapshot["probe"] = state
             result = {"ok": True, "probe": state}
@@ -536,7 +550,7 @@ class CommentsHub:
                     while not acquired and not hub._stop.is_set():
                         acquired = hub._acquire("comments")
                         with hub._guard:
-                            hub._snapshot["waiting_for_index"] = not acquired
+                            hub._snapshot["waiting_for_index"] = not acquired and hub._owner() == "index"
                         if not acquired:
                             await asyncio.sleep(0.2)
                     if not acquired:
@@ -550,7 +564,7 @@ class CommentsHub:
                     if acquired and hub._acquire is not None and hub._release is not None:
                         hub._release()
                     if acquired:
-                        await asyncio.sleep(0.2)
+                        await asyncio.sleep(1)
 
         return LockedTransport()
 
@@ -597,6 +611,10 @@ class CommentsHub:
     def _ensure_url(self, window):
         current = urlsplit(window.get_current_url() or "")
         if current.scheme != "https" or current.hostname not in ("www.douyin.com", "douyin.com") or current.port not in (None, 443):
+            with self._guard:
+                running = self._snapshot["running"]
+            if running or (self._worker is not None and self._worker.is_alive()):
+                raise RuntimeError("Comments collection running")
             window.load_url(LOGIN_URL)
 
     def _ensure_guard(self, window):

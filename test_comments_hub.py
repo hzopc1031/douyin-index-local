@@ -9,7 +9,8 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from http.cookies import SimpleCookie
+from unittest.mock import MagicMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools" / "douyin_comments"))
@@ -34,6 +35,10 @@ class FakeWindow:
         }
         self.scripts = []
         self.loaded = []
+        self.cookies = []
+
+    def get_cookies(self):
+        return self.cookies
 
     def get_current_url(self):
         return self.url
@@ -105,7 +110,6 @@ class CommentsHubTests(unittest.TestCase):
             acquire=acquire,
             release=release,
             owner=lambda: self.owner[0],
-            lock_pages=2,
             lock_timeout=5,
         )
 
@@ -131,6 +135,59 @@ class CommentsHubTests(unittest.TestCase):
         self.assertEqual(result["probe"], "not_logged_in")
         self.assertEqual(result["login_entry"], "index_sms")
         self.assertEqual(result["login_path"], "/api/v1/login/sms")
+
+    def test_probe_waits_and_times_out_without_classifying_loading_page(self):
+        self.window.page = {"ready": "loading", "https": True, "host": "www.douyin.com"}
+        ticks = iter((0, 1, 11))
+        self.hub._clock = lambda: next(ticks)
+        result = self.hub.probe()
+        self.assertEqual(result["code"], "browser_unavailable")
+        self.assertIsNone(result["probe"])
+        self.assertEqual(sum("user-avatar" in script for script in self.window.scripts), 2)
+
+    def test_probe_waits_until_ready(self):
+        loading = {"ready": "loading", "https": True, "host": "www.douyin.com"}
+        snapshots = iter((json.dumps(loading), json.dumps(self.window.page)))
+        original = self.window.evaluate_js
+        self.window.evaluate_js = lambda js: next(snapshots) if "user-avatar" in js else original(js)
+        self.assertEqual(self.hub.probe()["probe"], "logged_in")
+
+    def test_probe_session_cookie_name_and_login_panel(self):
+        self.window.page.update(account=False, login=False)
+        cookie = SimpleCookie()
+        cookie["sessionid"] = "synthetic"
+        cookie["sessionid"]["domain"] = ".douyin.com"
+        self.window.cookies = [cookie]
+        self.assertEqual(self.hub.probe()["probe"], "logged_in")
+        self.window.page["login"] = True
+        self.assertEqual(self.hub.probe()["probe"], "not_logged_in")
+        self.window.page["verification"] = True
+        self.assertEqual(self.hub.probe()["probe"], "verification_required")
+        self.window.page.update(login=False, verification=False)
+        cookie["sessionid"]["domain"] = "creator.douyin.com"
+        self.assertEqual(self.hub.probe()["probe"], "not_logged_in")
+
+    def test_probe_does_not_navigate_during_collection(self):
+        self.hub._snapshot["running"] = True
+        self.window.url = "https://example.com/"
+        self.assertEqual(self.hub.probe()["code"], "browser_unavailable")
+        self.assertEqual(self.window.loaded, [])
+
+    def test_waiting_for_login_is_not_waiting_for_index(self):
+        self.lock.acquire()
+        self.owner[0] = "login"
+        async def run():
+            task = asyncio.create_task(self.hub._locked_transport(Mock(), InstantPacer()).fetch("1", None, "0"))
+            await asyncio.sleep(0.05)
+            self.assertFalse(self.hub.status()["waiting_for_index"])
+            self.hub._stop.set()
+            with self.assertRaises(Exception):
+                await task
+        try:
+            asyncio.run(run())
+        finally:
+            self.owner[0] = None
+            self.lock.release()
 
     def test_start_rejected_when_not_logged_in_or_verification(self):
         for page, code in (
@@ -206,6 +263,18 @@ class CommentsHubTests(unittest.TestCase):
         self.assertFalse(hub._worker.is_alive())
         self.assertFalse(self.lock.locked())
 
+    def test_post_request_yield_is_one_second_outside_lock(self):
+        delays = []
+        async def sleep(delay):
+            self.assertFalse(self.lock.locked())
+            delays.append(delay)
+        class Transport:
+            async def fetch(self, *_):
+                return {}
+        with patch("dyc.hub_comments.asyncio.sleep", sleep):
+            asyncio.run(self.hub._locked_transport(Transport(), InstantPacer()).fetch("1", None, "0"))
+        self.assertEqual(delays, [1])
+
     def test_guard_injection_failure_is_reported(self):
         self.window.evaluate_js = lambda script: (_ for _ in ()).throw(RuntimeError())
         self.assertEqual(self.hub.probe()["code"], "browser_unavailable")
@@ -213,6 +282,7 @@ class CommentsHubTests(unittest.TestCase):
 
     def test_waiting_and_timeout_abort_release(self):
         self.lock.acquire()
+        self.owner[0] = "index"
         self.hub.lock_timeout = 0.05
         scripts = []
         transport = QtCommentTransport(self.window, Budget(DailyCounter(Path(self.tmp.name))), InstantPacer(),
@@ -226,6 +296,7 @@ class CommentsHubTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertTrue(self.hub.status()["waiting_for_index"])
+        self.owner[0] = None
         self.lock.release()
         worker.join(3)
         self.assertFalse(worker.is_alive())
@@ -336,6 +407,16 @@ class IndexBusyTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
             finally:
                 api._release_lock()
+
+    def test_window_factory_guard_failure_is_unavailable(self):
+        api = app_module.Api()
+        window = MagicMock()
+        with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, {"webview": Mock(create_window=Mock(return_value=window))}):
+            with patch.object(api, "_install_comments_guard", side_effect=RuntimeError()):
+                hub = CommentsHub(window_factory=api._comments_window, state_dir=folder)
+                self.assertEqual(hub.probe()["code"], "browser_unavailable")
+        self.assertIsNone(getattr(api, "_dyc_window", None))
+        window.destroy.assert_called_once()
 
     def test_topic_login_reports_comments_busy(self):
         api = app_module.Api()
