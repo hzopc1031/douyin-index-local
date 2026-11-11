@@ -267,8 +267,6 @@ class Api:
         from dyc.hub_comments import LOGIN_URL, GUARD_JS
         window = webview.create_window('抖音评论', LOGIN_URL,
                                        width=1000, height=800, x=60, y=60, text_select=True)
-        self._dyc_window = window
-
         def closed():
             if getattr(self, '_dyc_window', None) is window:
                 self._dyc_window = None
@@ -276,7 +274,12 @@ class Api:
         try:
             self._install_comments_guard(window, GUARD_JS)
         except Exception:
-            logging.getLogger('index_hub.comments').warning('comments guard installation failed')
+            try:
+                window.destroy()
+            except Exception:
+                pass
+            raise
+        self._dyc_window = window
         return window
 
     def _install_comments_guard(self, window, source):
