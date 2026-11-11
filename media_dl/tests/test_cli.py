@@ -7,6 +7,15 @@ from media_dl.__main__ import process
 
 
 class CLITests(unittest.TestCase):
+    def test_proxy_cli(self):
+        from media_dl.__main__ import main
+        with patch('sys.argv', ['media_dl', 'login', 'xhs', '--proxy', '127.0.0.1:8791']), patch('media_dl.__main__.xiaohongshu.login', return_value=0) as login:
+            self.assertEqual(main(), 0)
+            login.assert_called_once_with(proxy='127.0.0.1:8791')
+        with tempfile.TemporaryDirectory() as directory, patch('sys.argv', ['media_dl', 'https://xhslink.com/a', '--out', directory, '--proxy', '127.0.0.1:8791']), patch('media_dl.__main__.xiaohongshu.fetch', return_value=('id', {}, 'id.mp4')) as fetch:
+            self.assertEqual(main(), 0)
+            fetch.assert_called_once_with('https://xhslink.com/a', Path(directory), proxy='127.0.0.1:8791')
+
     def test_metadata_and_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

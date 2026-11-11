@@ -382,7 +382,14 @@ def login_display():
         process.wait()
 
 
-def login():
+def proxy_options(proxy):
+    proxy = proxy if proxy is not None else os.environ.get('MEDIA_DL_PROXY')
+    if not proxy:
+        return {}
+    return {'proxy': {'server': proxy if '://' in proxy else 'http://' + proxy}}
+
+
+def login(proxy=None):
     deadline = time.monotonic() + 1800
     try:
         RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -396,7 +403,8 @@ def login():
         profile.chmod(0o700)
         with login_display(), playwright() as browser:
             context = browser.chromium.launch_persistent_context(
-                str(profile), headless=False, args=['--disable-blink-features=AutomationControlled'])
+                str(profile), headless=False, args=['--disable-blink-features=AutomationControlled'],
+                **proxy_options(proxy))
             try:
                 context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 page = context.pages[0] if context.pages else context.new_page()
@@ -605,12 +613,12 @@ def parse_page(html, item_id):
             'play_url': stream.get('masterUrl') or stream.get('master_url')}
 
 
-def fetch(url, out):
+def fetch(url, out, proxy=None):
     profile = profile_path()
     if not profile.is_dir():
         raise ValueError(LOGIN_REQUIRED)
     with playwright() as browser:
-        context = browser.chromium.launch_persistent_context(str(profile), headless=True)
+        context = browser.chromium.launch_persistent_context(str(profile), headless=True, **proxy_options(proxy))
         try:
             if not has_session(context):
                 raise ValueError(LOGIN_REQUIRED)

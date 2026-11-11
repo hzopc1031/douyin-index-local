@@ -16,6 +16,27 @@ class XhsTests(unittest.TestCase):
         display.start()
         self.addCleanup(display.stop)
 
+    def test_proxy_launch_options(self):
+        cases = ((None, None, None), (None, '127.0.0.1:8791', 'http://127.0.0.1:8791'),
+                 ('http://127.0.0.1:8792', '127.0.0.1:8791', 'http://127.0.0.1:8792'))
+        for supplied, env, expected in cases:
+            with self.subTest(supplied=supplied, env=env), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                environment = {'DISPLAY': ':99'}
+                if env:
+                    environment['MEDIA_DL_PROXY'] = env
+                with patch.dict(os.environ, environment, clear=True), patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root), patch.object(xhs, 'playwright') as browser:
+                    launch = browser.return_value.__enter__.return_value.chromium.launch_persistent_context
+                    launch.side_effect = RuntimeError('synthetic failure')
+                    self.assertEqual(xhs.login(supplied), 1)
+                    with self.assertRaises(RuntimeError):
+                        xhs.fetch('https://xhslink.com/a', root, supplied)
+                    for call in launch.call_args_list:
+                        self.assertEqual(call.kwargs.get('proxy'), {'server': expected} if expected else None)
+                        if expected is None:
+                            self.assertNotIn('proxy', call.kwargs)
+                    self.assertEqual(launch.call_count, 2)
+
     def test_login_launch_and_risk_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

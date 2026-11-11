@@ -48,7 +48,7 @@ def download(url, out, item_id, referer=douyin.REFERER):
     raise ValueError('视频下载失败')
 
 
-def process(url, out, asr=False, model='base'):
+def process(url, out, asr=False, model='base', proxy=None):
     platform = 'xiaohongshu' if xiaohongshu.is_xhs(url) else 'douyin'
     item_id = hashlib.sha256(url.encode()).hexdigest()[:16]
     stored_url = urlunsplit(urlsplit(url)._replace(query='', fragment='')) if platform == 'xiaohongshu' else url
@@ -58,7 +58,7 @@ def process(url, out, asr=False, model='base'):
                 subtitle_file=None, subtitle_source='none', error=None)
     try:
         if platform == 'xiaohongshu':
-            item_id, info, video_file = xiaohongshu.fetch(url, out)
+            item_id, info, video_file = xiaohongshu.fetch(url, out, proxy=proxy)
             meta['id'] = item_id
             meta.update(info)
             meta['video_file'] = video_file
@@ -92,11 +92,13 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == 'login':
         parser = argparse.ArgumentParser(description='登录平台')
         parser.add_argument('platform', choices=('xhs',))
-        parser.parse_args(sys.argv[2:])
-        return xiaohongshu.login()
+        parser.add_argument('--proxy')
+        args = parser.parse_args(sys.argv[2:])
+        return xiaohongshu.login(proxy=args.proxy)
     parser = argparse.ArgumentParser(description='批量下载视频')
     parser.add_argument('urls', nargs='*')
     parser.add_argument('--input')
+    parser.add_argument('--proxy')
     parser.add_argument('--out', default='./media-dl-out')
     parser.add_argument('--asr', action='store_true')
     parser.add_argument('--asr-model', choices=('base', 'small'), default='base')
@@ -116,7 +118,7 @@ def main():
     for index, url in enumerate(urls):
         if index:
             time.sleep(INTERVAL)
-        result = process(url, out, args.asr, args.asr_model)
+        result = process(url, out, args.asr, args.asr_model, args.proxy)
         failed |= bool(result['error'])
         print(safe_log(f"{result['id']}: {'失败' if result['error'] else '完成'}"))
     return int(failed)
