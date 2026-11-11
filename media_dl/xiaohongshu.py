@@ -18,6 +18,7 @@ def is_xhs(url):
 
 
 LOGIN_REQUIRED = '需要先运行 python -m media_dl login xhs 扫码登录'
+NO_VIDEO = '该笔记没有视频'
 RUN_DIR = Path('/workspace/dev/media-dl-run')
 
 
@@ -597,13 +598,20 @@ def parse_page(html, item_id):
     if not match:
         raise ValueError('笔记页缺少数据')
     source = html[match.end():].lstrip()
-    source = re.sub(r'"(?:\\.|[^"\\])*"|\bundefined\b',
-                    lambda match: 'null' if match.group() == 'undefined' else match.group(), source)
+    source = re.sub(r'"(?:\\.|[^"\\])*"|\bundefined\b|\bnew\s+(?:Map|Set)\s*\(\s*\[\s*\]\s*\)',
+                    lambda match: ('null' if match.group() == 'undefined' else '{}')
+                    if not match.group().startswith('"') else match.group(), source)
     state = json.JSONDecoder().raw_decode(source)[0]
+    return parse_state(state, item_id)
+
+
+def parse_state(state, item_id):
     note = state['note']['noteDetailMap'][item_id]['note']
-    video = note['video']
-    streams = video['media']['stream']
-    stream = next(entry for entries in streams.values() for entry in entries if entry.get('masterUrl') or entry.get('master_url'))
+    video = note.get('video') or {}
+    streams = (video.get('media') or {}).get('stream') or {}
+    stream = next((entry for entries in streams.values() for entry in entries if entry.get('masterUrl') or entry.get('master_url')), None)
+    if stream is None:
+        raise ValueError(NO_VIDEO)
     duration = video.get('duration')
     if isinstance(duration, (int, float)) and duration > 1000:
         duration /= 1000
@@ -629,7 +637,13 @@ def fetch(url, out, proxy=None):
             if not has_session(context) or urlparse(page.url).path.startswith('/login') or visible(page, '[class*="login-container"], [class*="login-modal"]'):
                 raise ValueError(LOGIN_REQUIRED)
             item_id = resolve_id(page.url)
-            info = parse_page(page.content(), item_id)
+            try:
+                state = json.loads(page.evaluate('() => JSON.stringify(window.__INITIAL_STATE__)'))
+                state['note']['noteDetailMap'][item_id]['note']
+            except Exception:
+                info = parse_page(page.content(), item_id)
+            else:
+                info = parse_state(state, item_id)
             item_id = item_id[:100]
             play_url = info.pop('play_url')
             if urlparse(play_url).scheme != 'https':

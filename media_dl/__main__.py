@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from . import asr as transcription, douyin, xiaohongshu
@@ -51,7 +51,7 @@ def download(url, out, item_id, referer=douyin.REFERER):
 def process(url, out, asr=False, model='base', proxy=None):
     platform = 'xiaohongshu' if xiaohongshu.is_xhs(url) else 'douyin'
     item_id = hashlib.sha256(url.encode()).hexdigest()[:16]
-    stored_url = urlunsplit(urlsplit(url)._replace(query='', fragment='')) if platform == 'xiaohongshu' else url
+    stored_url = None if platform == 'xiaohongshu' else url
     meta = dict(id=item_id, platform=platform, url=stored_url, title=None, author=None,
                 duration_seconds=None, width=None, height=None,
                 fetched_at=datetime.now(timezone.utc).isoformat(), video_file=None,
@@ -80,7 +80,7 @@ def process(url, out, asr=False, model='base', proxy=None):
             except Exception:
                 meta['error'] = '转写失败'
     except Exception as exc:
-        if platform == 'xiaohongshu' and str(exc) == xiaohongshu.LOGIN_REQUIRED:
+        if platform == 'xiaohongshu' and str(exc) in (xiaohongshu.LOGIN_REQUIRED, xiaohongshu.NO_VIDEO):
             meta['error'] = str(exc)
         else:
             meta['error'] = '链接解析或下载失败'

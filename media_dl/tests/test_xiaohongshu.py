@@ -108,6 +108,21 @@ class XhsTests(unittest.TestCase):
         self.assertEqual((item['title'], item['author'], item['duration_seconds'], item['play_url']),
                          ('测试标题', '测试作者', 12, 'https://example.com/video.mp4'))
 
+    def test_initial_state_literals_and_no_video(self):
+        page = Path('media_dl/tests/xhs.html').read_text().replace(
+            '"title":"测试标题"', '"map":new Map([]),"set":new Set([]),"title":"测试标题"')
+        item = xhs.parse_page(page, 'abc123')
+        self.assertEqual((item['title'], item['author'], item['play_url']),
+                         ('测试标题', '测试作者', 'https://example.com/video.mp4'))
+        state = {'note': {'noteDetailMap': {'abc123': {'note': {'title': '图文'}}}}}
+        with self.assertRaisesRegex(ValueError, '^该笔记没有视频$'):
+            xhs.parse_page('<script>window.__INITIAL_STATE__ = ' + json.dumps(state) + ';</script>', 'abc123')
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'fetch', side_effect=ValueError(xhs.NO_VIDEO)):
+            result = process('https://xhslink.com/a', Path(directory))
+            self.assertEqual(result['error'], xhs.NO_VIDEO)
+            self.assertIsNone(result['url'])
+            self.assertEqual(json.loads(next(Path(directory).glob('*.meta.json')).read_text())['error'], xhs.NO_VIDEO)
+
     def test_no_profile_or_session_does_not_navigate(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)
@@ -147,7 +162,33 @@ class XhsTests(unittest.TestCase):
             self.assertEqual(result['title'], '测试标题')
             self.assertTrue((Path(directory) / 'abc123.mp4').exists())
             self.assertNotIn('test-cookie', (Path(directory) / 'abc123.meta.json').read_text())
+            self.assertIsNone(result['url'])
+            page.evaluate.assert_called_once()
+            page.content.assert_called_once()
             context.close.assert_called_once()
+
+    def test_fetch_prefers_evaluated_state(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'profile_path', return_value=Path(directory)), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', return_value=None):
+            context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+            context.cookies.return_value = [{'name': 'web_session', 'value': 'synthetic'}]
+            page = MagicMock(url='https://www.xiaohongshu.com/explore/abc123')
+            context.pages = [page]
+            fixture = Path('media_dl/tests/xhs.html').read_text()
+            page.evaluate.return_value = fixture.split(' = ', 1)[1].split(';</script>', 1)[0]
+            response = context.request.get.return_value
+            response.ok = True
+            response.headers = {'content-type': 'video/mp4'}
+            response.body.return_value = b'\0\0\0\x18ftyp' + b'x' * 1100
+            result = process('https://xhslink.com/a', Path(directory))
+            self.assertIsNone(result['error'])
+            self.assertEqual(result['title'], '测试标题')
+            context.request.get.reset_mock()
+            page.evaluate.return_value = json.dumps({'note': {'noteDetailMap': {'abc123': {'note': {'title': '图文'}}}}})
+            result = process('https://xhslink.com/a', Path(directory))
+            self.assertEqual(result['error'], xhs.NO_VIDEO)
+            page.content.assert_not_called()
+            context.request.get.assert_not_called()
+            self.assertEqual(context.close.call_count, 2)
 
     def test_status_values(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
