@@ -53,88 +53,68 @@ PROBE_JS = """JSON.stringify((() => {
   };
 })())"""
 
-# Blocks spontaneous comment-list traffic unless the scheduler armed a one-use token.
+# One page request is admitted per scheduler slice; responses stay in page memory.
 GUARD_JS = """(function(){
   if (window.__dycHubGuard) return;
   window.__dycHubGuard = true;
-  window.__dycArm = null;
-  function isComment(url){
-    try {
-      const path = new URL(url, location.href).pathname;
-      return path.indexOf('/aweme/v1/web/comment/list/') >= 0;
-    } catch (e) { return false; }
-  }
+  window.__dycArm = sessionStorage.getItem('__dycNavigate') === '1';
+  sessionStorage.removeItem('__dycNavigate');
+  window.__dycResult = null;
+  window.__dycSent = false;
   function consume(url){
-    if (!isComment(url)) return 'allow';
-    const arm = window.__dycArm;
-    window.__dycArm = null;
-    return (arm === 'seed' || arm === 'fetch') ? 'allow' : 'block';
+    try {
+      const target = new URL(url, location.href);
+      const path = target.pathname;
+      if (path !== '/aweme/v1/web/comment/list/' && path !== '/aweme/v1/web/comment/list/reply/') return null;
+      if (!window.__dycArm) return false;
+      const root = window.__dycRoot || null;
+      if (root ? path !== '/aweme/v1/web/comment/list/reply/' || target.searchParams.get('comment_id') !== root
+               : path !== '/aweme/v1/web/comment/list/') return false;
+      window.__dycArm = false;
+      return true;
+    } catch (e) { return null; }
   }
   const rawFetch = window.fetch;
   window.fetch = function(input, init){
-    const url = typeof input === 'string' ? input : (input && input.url);
-    if (consume(url) === 'block') return Promise.reject(new TypeError('blocked'));
-    return rawFetch.apply(this, arguments);
+    const allowed = consume(typeof input === 'string' ? input : input && (input.url || input.href));
+    if (allowed === false) return Promise.reject(new TypeError('blocked'));
+    const promise = rawFetch.apply(this, arguments);
+    const signal = (init && init.signal) || (input && input.signal);
+    if (allowed && !(signal && signal.aborted)) window.__dycSent = true;
+    if (allowed) promise.then(r => {
+      if (r.redirected || r.type === 'opaqueredirect') window.__dycResult = JSON.stringify({kind:'opaqueredirect', status:r.status});
+      else r.clone().text().then(text => { window.__dycResult = JSON.stringify({status:r.status, text}); },
+        () => { window.__dycResult = JSON.stringify({kind:'network'}); });
+    }, () => { window.__dycResult = JSON.stringify({kind:'network'}); });
+    return promise;
   };
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method, url){
-    this.__dycVerdict = consume(url);
+    this.__dycUrl = url;
     return open.apply(this, arguments);
   };
   const send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function(){
-    if (this.__dycVerdict === 'block') { this.abort(); return; }
-    return send.apply(this, arguments);
+    const allowed = consume(this.__dycUrl);
+    if (allowed === false) { this.abort(); return; }
+    if (allowed) this.addEventListener('loadend', () => {
+      try { window.__dycResult = JSON.stringify(this.responseURL && new URL(this.responseURL).pathname !== new URL(this.__dycUrl, location.href).pathname ? {kind:'opaqueredirect', status:this.status} : {status:this.status, text:this.responseText}); }
+      catch (e) { window.__dycResult = JSON.stringify({kind:'network'}); }
+    }, {once:true});
+    const result = send.apply(this, arguments);
+    if (allowed) window.__dycSent = true;
+    return result;
   };
 })();"""
 
-# In-page fetch with manual redirects so Python can see 3xx.
-# shortcut: seed-time 3xx-before-follow is only as strict as this hook; opaque redirects also stop.
-FETCH_JS = """(cfg) => {
-  const visible = q => [...document.querySelectorAll(q)].some(e =>
-    e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
-  if (cfg.signals.captcha.some(visible)) return Promise.resolve({kind: 'risk'});
-  if (cfg.signals.logged_out.some(visible)) return Promise.resolve({kind: 'login'});
-  try {
-    const url = new URL(cfg.url || (location.origin + cfg.path));
-    for (const name of [...url.searchParams.keys()]) {
-      if (cfg.signatures.some(s => s.toLowerCase() === name.toLowerCase()))
-        url.searchParams.delete(name);
-    }
-    url.pathname = cfg.path;
-    const p = cfg.params;
-    url.searchParams.set(p.video, cfg.video);
-    url.searchParams.set(p.cursor, cfg.cursor);
-    url.searchParams.set(p.count, '20');
-    if (cfg.root) {
-      url.searchParams.set(p.item, cfg.video);
-      url.searchParams.set(p.root, cfg.root);
-    } else {
-      url.searchParams.delete(p.item);
-      url.searchParams.delete(p.root);
-    }
-    const token = localStorage.getItem(cfg.storage);
-    if (token) url.searchParams.set(p.token, token);
-    window.__dycArm = 'fetch';
-    const ac = new AbortController();
-    const abort = () => ac.abort();
-    window.__dycAbort = abort;
-    const timer = setTimeout(() => ac.abort('timeout'), cfg.timeout);
-    return fetch(url.href, {credentials: 'include', redirect: 'manual', signal: ac.signal,
-                            headers: Object.assign({}, cfg.headers || {}, {[cfg.markerHeader]: cfg.marker})})
-      .then(r => {
-        if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400))
-          return {kind: 'opaqueredirect', status: r.status};
-        return r.text().then(text => ({status: r.status, text: text}));
-      })
-      .catch(err => ({kind: err === 'timeout' || (err && err.name === 'TimeoutError') ? 'timeout'
-                      : (err && err.name === 'AbortError' ? 'timeout' : 'network')}))
-      .finally(() => { clearTimeout(timer); if (window.__dycAbort === abort) window.__dycAbort = null; window.__dycArm = null; });
-  } catch (e) {
-    window.__dycArm = null;
-    return Promise.resolve({kind: 'network'});
-  }
-}"""
+# shortcut: comment scroll containers are uncalibrated; upgrade after observing the official page.
+SCROLL_JS = """(root => {
+  window.__dycRoot = root;
+  window.__dycResult = null; window.__dycSent = false; window.__dycArm = true;
+  const box = document.querySelector('[data-e2e="comment-list"], [class*="comment-list"]');
+  if (box) box.scrollTop = box.scrollHeight;
+  else window.scrollTo(0, document.documentElement.scrollHeight);
+})"""
 
 
 def lock_busy(owner):
@@ -177,43 +157,61 @@ def pause_reason(stop_reason):
 
 
 class QtCommentTransport:
-    """Scheduler-driven in-page fetch. Guards live in GUARD_JS plus this arming."""
+    """Capture one page-originated request per locked slice."""
+    no_retry = True
 
     def __init__(self, window, budget, pacer, *, evaluate=None):
-        self.window = window
-        self.budget = budget
-        self.pacer = pacer
+        self.window, self.budget, self.pacer = window, budget, pacer
         self._evaluate = evaluate or (lambda js, arg=None: _eval(window, js, arg))
         self.calls = 0
+        self.video_id = None
 
     async def fetch(self, video_id, root, cursor):
-        self.budget.reserve()
-        self.calls += 1
-        cfg = {
-            "url": LOGIN_URL,
-            "path": site.REPLY_PATH if root else site.TOP_PATH,
-            "params": site.PARAM,
-            "signatures": list(site.SIGNATURES),
-            "storage": site.TOKEN_STORAGE,
-            "signals": {key: list(value) for key, value in site.SIGNALS.items()},
-            "video": video_id,
-            "root": root or "",
-            "cursor": cursor,
-            "timeout": 20000,
-            "headers": {},
-            "markerHeader": "X-Dyc-Hub",
-            "marker": "1",
-        }
+        if self.video_id != video_id:
+            self.budget.new_video()
+        if self.budget.used >= self.budget.limit:
+            raise Stop(2, "batch_cap")
+        if self.budget.video_used >= self.budget.video_limit:
+            raise Stop(2, "video_page_budget")
+        self.budget.counter.check_start()
+        # shortcut: reply expansion is uncalibrated; upgrade after observing the official page.
+        sent = False
         try:
-            self._evaluate("(cfg) => { const request = {}; window.__dycRequest = request; window.__dycResult = null; (" + FETCH_JS + ")(cfg).then(r => { if (window.__dycRequest === request) window.__dycResult = JSON.stringify(r); }); }", cfg)
-            while True:
-                raw = self._evaluate("window.__dycResult")
-                if raw and raw != "null":
-                    return _coerce_fetch(raw)
+            if self.video_id != video_id:
+                self._evaluate("window.__dycSent = false; window.__dycResult = null; sessionStorage.setItem('__dycNavigate', '1')")
+                self.window.load_url(self.video_url)
+                self.video_id = video_id
+            else:
+                self._evaluate(SCROLL_JS, root or "")
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                state = _coerce_fetch(self._evaluate("JSON.stringify({sent:window.__dycSent, result:window.__dycResult})"))
+                if state.get("sent") and not sent:
+                    sent = True
+                    self.budget.reserve()
+                    self.calls += 1
+                result = _coerce_fetch(state["result"]) if state.get("result") else {}
+                page = parse_probe_js(self._evaluate(PROBE_JS))
+                on_site = page and page.get("https") and page.get("host") in site.HOSTS
+                if on_site and page.get("verification"):
+                    result["kind"] = "risk"
+                elif on_site and page.get("ready") == "complete" and page.get("login") and not page.get("account"):
+                    result["kind"] = "login"
+                if result:
+                    result["request_sent"] = sent
+                    return result
                 await asyncio.sleep(0.1)
+            return {"kind": "timeout" if sent else "no_request", "request_sent": sent}
         finally:
-            self._evaluate("window.__dycAbort && window.__dycAbort()")
-            self.pacer.completed()
+            if not sent:
+                state = _coerce_fetch(self._evaluate("JSON.stringify({sent:window.__dycSent})"))
+                if state.get("sent"):
+                    self.budget.reserve()
+                    self.calls += 1
+                    sent = True
+            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate')")
+            if sent:
+                self.pacer.completed()
 
 
 def _eval(window, js, arg=None):
@@ -249,6 +247,7 @@ class CollectJob:
         self.cursors = {None: {"0"}}
         self.top_done = False
         self.done = False
+        self.metadata = None
 
     async def run_slice(self, max_pages):
         started = 0
@@ -325,19 +324,36 @@ class CollectJob:
         for attempt in range(2):
             if self.used >= self.page_budget:
                 raise Stop(2, "batch_cap")
-            self.used += 1
-            self.video.pages += 1
             take_seed = getattr(self.transport, "take_seed", None)
             seed = take_seed(self.video.video_id, root, cursor) if take_seed else None
             if seed is not None:
+                self.used += 1
+                self.video.pages += 1
                 return seed
             result = await self.transport.fetch(self.video.video_id, root, cursor)
+            sent = result.get("request_sent", True)
+            if sent:
+                self.used += 1
+                self.video.pages += 1
+            keys = []
             try:
+                body = json.loads(result.get("text", ""))
+                if isinstance(body, dict):
+                    fields = {*site.FIELDS.values(), *site.RISK_FIELDS, *site.LOGIN_FIELDS, "status_msg", "message"}
+                    keys = [key for key in body if key in fields]
+            except (ValueError, TypeError):
+                pass
+            self.metadata = {"stop_reason": None, "http_status": result.get("status") if type(result.get("status")) is int else None,
+                             "response_fields": keys, "request_sent": sent}
+            try:
+                if result.get("kind") == "no_request":
+                    raise Stop(2, "no_request")
                 return site.decode_page(result)
             except Stop as error:
-                if error.reason in ("timeout", "network") and attempt == 0:
+                self.metadata["stop_reason"] = error.reason
+                if error.reason in ("timeout", "network") and attempt == 0 and not getattr(self.transport, "no_retry", False):
                     continue
-                if error.reason in ("timeout", "network"):
+                if error.reason in ("timeout", "network") and not getattr(self.transport, "no_retry", False):
                     raise Stop(3, "repeated_" + error.reason) from None
                 raise
 
@@ -498,6 +514,7 @@ class CommentsHub:
 
     def _run(self, videos, budget, pacer):
         summaries = []
+        job = None
         try:
             for index, video in enumerate(videos):
                 if self._stop.is_set():
@@ -507,26 +524,31 @@ class CommentsHub:
                         asyncio.run(pacer.between_videos())
                     except Exception:
                         pass
-                job = CollectJob(video, self._locked_transport(self._make_transport(budget, pacer), pacer), BATCH_LIMIT)
+                transport = self._make_transport(budget, pacer)
+                transport.video_url = video.video_url
+                job = CollectJob(video, self._locked_transport(transport, pacer), BATCH_LIMIT)
                 try:
                     while not job.done and not self._stop.is_set():
                         more = asyncio.run(job.run_slice(1))
                         if not more:
                             break
                 except Stop as error:
+                    if job.metadata is None:
+                        job.metadata = {"http_status": None, "response_fields": [], "request_sent": False}
+                    job.metadata["stop_reason"] = error.reason
                     reason = pause_reason(error.reason)
                     if error.reason in PAUSE_STOPS:
                         self._halt(True, reason)
                         summaries.append(video.summary() if hasattr(video, "summary") else {"reason": reason})
                         self._store_summary(summaries)
-                        self._export(videos, error.code, reason)
+                        self._export(videos, error.code, reason, job.metadata)
                         return
                     video.status, video.reason = "partial", error.reason
                 summaries.append(video.summary() if hasattr(video, "summary") else {"status": video.status,
                                                                                    "reason": video.reason})
             self._store_summary(summaries)
             self._export(videos, 0 if not self._stop.is_set() else 2,
-                         (self.status().get("pause_reason") or "complete"))
+                         (self.status().get("pause_reason") or "complete"), job.metadata if job else None)
             with self._guard:
                 self._snapshot["running"] = False
                 if self._stop.is_set() and not self._snapshot["pause_reason"]:
@@ -543,6 +565,8 @@ class CommentsHub:
         hub = self
 
         class LockedTransport:
+            no_retry = getattr(transport, "no_retry", False)
+
             async def fetch(self, video_id, root, cursor):
                 await pacer.before()
                 acquired = hub._acquire is None
@@ -598,15 +622,15 @@ class CommentsHub:
                 "reasons": [item.get("reason") if isinstance(item, dict) else None for item in summaries],
             }
 
-    def _export(self, videos, code, reason):
+    def _export(self, videos, code, reason, metadata=None):
         from .output import export
         run_id = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         out = self.state_dir / "runs" / run_id
         requests = sum(getattr(video, "pages", 0) for video in videos)
-        result = export(out, run_id, videos, code, reason, requests)
+        result = export(out, run_id, videos, code, reason, requests, metadata=metadata)
         with self._guard:
             self._snapshot["output"] = {"run_id": run_id, "requests": requests,
-                                        "videos": result.get("videos")}
+                                        "videos": result.get("videos"), "metadata": metadata}
 
     def _ensure_url(self, window):
         current = urlsplit(window.get_current_url() or "")
