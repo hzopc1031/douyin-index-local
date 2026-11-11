@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import tempfile
 import time
@@ -54,13 +55,64 @@ def logged_in(page, context):
     return bool(has_session(context) and visible(page, 'a[href*="/user/profile/"], [data-testid="user-avatar"]'))
 
 
-def qr(page):
-    return visible(page, '[class*="qrcode"] img, [class*="qrcode"] canvas, [class*="qr-code"] img, [class*="qr-code"] canvas, img[alt*="二维码"], canvas[class*="qr"], img[class*="qr"]')
+def login_container(page):
+    return visible(page, '.login-container, [class*="login-modal"], [role="dialog"]:has-text("登录"), dialog:has-text("登录")')
+
+
+def qr(container):
+    codes = container.locator('[class*="qr"] img, [class*="qr"] canvas, img[class*="qr"], canvas[class*="qr"], img[alt*="二维码"], :text("扫码登录") ~ * img, :text("扫码登录") ~ * canvas')
+    for index in range(codes.count()):
+        code = codes.nth(index)
+        if code.is_visible() and code.evaluate(r'''(element, container) => {
+            for (let node = element; node && node !== container; node = node.parentElement) {
+                if (/下载|打开\s*(App|应用)|download/i.test((node.innerText || '') + ' ' + (node.className || '') + ' ' + (node.getAttribute('alt') || ''))) return false;
+            }
+            return true;
+        }''', container.element_handle()):
+            yield code
+
+
+def qr_valid(payload, in_login_container):
+    if not in_login_container:
+        return False
+    if payload is None:
+        return True
+    value = payload.lower()
+    if any(word in value for word in ('onelink', 'af_xp', 'download', 'app下载', '下载app')):
+        return False
+    return 'qr_id' in value or 'login' in value
+
+
+def save_private(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as output:
+        os.fchmod(output.fileno(), 0o600)
+        output.write(data)
+
+
+def save_qr(code, path):
+    from PIL import Image, ImageOps
+    import zxingcpp
+
+    image = Image.open(io.BytesIO(code.screenshot())).convert('RGB')
+    image = image.resize((image.width * 3, image.height * 3), Image.Resampling.NEAREST)
+    image = ImageOps.expand(image, border=24, fill='white')
+    result = zxingcpp.read_barcode(image)
+    if not qr_valid(result.text if result else None, in_login_container=True):
+        return False
+    data = io.BytesIO()
+    image.save(data, format='PNG')
+    save_private(path, data.getvalue())
+    return True
 
 
 def login():
     deadline = time.monotonic() + 600
     try:
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        path = RUN_DIR / 'xhs-qr.png'
+        path.unlink(missing_ok=True)
+        write_status('error')
         profile = profile_path()
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         profile.chmod(0o700)
@@ -73,7 +125,14 @@ def login():
                 if logged_in(page, context):
                     write_status('logged_in')
                     return 0
-                if not qr(page):
+                container = login_container(page)
+                if not container:
+                    button = visible(page, 'text=登录')
+                    if button:
+                        button.click()
+                        page.wait_for_timeout(1000)
+                        container = login_container(page)
+                if not container:
                     page.goto('https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
                     page.wait_for_timeout(2000)
                     if logged_in(page, context):
@@ -83,31 +142,43 @@ def login():
                     if button:
                         button.click()
                     page.wait_for_timeout(1000)
-                    button = visible(page, 'text=扫码登录')
+                    container = login_container(page)
+                if container:
+                    button = visible(container, 'text=扫码登录')
                     if button:
                         button.click()
                     page.wait_for_timeout(1000)
+                save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
+                if not container:
+                    write_status('error')
+                    return 1
                 screenshot = None
                 while time.monotonic() < deadline:
                     if logged_in(page, context):
                         write_status('logged_in')
                         return 0
-                    refresh = visible(page, 'text=/二维码.*(过期|失效)|点击刷新|刷新二维码/')
+                    container = login_container(page)
+                    if not container:
+                        page.wait_for_timeout(1000)
+                        continue
+                    refresh = visible(container, 'text=/二维码.*(过期|失效)|点击刷新|刷新二维码/')
                     if refresh:
+                        write_status('error')
+                        path.unlink(missing_ok=True)
                         refresh.click()
                         page.wait_for_timeout(1000)
                         screenshot = None
-                    code = qr(page) or visible(page, '[class*="login-container"], [class*="login-modal"]')
-                    if code and screenshot is None:
-                        RUN_DIR.mkdir(parents=True, exist_ok=True)
-                        path = RUN_DIR / 'xhs-qr.png'
-                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                        os.fchmod(fd, 0o600)
-                        os.close(fd)
-                        code.screenshot(path=str(path))
-                        path.chmod(0o600)
-                        screenshot = path
-                        write_status('need_scan')
+                    if screenshot is None:
+                        found = False
+                        for code in qr(container):
+                            found = True
+                            if save_qr(code, path):
+                                screenshot = path
+                                write_status('need_scan')
+                                break
+                        if found and screenshot is None:
+                            write_status('error')
+                            return 1
                     page.wait_for_timeout(1000)
                 write_status('expired')
                 return 1
