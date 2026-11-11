@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from . import douyin
+from . import douyin, xiaohongshu
 
 INTERVAL = 3
 
@@ -47,21 +47,30 @@ def download(url, out, item_id):
 
 
 def process(url, out, asr=False, model='base'):
-    platform = 'douyin'
+    platform = 'xiaohongshu' if xiaohongshu.is_xhs(url) else 'douyin'
     item_id = hashlib.sha256(url.encode()).hexdigest()[:16]
     meta = dict(id=item_id, platform=platform, url=url, title=None, author=None,
                 duration_seconds=None, width=None, height=None,
                 fetched_at=datetime.now(timezone.utc).isoformat(), video_file=None,
                 subtitle_file=None, subtitle_source='none', error=None)
     try:
-        item_id = douyin.resolve_id(url)
+        if platform == 'xiaohongshu':
+            cookie = xiaohongshu.cookie()
+            if not cookie:
+                raise ValueError('需要 Cookie/登录（设置环境变量 XHS_COOKIE 或 XHS_COOKIE_FILE）')
+            item_id = xiaohongshu.resolve_id(url)
+        else:
+            item_id = douyin.resolve_id(url)
         meta['id'] = item_id = re.sub(r'[^a-zA-Z0-9_-]', '_', item_id)[:100]
-        info = douyin.fetch(item_id)
+        info = xiaohongshu.fetch(item_id, cookie) if platform == 'xiaohongshu' else douyin.fetch(item_id)
         play_url = info.pop('play_url')
         meta.update(info)
         meta['video_file'] = download(play_url, out, item_id)
-    except Exception:
-        meta['error'] = '链接解析或下载失败'
+    except Exception as exc:
+        if platform == 'xiaohongshu' and str(exc) == '需要 Cookie/登录（设置环境变量 XHS_COOKIE 或 XHS_COOKIE_FILE）':
+            meta['error'] = str(exc)
+        else:
+            meta['error'] = '链接解析或下载失败'
     (out / (item_id + '.meta.json')).write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     return meta
 
