@@ -164,7 +164,8 @@ def response_data(response, events):
     try:
         parsed = urlparse(response.url)
         path = parsed.path.lower()
-        if (parsed.scheme == 'https' and parsed.hostname in ('xiaohongshu.com', 'www.xiaohongshu.com', 'rednote.com', 'www.rednote.com')
+        host = parsed.hostname or ''
+        if (parsed.scheme == 'https' and any(host == domain or host.endswith('.' + domain) for domain in ('xiaohongshu.com', 'rednote.com'))
                 and parsed.port in (None, 443) and path == '/api/sns/web/v2/user/me'):
             body = response.json()
             data = body.get('data') if isinstance(body, dict) and body.get('success') is True else None
@@ -310,6 +311,8 @@ def login():
                 create_seen = False
                 no_create_at = time.monotonic() + 20
                 risk_retry_at = 0
+                entry_retried = False
+                international = False
                 state = None
                 authenticated = False
                 retry_at = time.monotonic() + 15 if urlparse(page.url).path.rstrip('/') == '/login' else 0
@@ -376,11 +379,24 @@ def login():
                         issued = refresh_at = None
                         state = None
                         events.clear()
-                        refresh_qr(page, container)
+                        if (risk or no_create) and entry_retried and not international:
+                            log_event('改走国际站入口重试')
+                            international = True
+                            page.goto('https://www.rednote.com/explore', wait_until='domcontentloaded')
+                            page.wait_for_timeout(3000)
+                            button = login_button(page)
+                            if button:
+                                button.click()
+                            had_container = False
+                        else:
+                            refresh_qr(page, container)
+                            if risk or no_create:
+                                entry_retried = True
                         fallback_at = time.monotonic() + 5
                         create_seen = False
                         no_create_at = time.monotonic() + 20
                         risk_retry_at = no_create_at
+                        continue
                     elif issued is None and not create_seen and container and time.monotonic() >= fallback_at:
                         for code in qr(container):
                             if save_qr(code, path):
@@ -400,7 +416,7 @@ def login():
                             button.click()
                             page.wait_for_timeout(3000)
                         else:
-                            page.goto('https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
+                            page.goto('https://www.rednote.com/explore' if international else 'https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
                             page.wait_for_timeout(3000)
                         save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                         retry_at = time.monotonic() + 3

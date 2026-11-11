@@ -46,6 +46,27 @@ class XhsTests(unittest.TestCase):
                 refresh.assert_called_once()
                 self.assertIn('登录码等待超时，将重试', (root / 'xhs-login.log').read_text())
 
+    def test_international_entry_after_refresh_for_risk_or_missing_create(self):
+        for risk in (False, True):
+            with self.subTest(risk=risk), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                page = MagicMock(url='https://www.xiaohongshu.com/login')
+                page.screenshot.return_value = b'page'
+                clock = [0]
+                button = MagicMock()
+                page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
+                def locate(target, selector):
+                    return object() if risk and selector == 'text=薯队长遇到了点小麻烦' else None
+                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'login_button', return_value=button), patch.object(xhs, 'logged_in', side_effect=lambda *args: button.click.called), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'refresh_qr') as refresh, patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]):
+                    browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value.pages = [page]
+                    self.assertEqual(xhs.login(), 0)
+                    refresh.assert_called_once()
+                self.assertEqual([call.args[0] for call in page.goto.call_args_list], ['https://www.xiaohongshu.com/login', 'https://www.rednote.com/explore'])
+                button.click.assert_called_once()
+                log = (root / 'xhs-login.log').read_text()
+                self.assertIn('改走国际站入口重试', log)
+                self.assertNotIn('https://', log)
+
     def test_login_display_starts_and_cleans_up_xvfb(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(xhs.os, 'pipe', return_value=(10, 11)), patch.object(xhs.os, 'close'), patch.object(xhs.os, 'fdopen', return_value=io.StringIO('123\n')), patch.object(xhs.subprocess, 'Popen') as popen:
             with xhs.login_display():
@@ -247,9 +268,14 @@ class XhsTests(unittest.TestCase):
         response.json.return_value = {'success': True, 'data': {'guest': False, 'user_id': 'synthetic'}}
         xhs.response_data(response, events)
         self.assertEqual(events, [('identity', True)])
-        response.url = 'https://rednote.com.evil/api/sns/web/v2/user/me'
-        xhs.response_data(response, events)
-        self.assertEqual(events, [('identity', True)])
+        for host in ('webapi.rednote.com', 'edith.xiaohongshu.com'):
+            response.url = 'https://' + host + '/api/sns/web/v2/user/me'
+            xhs.response_data(response, events)
+        self.assertEqual(events, [('identity', True)] * 3)
+        for host in ('rednote.com.evil', 'evilrednote.com', 'evilxiaohongshu.com'):
+            response.url = 'https://' + host + '/api/sns/web/v2/user/me'
+            xhs.response_data(response, events)
+        self.assertEqual(events, [('identity', True)] * 3)
 
     def test_scan_waits_without_refresh_and_success_waits_for_session(self):
         with tempfile.TemporaryDirectory() as directory:
