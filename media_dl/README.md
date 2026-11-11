@@ -20,6 +20,8 @@ python -m media_dl 小红书链接 --out ./out
 
 登录默认无头运行，二维码保存在 `/workspace/dev/media-dl-run/xhs-qr.png`，状态保存在 `/workspace/dev/media-dl-run/xhs-login.status`（`need_scan`、`logged_in`、`expired` 或 `error`）。登录资料保存在 `~/.config/media-dl/xhs-profile`。小红书流程尚未进行真实网络验证。
 
+整页截图保存在 `/workspace/dev/media-dl-run/xhs-page.png`，可用于核对登录弹窗；截图可能包含敏感信息，请妥善保管。
+
 可选转写：`python -m pip install -r media_dl/requirements-asr.txt`，加 `--asr` 后使用 faster-whisper；模型默认为 base，也可选择 small，首次使用由依赖下载到用户缓存。转写失败仍保留视频，元数据记录错误。未安装依赖时也保留视频。
 
 离线测试：
