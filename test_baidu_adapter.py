@@ -24,6 +24,16 @@ def fixture(plain='12,23,34,45,56,67,78'):
         'all': dict(series), 'pc': dict(series), 'wise': dict(series)}]}
 
 
+def extra_shape():
+    return dict(http_status=200, business_status=0, body_fields=['data', 'status'],
+                data_fields=['index', 'uniqid'], index_type='array', index_length=1,
+                user_indexes_present=True, user_indexes_type='array', user_indexes_length=1,
+                user_indexes_item_fields=[[{'field': 'word', 'type': 'string'}]],
+                index_items=[dict(field_names=['data', 'endDate', 'key', 'startDate'], data_length=12,
+                                  start_date=query()['start_date'], end_date=query()['end_date'])],
+                ptbk_length=6, decoded_points=7, empty_points=1, used_fallback=False)
+
+
 def response(data, status=0):
     return 200, 'application/json', json.dumps({'status': status, 'data': data})
 
@@ -38,6 +48,39 @@ class Browser:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_extra_shapes_public_boundary(self):
+        q = query()
+        rows = b.parse_index(fixture(), PTBK, q)['rows']
+        extra = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
+        class Page:
+            def __init__(self, shape): self.shape = shape
+            def query(self, payload):
+                return {'rows': rows, 'news_rows': extra, **({'news_shape': self.shape} if self.shape is not None else {})}
+        shape = extra_shape()
+        result = b.collect_page(q, Page(shape), news_enabled=True)
+        self.assertEqual(b.public_result(result)['metadata']['extra_index_shapes'], {'news': [shape]})
+        for bad in (dict(shape, cookie='private'), dict(shape, index_items=[dict(shape['index_items'][0], data='private')]), dict(shape, data_fields=['private'])):
+            result = b.collect_page(q, Page(bad), news_enabled=True)
+            public = b.public_result(result)
+            self.assertNotIn('extra_index_shapes', public['metadata'])
+            self.assertNotIn('private', json.dumps(public))
+        self.assertNotIn('extra_index_shapes', b.public_result(b.collect_page(q, Page(None), news_enabled=True))['metadata'])
+
+    def test_extra_shapes_collect_each_chunk(self):
+        q = query()
+        q['start_date'] = (dt.date.fromisoformat(q['end_date']) - dt.timedelta(days=399)).isoformat()
+        shape = extra_shape()
+        class Page:
+            def query(self, chunk):
+                first = dt.date.fromisoformat(chunk['start_date'])
+                days = (dt.date.fromisoformat(chunk['end_date']) - first).days + 1
+                rows = [dict(keyword=word, device=device, date=(first + dt.timedelta(days=i)).isoformat(),
+                             search_index=None, value_status='missing') for word in chunk['keywords']
+                        for device in ('all', 'pc', 'wise') for i in range(days)]
+                return {'rows': rows, 'feed_rows': [], 'feed_shape': shape}
+        result = b.public_result(b.collect_page(q, Page(), feed_enabled=True, sleep=lambda _: None))
+        self.assertEqual(result['metadata']['extra_index_shapes']['feed'], [shape, shape])
+
     def test_missing_news_rows_is_response_schema(self):
         import baidu_adapter as b
         for answer in ({'rows': []}, {'rows': [], 'news_rows': None}):

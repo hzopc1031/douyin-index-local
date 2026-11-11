@@ -126,7 +126,7 @@ async (query) => {
       businessStatus = body.status;
       if (body.status !== 0) return fail(({10000:'login_required',10001:'rate_limited',10002:'bad_request',10018:'abnormal_access'})[body.status] || 'business_error', body.message || body.msg);
       if (!Object.prototype.hasOwnProperty.call(body, 'data')) return schema(body);
-      return {status:'ok', data:body.data};
+      return {status:'ok', data:body.data, body_fields:Object.keys(body).filter(k => schemaKeys.has(k)).sort()};
     } finally { clearTimeout(timer); }
   };
   const parsePeriod = period => {
@@ -290,6 +290,7 @@ async (query) => {
     const feed = await get(path + '?' + params, {'Cipher-Text':signature}, name);
     if (feed.status !== 'ok') return feed;
     const feedData = feed.data;
+    const feedStatus = {http_status:httpStatus, business_status:businessStatus};
     if (!feedData || typeof feedData !== 'object' || Array.isArray(feedData) || typeof feedData.uniqid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(feedData.uniqid) || !Array.isArray(feedData.index)) return schema(feedData, {ptbk_length:0, name_matches:false});
     const feedTable = await get('/Interface/api/ptbk?' + new URLSearchParams({uniqid:feedData.uniqid}), {}, name + '_ptbk');
     if (feedTable.status !== 'ok') return feedTable;
@@ -325,11 +326,24 @@ async (query) => {
       feeds.set(word, tokens);
     }
     const feedRows = [];
+    let decodedPoints = 0, emptyPoints = 0, usedFallback = false;
     for (const word of query.keywords) {
       const tokens = feeds.get(word) || Array(days).fill('');
+      usedFallback ||= !feeds.has(word);
+      decodedPoints += tokens.length; emptyPoints += tokens.filter(token => !token).length;
       for (let i = 0; i < tokens.length; i++) feedRows.push({keyword:word, device:'all', date:new Date(start + i * 86400000).toISOString().slice(0,10), value:tokens[i] ? Number(tokens[i]) : null, value_status:tokens[i] ? 'available' : 'missing'});
     }
-    return {status:'ok', rows:feedRows};
+    const fields = value => Object.keys(value).filter(k => schemaKeys.has(k)).sort();
+    const present = Object.hasOwn(feedData, 'userIndexes');
+    const users = feedData.userIndexes;
+    const summary = {...feedStatus, body_fields:feed.body_fields, data_fields:fields(feedData),
+      index_type:'array', index_length:feedData.index.length,
+      user_indexes_present:present, ...(present ? {user_indexes_type:typeOf(users),
+        user_indexes_length:Array.isArray(users) ? users.length : null,
+        user_indexes_item_fields:(Array.isArray(users) ? users : typeOf(users) === 'object' ? [users] : []).map(item => typeOf(item) === 'object' ? fields(item).map(field => ({field, type:typeOf(item[field])})) : [])} : {}),
+      index_items:feedData.index.map(item => ({field_names:fields(item), data_length:item.data.length, start_date:item.startDate, end_date:item.endDate})),
+      ptbk_length:mapping.length, decoded_points:decodedPoints, empty_points:emptyPoints, used_fallback:usedFallback};
+    return {status:'ok', rows:feedRows, shape:summary};
     }
     const result = {status:'ok', rows};
     for (const [enabled, path, field] of [[query._feed_enabled, '/api/FeedSearchApi/getFeedIndex', 'feed_rows'], [query._news_enabled, '/api/NewsApi/getNewsIndex', 'news_rows']]) {
@@ -337,6 +351,7 @@ async (query) => {
       const extra = await extraIndex(path, field === 'feed_rows' ? 'feed' : 'news');
       if (extra.status !== 'ok') return extra;
       result[field] = extra.rows;
+      result[field === 'feed_rows' ? 'feed_shape' : 'news_shape'] = extra.shape;
     }
     return {...result, ...diagnostics()};
   } catch (error) { return {...fail('network_error', error?.message), exception_type: error?.name === 'TypeError' ? 'TypeError' : 'Error'}; }

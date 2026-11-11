@@ -47,3 +47,4 @@
 `GET /api/v1/series?platform=baidu&keyword=…&metric=news_index` 和同参数 `/api/v1/export.csv` 只读取已存数据，`device` 仅可省略或为 `all`，CSV 的 metric 为 `news_index`；关闭开关后仍可读取及导出。结果待官方页面独立核对。上线更新需重启 gateway（读取开关）和 desktop（页内脚本），本次未部署。
 
 百度失败日志记录可获得的请求阶段、HTTP 和业务 status、异常类型及已发请求数；无法确定的计数标为 unknown。消息只保留安全词汇，不记录 Cookie、密文或关键词。
+成功时，资讯/媒体 extraIndex 的脱敏结构摘要写入 `index_hub.baidu` 的 info 日志（前缀 `baidu_extra_shape`）及结果 `metadata.extra_index_shapes`。摘要只含键名、数组长度、data/ptbk 长度、解密点数与是否回填，不含原文、密文、ptbk 值或词面。
