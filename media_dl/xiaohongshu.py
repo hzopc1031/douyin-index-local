@@ -31,7 +31,7 @@ def playwright():
 
 
 def write_status(status):
-    if status not in {'need_scan', 'scanned', 'logged_in', 'expired', 'error'}:
+    if status not in {'need_scan', 'scanned', 'verify', 'logged_in', 'expired', 'error'}:
         raise ValueError('无效状态')
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     path = RUN_DIR / 'xhs-login.status'
@@ -91,7 +91,7 @@ def qr(container, security=False):
     for index in range(codes.count()):
         code = codes.nth(index)
         if code.is_visible() and code.evaluate(r'''(element, container) => {
-            if (element.tagName === 'IMG' && (!element.complete || !element.naturalWidth)) return false;
+            if (element.tagName === 'IMG' && (!element.complete || !element.naturalWidth || !element.naturalHeight)) return false;
             if (element.tagName === 'CANVAS' && (!element.width || !element.height)) return false;
             for (let node = element; node && node !== container; node = node.parentElement) {
                 if (/下载|打开\s*(App|应用)|download/i.test((node.innerText || '') + ' ' + (node.className || '') + ' ' + (node.getAttribute('alt') || ''))) return false;
@@ -150,15 +150,26 @@ def save_image(image, path, expected_id=None, security=False):
 
     result = zxingcpp.read_barcode(image)
     payload = result.text if result else None
-    valid = bool(result and (result.format == zxingcpp.BarcodeFormat.QRCode if security else qr_info(payload)[0]))
-    if valid and expected_id is not None:
+    valid = bool(result and (isinstance(payload, str) and payload and not any(
+        word in payload.lower() for word in ('onelink', 'af_xp', 'download', 'app下载', '下载app'))
+        if security else qr_info(payload)[0]))
+    if valid and not security and expected_id is not None:
         valid = qr_id(dict(parse_qsl(urlparse(payload).query))) == expected_id
     log_event("二维码校验通过" if valid else "二维码校验失败")
     if not valid:
         return False
     data = io.BytesIO()
     image.save(data, format='PNG')
-    save_private(path, data.getvalue())
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+            temp_name = output.name
+            os.fchmod(output.fileno(), 0o600)
+            output.write(data.getvalue())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
     return True
 
 
@@ -308,10 +319,10 @@ def expiry_seconds(data, now):
     return None
 
 
-def write_meta(seconds):
+def write_meta(seconds, kind='login'):
     now = datetime.now(timezone(timedelta(hours=8)))
     save_private(RUN_DIR / 'xhs-qr.meta', json.dumps({
-        'generated_at': now.isoformat(),
+        'kind': kind, 'generated_at': now.isoformat(),
         'expires_at': (now + timedelta(seconds=seconds)).isoformat() if seconds is not None else None,
     }).encode())
 
@@ -416,11 +427,7 @@ def login():
                         if not security_active:
                             security_active = security_seen = True
                             security_saved = security_refreshing = False
-                            path.unlink(missing_ok=True)
-                            (RUN_DIR / 'xhs-qr.meta').unlink(missing_ok=True)
                             save_private(RUN_DIR / 'xhs-page.png', page.screenshot())
-                            set_status('need_scan')
-                            state = 'need_scan'
                         expired_security = visible(security, 'text=/Expired\\. Click QR code to refresh|二维码.*(过期|失效)|点击刷新|刷新二维码/i')
                         if expired_security:
                             security_saved = False
@@ -430,7 +437,8 @@ def login():
                         else:
                             security_refreshing = False
                             if not security_saved and save_page_qr(page, security, path, security=True):
-                                write_meta(None)
+                                write_meta(None, 'verify')
+                                set_status('verify')
                                 log_event('页面出现安全验证，已截取页面原生码')
                                 security_saved = True
                         authenticated = authenticated or any(kind == 'identity' for kind, _ in events)

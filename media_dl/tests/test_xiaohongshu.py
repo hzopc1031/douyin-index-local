@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import os
 import io
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 from media_dl import xiaohongshu as xhs
@@ -129,7 +130,7 @@ class XhsTests(unittest.TestCase):
 
     def test_status_values(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
-            for status in ('need_scan', 'scanned', 'logged_in', 'expired', 'error'):
+            for status in ('need_scan', 'scanned', 'verify', 'logged_in', 'expired', 'error'):
                 xhs.write_status(status)
                 path = Path(directory) / 'xhs-login.status'
                 self.assertEqual(path.read_text().strip(), status)
@@ -250,6 +251,9 @@ class XhsTests(unittest.TestCase):
                     return expired
                 return None
             def container(_):
+                if clock[0] == 8:
+                    self.assertEqual((root / 'xhs-login.status').read_text().strip(), 'verify')
+                    self.assertEqual(json.loads((root / 'xhs-qr.meta').read_text())['kind'], 'verify')
                 return security if clock[0] < 8 else None
             with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'security_container', side_effect=container), patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'qr', return_value=[code]), patch.object(xhs, 'refresh_qr') as refresh, patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]):
                 context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
@@ -268,6 +272,30 @@ class XhsTests(unittest.TestCase):
             for file in ('xhs-login.log', 'xhs-login.status', 'xhs-qr.meta'):
                 for secret in ('security-secret', 'new-secret', 'qr_id', 'https://', 'cookie'):
                     self.assertNotIn(secret, (root / file).read_text().lower())
+
+    def test_security_loading_and_decoded_payload_validation(self):
+        from PIL import Image
+        import zxingcpp
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
+            path = Path(directory) / 'xhs-qr.png'
+            path.write_bytes(b'old')
+            container, code, page = MagicMock(), MagicMock(), MagicMock()
+            container.locator.return_value.count.return_value = 1
+            container.locator.return_value.nth.return_value = code
+            code.is_visible.return_value = True
+            code.evaluate.return_value = False
+            self.assertFalse(xhs.save_page_qr(page, container, path, security=True))
+            self.assertEqual(path.read_bytes(), b'old')
+            code.screenshot.assert_not_called()
+            image = Image.new('RGB', (10, 10), 'white')
+            with patch.object(zxingcpp, 'read_barcode', return_value=MagicMock(text='https://onelink.me/download')):
+                self.assertFalse(xhs.save_image(image, path, security=True))
+            self.assertEqual(path.read_bytes(), b'old')
+            with patch.object(zxingcpp, 'read_barcode', return_value=MagicMock(text='verification-secret', format=None)):
+                self.assertTrue(xhs.save_image(image, path, expected_id='ignored', security=True))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('verification-secret', (Path(directory) / 'xhs-login.log').read_text())
 
     def test_security_text_selectors(self):
         page = MagicMock()
@@ -302,7 +330,9 @@ class XhsTests(unittest.TestCase):
             meta = json.loads((root / 'xhs-qr.meta').read_text()) if (root / 'xhs-qr.meta').exists() else None
             self.assertIsNone(meta)
             xhs.write_meta(120)
-            self.assertEqual(set(json.loads((root / 'xhs-qr.meta').read_text())), {'generated_at', 'expires_at'})
+            meta = json.loads((root / 'xhs-qr.meta').read_text())
+            self.assertEqual(set(meta), {'kind', 'generated_at', 'expires_at'})
+            self.assertEqual(meta['kind'], 'login')
             self.assertEqual((root / 'xhs-qr.meta').stat().st_mode & 0o777, 0o600)
             log = (root / 'xhs-login.log').read_text()
             for word in ('二维码生成', '刷新二维码', '状态变化', '二维码校验通过'):
