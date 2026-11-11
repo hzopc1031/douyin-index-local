@@ -236,7 +236,7 @@ class XhsTests(unittest.TestCase):
             self.assertEqual(set(json.loads((root / 'xhs-qr.meta').read_text())), {'generated_at', 'expires_at'})
             self.assertEqual((root / 'xhs-qr.meta').stat().st_mode & 0o777, 0o600)
             log = (root / 'xhs-login.log').read_text()
-            for word in ('二维码生成', '刷新二维码', '状态变化', 'example.com /mobile/login'):
+            for word in ('二维码生成', '刷新二维码', '状态变化', '二维码校验通过'):
                 self.assertIn(word, log)
             for secret in ('synthetic-secret', 'synthetic-code', 'qr_id', 'cookie', 'https://', '?'):
                 self.assertNotIn(secret, log.lower())
@@ -288,6 +288,7 @@ class XhsTests(unittest.TestCase):
             def emit(path, data):
                 response = MagicMock(url='https://example.com/' + path)
                 response.json.return_value = {'data': data}
+                response.request = MagicMock(url='https://www.rednote.com/api/qrcode/userinfo?qr_id=synthetic', method='GET', post_data=None, headers={})
                 page.on.call_args.args[1](response)
             def navigate(*args, **kwargs):
                 emit('login/qrcode/create', {'url': 'https://example.com/login?qr_id=synthetic', 'ttl': 1})
@@ -329,6 +330,7 @@ class XhsTests(unittest.TestCase):
                     response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
                     callback(response)
                     response = MagicMock(url='https://example.com/api/qrcode/userinfo')
+                    response.request = MagicMock(url='https://www.rednote.com/api/qrcode/userinfo?qr_id=synthetic', method='GET', post_data=None, headers={})
                     response.json.return_value = {'data': {'codeStatus': 1}}
                     callback(response)
                     if expire == 'status':
@@ -401,6 +403,77 @@ class XhsTests(unittest.TestCase):
                 page.wait_for_timeout.assert_any_call(5000)
                 dismiss.click.assert_called_once()
                 self.assertEqual(statuses, ['need_scan', 'logged_in'])
+
+    def test_no_expiry_signal_does_not_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://www.rednote.com/login')
+            clock = [0]
+            def navigate(*args, **kwargs):
+                response = MagicMock(url='https://www.rednote.com/login/qrcode/create')
+                response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
+                page.on.call_args.args[1](response)
+            page.goto.side_effect = navigate
+            page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'save_url_qr', return_value=True), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
+                browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value.pages = [page]
+                self.assertEqual(xhs.login(), 1)
+                refresh.assert_not_called()
+                self.assertGreaterEqual(clock[0], 900)
+
+    def test_follow_page_poll_and_confirm_without_leaking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://www.rednote.com/login')
+            clock = [0]
+            statuses = []
+            saved = []
+            def emit(path, data, request=None):
+                response = MagicMock(url='https://www.rednote.com/' + path)
+                response.json.return_value = {'data': data}
+                if request:
+                    response.request = request
+                page.on.call_args.args[1](response)
+            def navigate(*args, **kwargs):
+                for name in ('first-secret', 'second-secret'):
+                    emit('login/qrcode/create', {'url': 'https://example.com/login?qr_id=' + name, 'code': 'code-secret'})
+                request = MagicMock(url='https://www.rednote.com/api/qrcode/userinfo?qrId=second-secret&code=code-secret',
+                                    method='GET', post_data=None, headers={})
+                emit('api/qrcode/userinfo', {'codeStatus': 0}, request)
+            page.goto.side_effect = navigate
+            page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
+            def poll(page, request):
+                self.assertEqual(request['id'], 'second-secret')
+                return {'codeStatus': 1 if clock[0] < 130 else 2}
+            def save(url, path):
+                saved.append(url)
+                return True
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'save_url_qr', side_effect=save), patch.object(xhs, 'poll_status', side_effect=poll), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
+                context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                context.pages = [page]
+                context.cookies.side_effect = lambda *args: ([{'name': 'web_session', 'value': 'new-session'}] if clock[0] >= 132 else [{'name': 'web_session', 'value': 'old-session'}])
+                self.assertEqual(xhs.login(), 0)
+                refresh.assert_not_called()
+                context.close.assert_called_once()
+            self.assertEqual(len(saved), 2)
+            self.assertIn('second-secret', saved[-1])
+            log = (root / 'xhs-login.log').read_text()
+            self.assertIn('状态轮询与当前码不一致', log)
+            self.assertIn('已改为跟随页面正在轮询的码', log)
+            self.assertIn('scanned', log)
+            self.assertEqual((root / 'xhs-login.status').read_text().strip(), 'logged_in')
+            for file in ('xhs-login.log', 'xhs-login.status', 'xhs-qr.meta'):
+                content = (root / file).read_text().lower()
+                for secret in ('first-secret', 'second-secret', 'code-secret', 'session', 'cookie', 'qr_id', 'https://'):
+                    self.assertNotIn(secret, content)
+
+    def test_status_request_body_and_untrusted_origin(self):
+        request = MagicMock(url='https://www.rednote.com/api/qrcode/userinfo', method='POST',
+                            post_data='{"qr_id":"synthetic", "code":"synthetic-code"}',
+                            headers={'content-type': 'application/json'})
+        self.assertEqual(xhs.status_request(request)['id'], 'synthetic')
+        request.url = 'https://rednote.com.evil/api/qrcode/userinfo'
+        self.assertIsNone(xhs.status_request(request))
 
     def test_login_button_selectors_include_sidebar_and_exclude_submit(self):
         page = MagicMock()

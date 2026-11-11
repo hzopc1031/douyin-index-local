@@ -133,8 +133,8 @@ def save_image(image, path):
     import zxingcpp
 
     result = zxingcpp.read_barcode(image)
-    valid, host, route, has_id = qr_info(result.text if result else None)
-    log_event(f"校验{'通过' if valid else '失败'}: {host} {route} has_id={has_id}")
+    valid = qr_info(result.text if result else None)[0]
+    log_event("二维码校验通过" if valid else "二维码校验失败")
     if not valid:
         return False
     data = io.BytesIO()
@@ -160,6 +160,57 @@ def save_url_qr(payload, path):
     return save_image(image.make_image().convert('RGB'), path)
 
 
+def qr_id(data):
+    if not isinstance(data, dict):
+        return None
+    return next((value for key, value in data.items()
+                 if key.lower().replace('_', '') == 'qrid' and isinstance(value, str) and value), None)
+
+
+def create_id(data):
+    return qr_id(data) or qr_id(dict(parse_qsl(urlparse(data.get('url', '')).query)))
+
+
+def status_request(request):
+    parsed = urlparse(request.url)
+    if (parsed.scheme != 'https' or not any(parsed.hostname == domain or (parsed.hostname or '').endswith('.' + domain)
+            for domain in ('xiaohongshu.com', 'rednote.com')) or parsed.port not in (None, 443)):
+        return None
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    body = request.post_data
+    content_type = request.headers.get('content-type', '')
+    fields = {}
+    if body:
+        try:
+            fields = json.loads(body) if 'json' in content_type else dict(parse_qsl(body, keep_blank_values=True))
+        except (ValueError, TypeError):
+            return None
+    identifier = qr_id(query) or qr_id(fields)
+    if not identifier or request.method not in ('GET', 'POST'):
+        return None
+    return {'url': request.url, 'method': request.method, 'body': body,
+            'content_type': content_type, 'id': identifier}
+
+
+def poll_status(page, request):
+    try:
+        data = page.evaluate("""async request => {
+            try {
+                const options = {method: request.method, credentials: 'include', redirect: 'error'};
+                if (request.body) {
+                    options.body = request.body;
+                    options.headers = {'content-type': request.content_type};
+                }
+                const response = await fetch(request.url, options);
+                if (!response.ok) return null;
+                return await response.json();
+            } catch (_) { return null; }
+        }""", request)
+        return data.get('data', data) if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def response_data(response, events):
     try:
         parsed = urlparse(response.url)
@@ -181,7 +232,7 @@ def response_data(response, events):
         body = response.json()
         data = body.get('data', body) if isinstance(body, dict) else None
         if isinstance(data, dict):
-            events.append((kind, data))
+            events.append((kind, (data, status_request(response.request)) if kind == 'status' else data))
     except Exception:
         pass
 
@@ -214,15 +265,15 @@ def expiry_seconds(data, now):
                 return seconds
         except (ValueError, TypeError, OverflowError):
             pass
-    log_event('未读到官方有效期，按 120 秒刷新')
-    return 120
+    log_event('未读到官方有效期，到期前不主动换码')
+    return None
 
 
 def write_meta(seconds):
     now = datetime.now(timezone(timedelta(hours=8)))
     save_private(RUN_DIR / 'xhs-qr.meta', json.dumps({
         'generated_at': now.isoformat(),
-        'expires_at': (now + timedelta(seconds=seconds)).isoformat(),
+        'expires_at': (now + timedelta(seconds=seconds)).isoformat() if seconds is not None else None,
     }).encode())
 
 
@@ -246,7 +297,6 @@ def refresh_qr(page, container):
             button = visible(container, 'text=扫码登录')
             if button:
                 button.click()
-    save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
 
 
 @contextmanager
@@ -304,10 +354,12 @@ def login():
                 page.on('response', lambda response: response_data(response, events))
                 page.goto('https://www.xiaohongshu.com/login', wait_until='domcontentloaded')
                 page.wait_for_timeout(5000)
-                save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                 issued = None
-                refresh_at = None
-                fallback_at = time.monotonic() + 5
+                current_id = None
+                creates = {}
+                poll_request = None
+                poll_at = 0
+                initial_sessions = {(c.get('domain'), c.get('value')) for c in context.cookies() if c.get('name') == 'web_session' and c.get('value')}
                 create_seen = False
                 no_create_at = time.monotonic() + 20
                 risk_retry_at = 0
@@ -318,7 +370,8 @@ def login():
                 retry_at = time.monotonic() + 15 if urlparse(page.url).path.rstrip('/') == '/login' else 0
                 had_container = False
                 while time.monotonic() < deadline:
-                    if logged_in(page, context, authenticated):
+                    sessions = {(c.get('domain'), c.get('value')) for c in context.cookies() if c.get('name') == 'web_session' and c.get('value')}
+                    if logged_in(page, context, authenticated or (state == 'confirmed' and bool(sessions - initial_sessions))):
                         set_status('logged_in')
                         return 0
                     on_login_page = urlparse(page.url).path.rstrip('/') == '/login'
@@ -331,52 +384,71 @@ def login():
                         button = None if on_login_page else visible(container, 'text=扫码登录')
                         if button:
                             button.click()
-                        save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                     had_container = bool(container)
                     while events:
                         kind, data = events.pop(0)
                         if kind == 'identity':
                             authenticated = True
-                        elif kind == 'create' and state not in ('scanned', 'confirmed'):
+                        elif kind == 'create':
                             create_seen = True
-                            if not isinstance(data.get('url'), str) or not save_url_qr(data['url'], path):
-                                path.unlink(missing_ok=True)
-                                (RUN_DIR / 'xhs-qr.meta').unlink(missing_ok=True)
-                                issued = None
-                                refresh_at = time.monotonic() + 100
-                                if state is not None:
-                                    set_status('error')
-                                    state = None
-                            else:
-                                issued = time.monotonic()
-                                seconds = expiry_seconds(data, datetime.now(timezone.utc))
-                                refresh_at = issued + max(1, seconds - min(20, seconds / 4))
-                                write_meta(seconds)
-                                log_event('二维码生成')
-                                set_status('need_scan')
-                                state = 'need_scan'
-                                save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
+                            identifier = create_id(data)
+                            if identifier and isinstance(data.get('url'), str):
+                                creates[identifier] = data
+                                if issued is None and state not in ('scanned', 'confirmed') and save_url_qr(data['url'], path):
+                                    current_id = identifier
+                                    issued = time.monotonic()
+                                    write_meta(expiry_seconds(data, datetime.now(timezone.utc)))
+                                    log_event('二维码生成')
+                                    set_status('need_scan')
+                                    state = 'need_scan'
                         elif kind == 'status' and issued is not None and state != 'confirmed':
+                            data, request = data
+                            if not request:
+                                continue
+                            matches = request['id'] == current_id
+                            log_event('状态轮询与当前码一致' if matches else '状态轮询与当前码不一致')
+                            if not matches and state != 'scanned' and request['id'] in creates:
+                                candidate = creates[request['id']]
+                                if save_url_qr(candidate['url'], path):
+                                    current_id = request['id']
+                                    issued = time.monotonic()
+                                    write_meta(expiry_seconds(candidate, datetime.now(timezone.utc)))
+                                    state = 'need_scan'
+                                    log_event('已改为跟随页面正在轮询的码')
+                                    matches = True
+                            if matches:
+                                poll_request = request
+                                value = status_code(data)
+                                if value == 1 and state != 'scanned':
+                                    set_status('scanned')
+                                    state = 'scanned'
+                                elif value == 2:
+                                    state = 'confirmed'
+                                elif value == 3:
+                                    state = 'expired'
+                    if poll_request and state not in ('confirmed', 'expired') and time.monotonic() >= poll_at:
+                        data = poll_status(page, poll_request)
+                        poll_at = time.monotonic() + 2
+                        if isinstance(data, dict):
                             value = status_code(data)
                             if value == 1 and state != 'scanned':
                                 set_status('scanned')
                                 state = 'scanned'
                             elif value == 2:
-                                authenticated = True
                                 state = 'confirmed'
                             elif value == 3:
                                 state = 'expired'
-                                refresh_at = 0
                     if state == 'confirmed' or authenticated:
                         page.wait_for_timeout(1000)
                         continue
                     risk = time.monotonic() >= risk_retry_at and visible(page, 'text=薯队长遇到了点小麻烦')
                     no_create = issued is None and not create_seen and time.monotonic() >= no_create_at
                     expired = container and visible(container, 'text=/二维码.*(过期|失效)|点击刷新|刷新二维码/')
-                    if state != 'scanned' and (risk or no_create or expired or (refresh_at is not None and time.monotonic() >= refresh_at)):
+                    if state != 'scanned' and ((issued is None and (risk or no_create)) or expired or state == 'expired'):
                         if risk or no_create:
                             log_event('登录页风控提示，将重试' if risk else '登录码等待超时，将重试')
-                        issued = refresh_at = None
+                        issued = current_id = poll_request = None
+                        creates.clear()
                         state = None
                         events.clear()
                         if (risk or no_create) and entry_retried and not international:
@@ -392,24 +464,11 @@ def login():
                             refresh_qr(page, container)
                             if risk or no_create:
                                 entry_retried = True
-                        fallback_at = time.monotonic() + 5
                         create_seen = False
                         no_create_at = time.monotonic() + 20
                         risk_retry_at = no_create_at
                         continue
-                    elif issued is None and not create_seen and container and time.monotonic() >= fallback_at:
-                        for code in qr(container):
-                            if save_qr(code, path):
-                                issued = time.monotonic()
-                                seconds = expiry_seconds({}, datetime.now(timezone.utc))
-                                refresh_at = issued + 100
-                                write_meta(seconds)
-                                log_event('二维码生成')
-                                set_status('need_scan')
-                                state = 'need_scan'
-                                save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
-                                break
-                    if state != 'scanned' and not container and time.monotonic() >= retry_at:
+                    if issued is None and state != 'scanned' and not container and time.monotonic() >= retry_at:
                         log_event('未找到登录容器，将重试')
                         button = None if on_login_page else login_button(page)
                         if button:
@@ -418,7 +477,6 @@ def login():
                         else:
                             page.goto('https://www.rednote.com/explore' if international else 'https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
                             page.wait_for_timeout(3000)
-                        save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                         retry_at = time.monotonic() + 3
                     page.wait_for_timeout(1000)
                 set_status('expired')
