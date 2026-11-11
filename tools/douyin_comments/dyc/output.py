@@ -89,7 +89,7 @@ def _rank_line(video, item):
     return line
 
 
-def export(out, run_id, videos, code, reason, requests, top=30):
+def export(out, run_id, videos, code, reason, requests, top=30, metadata=None):
     out = private_dir(out)
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=COLUMNS, lineterminator="\n")
@@ -104,6 +104,8 @@ def export(out, run_id, videos, code, reason, requests, top=30):
     result = dict(run_id=run_id, out=str(out), videos=[v.summary() for v in videos],
                   exit_code=code, exit_reason=reason, requests=requests,
                   site_calibrated=False)
+    if metadata is not None:
+        result["metadata"] = metadata
     # Only the summary's whitelisted fields, never templates, headers or raw JSON.
     for entry in result["videos"]:
         entry["displayed"] = clean(entry["displayed"])
