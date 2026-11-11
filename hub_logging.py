@@ -7,14 +7,17 @@ import re
 
 
 KEY_NAMES = ('cookie|token|session|sessionid|sid_|sid|uid_tt|odin_tt|ttwid|mstoken|a_bogus|'
-             'verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|key|'
+             'verifyfp|s_v_web_id|csrf|passport|passwd|password|secret|auth|bduss|'
+             '(?:api|access|private|client|signing|encryption)[_-]?key|'
              'phone|mobile|sms|otp|verify_code|text')
 
 
 def redact(text) -> str:
     """Redact credential assignments and long opaque strings in diagnostics."""
     text = str(text)
-    text = re.sub(r'(?<![0-9])1[3-9][0-9]{9}(?![0-9])', '1**********', text)
+    text = re.sub(r'(?<![A-Za-z0-9_+/\-])[0-9a-f]{32}(?![A-Za-z0-9_+/\-])|'
+                  r'(?<![0-9])1[3-9][0-9]{9}(?![0-9])',
+                  lambda m: m[0] if len(m[0]) == 32 else '1**********', text)
     text = re.sub(r'''(?i)(\bcode["']?\s*[:=]\s*)(?:"[0-9]{4,8}"|'[0-9]{4,8}'|[0-9]{4,8}\b)''',
                   r'\1***', text)
     # Authorization values are short enough to escape the long-string rule.
@@ -28,7 +31,7 @@ def redact(text) -> str:
         r"(?:\"[^\"]*\"|'[^']*'|[^\s,;\x26}\"']+)",
         r'\1***', text)
     return re.sub(r'[A-Za-z0-9_\-+/]{24,}={0,2}',
-                  lambda m: m[0] if re.fullmatch(r'[a-z]+(?:_[a-z]+)+', m[0]) else '***', text)
+                  lambda m: m[0] if re.fullmatch(r'[0-9a-f]{32}|[a-z]+(?:_[a-z]+)+', m[0]) else '***', text)
 
 
 class RedactingFilter(logging.Filter):

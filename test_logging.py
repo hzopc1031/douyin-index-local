@@ -105,6 +105,29 @@ class StderrAndAuthorizationTests(unittest.TestCase):
 
 
 class DiagnosticRedactionTests(unittest.TestCase):
+    def test_preserves_job_ids_and_diagnostic_keys(self):
+        for job in ('cd9733faa68235988c49e957abcdef01', 'abcd13812345678abcdef01234567890'):
+            line = f'job_id={job} job={job} completed {job}'
+            self.assertEqual(redact(line), line)
+        line = ('keyword=人工智能 cache_key=baidu:ai:110000 region_key=110000 '
+                'key=all key=region_beijing keyword:object "key": "search" "keyword": "人工智能"')
+        self.assertEqual(redact(line), line)
+
+    def test_secret_fields_remain_masked(self):
+        for name, value in (('cookie', 'SECRET'), ('token', 'SECRET'),
+                            ('password', 'hunter2'), ('passwd', 'hunter2'),
+                            ('BDUSS', 'FakeBdussValueNotReal1234567890'),
+                            ('api_key', 'SECRET'), ('apikey', 'SECRET'),
+                            ('access_key', 'SECRET'), ('secret_key', 'SECRET'),
+                            ('private_key', 'SECRET'), ('auth_key', 'SECRET'),
+                            ('signing_key', 'SECRET'), ('client_key', 'SECRET'),
+                            ('token', 'cd9733faa68235988c49e957abcdef01')):
+            with self.subTest(name=name):
+                self.assertNotIn(value, redact(f'{name}={value}'))
+        for scheme in ('Basic', 'Bearer', 'Digest', 'Token'):
+            self.assertNotIn('YWRtaW46cGFzcw==', redact(f'Authorization: {scheme} YWRtaW46cGFzcw=='))
+        self.assertEqual(redact('phone 13812345678'), 'phone 1**********')
+
     def test_identifiers_and_opaque_tokens(self):
         from hub_logging import redact
         line = 'QR login finished state=verification_required stage=close accepted=3'

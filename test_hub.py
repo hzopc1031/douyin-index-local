@@ -488,7 +488,7 @@ class DiagnosticTests(unittest.TestCase):
                          'ConnectionResetError errno=None: peer closed')
         for key in ('cookie', 'token', 'session', 'sessionid', 'sid_', 'sid', 'uid_tt',
                     'odin_tt', 'ttwid', 'mstoken', 'a_bogus', 'verifyfp', 's_v_web_id',
-                    'csrf', 'passport', 'passwd', 'password', 'secret', 'auth', 'key'):
+                    'csrf', 'passport', 'passwd', 'password', 'secret', 'auth', 'api_key'):
             for template in ('prefix_{}=sensitive', '{}: sensitive', '"{}": "sensitive"'):
                 with self.subTest(key=key, template=template):
                     self.assertNotIn('sensitive', redact(template.format(key.upper())))
@@ -496,6 +496,7 @@ class DiagnosticTests(unittest.TestCase):
                          'Cookie: ***\npeer closed')
         self.assertEqual(redact('errno=2, status: failed; peer closed'),
                          'errno=2, status: failed; peer closed')
+        self.assertEqual(redact('key=all'), 'key=all')
         self.assertEqual(redact('A' * 24), '***')
 
     def test_summary_redacts_before_truncation(self):
