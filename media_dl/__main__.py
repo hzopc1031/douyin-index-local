@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from . import douyin, xiaohongshu
+from . import asr as transcription, douyin, xiaohongshu
+from .safety import safe_log
 
 INTERVAL = 3
 
@@ -66,6 +67,16 @@ def process(url, out, asr=False, model='base'):
         play_url = info.pop('play_url')
         meta.update(info)
         meta['video_file'] = download(play_url, out, item_id)
+        if asr:
+            try:
+                subtitle = out / (item_id + '.srt')
+                transcription.transcribe(out / meta['video_file'], subtitle, model)
+                meta['subtitle_file'] = subtitle.name
+                meta['subtitle_source'] = 'asr'
+            except ImportError:
+                meta['error'] = '转写失败：未安装 faster-whisper'
+            except Exception:
+                meta['error'] = '转写失败'
     except Exception as exc:
         if platform == 'xiaohongshu' and str(exc) == '需要 Cookie/登录（设置环境变量 XHS_COOKIE 或 XHS_COOKIE_FILE）':
             meta['error'] = str(exc)
@@ -100,7 +111,7 @@ def main():
             time.sleep(INTERVAL)
         result = process(url, out, args.asr, args.asr_model)
         failed |= bool(result['error'])
-        print(f"{result['id']}: {'失败' if result['error'] else '完成'}")
+        print(safe_log(f"{result['id']}: {'失败' if result['error'] else '完成'}"))
     return int(failed)
 
 
