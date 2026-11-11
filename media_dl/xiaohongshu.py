@@ -615,10 +615,15 @@ def parse_state(state, item_id):
     duration = video.get('duration')
     if isinstance(duration, (int, float)) and duration > 1000:
         duration /= 1000
+    play_url = stream.get('masterUrl') or stream.get('master_url')
+    if play_url.startswith('http://'):
+        play_url = 'https://' + play_url[7:]
+    elif play_url.startswith('//'):
+        play_url = 'https:' + play_url
     return {'title': note.get('title') or note.get('desc', '').split('\n')[0][:80],
             'author': note.get('user', {}).get('nickname'), 'duration_seconds': duration,
             'width': stream.get('width'), 'height': stream.get('height'),
-            'play_url': stream.get('masterUrl') or stream.get('master_url')}
+            'play_url': play_url}
 
 
 def fetch(url, out, proxy=None):
@@ -638,12 +643,18 @@ def fetch(url, out, proxy=None):
                 raise ValueError(LOGIN_REQUIRED)
             item_id = resolve_id(page.url)
             try:
-                state = json.loads(page.evaluate('() => JSON.stringify(window.__INITIAL_STATE__)'))
-                state['note']['noteDetailMap'][item_id]['note']
+                note = page.evaluate('''id => {
+                    const note = window.__INITIAL_STATE__.note.noteDetailMap[id].note;
+                    const video = note.video || {};
+                    const streams = video.media?.stream || {};
+                    return {title: note.title, desc: note.desc || '', user: {nickname: note.user?.nickname},
+                        video: {duration: video.duration, media: {stream: Object.fromEntries(
+                            Object.entries(streams).map(([key, entries]) => [key, entries.map(
+                                ({masterUrl, master_url, width, height}) => ({masterUrl, master_url, width, height}))]))}}};
+                }''', item_id)
+                info = parse_state({'note': {'noteDetailMap': {item_id: {'note': note}}}}, item_id)
             except Exception:
                 info = parse_page(page.content(), item_id)
-            else:
-                info = parse_state(state, item_id)
             item_id = item_id[:100]
             play_url = info.pop('play_url')
             if urlparse(play_url).scheme != 'https':

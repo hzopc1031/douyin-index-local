@@ -108,6 +108,41 @@ class XhsTests(unittest.TestCase):
         self.assertEqual((item['title'], item['author'], item['duration_seconds'], item['play_url']),
                          ('测试标题', '测试作者', 12, 'https://example.com/video.mp4'))
 
+    def test_play_url_normalization_and_fetch_fallback(self):
+        fixture = Path('media_dl/tests/xhs.html').read_text()
+        for source in ('http://example.com/video.mp4', '//example.com/video.mp4'):
+            with self.subTest(source=source):
+                page_html = fixture.replace('https://example.com/video.mp4', source)
+                self.assertEqual(xhs.parse_page(page_html, 'abc123')['play_url'], 'https://example.com/video.mp4')
+
+        for fallback, source in ((False, 'http://example.com/video.mp4'),
+                                 (True, '//example.com/video.mp4'),
+                                 (False, 'ftp://example.com/video.mp4')):
+            with self.subTest(fallback=fallback, source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                page_html = fixture.replace('https://example.com/video.mp4', source)
+                state = json.loads(page_html.split(' = ', 1)[1].split(';</script>', 1)[0])
+                page = MagicMock(url='https://www.xiaohongshu.com/explore/abc123')
+                page.evaluate.return_value = state['note']['noteDetailMap']['abc123']['note']
+                if fallback:
+                    page.evaluate.side_effect = ValueError('synthetic failure')
+                page.content.return_value = page_html
+                with patch.object(xhs, 'profile_path', return_value=root), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'has_session', return_value=True), patch.object(xhs, 'visible', return_value=None):
+                    context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                    context.pages = [page]
+                    context.request.get.return_value.body.return_value = b'0000ftyp' + b'0' * 1024
+                    context.request.get.return_value.headers = {'content-type': 'video/mp4'}
+                    if source.startswith('ftp:'):
+                        with self.assertRaisesRegex(ValueError, '^播放地址无效$'):
+                            xhs.fetch(page.url, root)
+                        context.request.get.assert_not_called()
+                    else:
+                        _, info, _ = xhs.fetch(page.url, root)
+                        self.assertNotIn('play_url', info)
+                        self.assertEqual(context.request.get.call_args.args[0], 'https://example.com/video.mp4')
+                    self.assertEqual(page.content.called, fallback)
+                    self.assertNotIn('JSON.stringify', page.evaluate.call_args.args[0])
+
     def test_initial_state_literals_and_no_video(self):
         page = Path('media_dl/tests/xhs.html').read_text().replace(
             '"title":"测试标题"', '"map":new Map([]),"set":new Set([]),"title":"测试标题"')
@@ -174,7 +209,7 @@ class XhsTests(unittest.TestCase):
             page = MagicMock(url='https://www.xiaohongshu.com/explore/abc123')
             context.pages = [page]
             fixture = Path('media_dl/tests/xhs.html').read_text()
-            page.evaluate.return_value = fixture.split(' = ', 1)[1].split(';</script>', 1)[0]
+            page.evaluate.return_value = json.loads(fixture.split(' = ', 1)[1].split(';</script>', 1)[0])['note']['noteDetailMap']['abc123']['note']
             response = context.request.get.return_value
             response.ok = True
             response.headers = {'content-type': 'video/mp4'}
@@ -183,10 +218,12 @@ class XhsTests(unittest.TestCase):
             self.assertIsNone(result['error'])
             self.assertEqual(result['title'], '测试标题')
             context.request.get.reset_mock()
-            page.evaluate.return_value = json.dumps({'note': {'noteDetailMap': {'abc123': {'note': {'title': '图文'}}}}})
+            page.content.assert_not_called()
+            page.evaluate.return_value = {'title': '图文'}
+            page.content.return_value = '<script>window.__INITIAL_STATE__ = ' + json.dumps({'note': {'noteDetailMap': {'abc123': {'note': {'title': '图文'}}}}}) + ';</script>'
             result = process('https://xhslink.com/a', Path(directory))
             self.assertEqual(result['error'], xhs.NO_VIDEO)
-            page.content.assert_not_called()
+            page.content.assert_called_once()
             context.request.get.assert_not_called()
             self.assertEqual(context.close.call_count, 2)
 
