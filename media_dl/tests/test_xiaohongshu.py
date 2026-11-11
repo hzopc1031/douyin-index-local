@@ -420,9 +420,9 @@ class XhsTests(unittest.TestCase):
                 page.url = 'https://example.com/explore'
                 page.screenshot.return_value = b'page'
                 statuses = []
-                times = iter([0, 1, 2, 3, 4, 5, 6, 105, 106, 901, 902])
+                times = iter([0, 1, 2, 3, 4, 5, 6, 105, 106, 1801, 1802])
                 def now():
-                    return next(times, 902)
+                    return next(times, 1802)
                 def navigate(*args, **kwargs):
                     callback = page.on.call_args.args[1]
                     response = MagicMock(url='https://example.com/login/qrcode/create')
@@ -519,7 +519,8 @@ class XhsTests(unittest.TestCase):
                 browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value.pages = [page]
                 self.assertEqual(xhs.login(), 1)
                 refresh.assert_not_called()
-                self.assertGreaterEqual(clock[0], 900)
+                self.assertEqual(clock[0], 1800)
+                self.assertEqual((root / 'xhs-login.status').read_text().strip(), 'expired')
 
     def test_follow_page_poll_and_confirm_without_leaking(self):
         with tempfile.TemporaryDirectory() as directory:

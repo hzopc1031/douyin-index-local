@@ -383,7 +383,7 @@ def login_display():
 
 
 def login():
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + 1800
     try:
         RUN_DIR.mkdir(parents=True, exist_ok=True)
         path = RUN_DIR / 'xhs-qr.png'
