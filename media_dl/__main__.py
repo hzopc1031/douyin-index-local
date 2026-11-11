@@ -4,10 +4,11 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from . import asr as transcription, douyin, xiaohongshu
@@ -50,23 +51,24 @@ def download(url, out, item_id, referer=douyin.REFERER):
 def process(url, out, asr=False, model='base'):
     platform = 'xiaohongshu' if xiaohongshu.is_xhs(url) else 'douyin'
     item_id = hashlib.sha256(url.encode()).hexdigest()[:16]
-    meta = dict(id=item_id, platform=platform, url=url, title=None, author=None,
+    stored_url = urlunsplit(urlsplit(url)._replace(query='', fragment='')) if platform == 'xiaohongshu' else url
+    meta = dict(id=item_id, platform=platform, url=stored_url, title=None, author=None,
                 duration_seconds=None, width=None, height=None,
                 fetched_at=datetime.now(timezone.utc).isoformat(), video_file=None,
                 subtitle_file=None, subtitle_source='none', error=None)
     try:
         if platform == 'xiaohongshu':
-            cookie = xiaohongshu.cookie()
-            if not cookie:
-                raise ValueError('需要 Cookie/登录（设置环境变量 XHS_COOKIE 或 XHS_COOKIE_FILE）')
-            item_id = xiaohongshu.resolve_id(url)
+            item_id, info, video_file = xiaohongshu.fetch(url, out)
+            meta['id'] = item_id
+            meta.update(info)
+            meta['video_file'] = video_file
         else:
             item_id = douyin.resolve_id(url)
-        meta['id'] = item_id = re.sub(r'[^a-zA-Z0-9_-]', '_', item_id)[:100]
-        info = xiaohongshu.fetch(item_id, cookie) if platform == 'xiaohongshu' else douyin.fetch(item_id)
-        play_url = info.pop('play_url')
-        meta.update(info)
-        meta['video_file'] = download(play_url, out, item_id, 'https://www.xiaohongshu.com/' if platform == 'xiaohongshu' else douyin.REFERER)
+            meta['id'] = item_id = re.sub(r'[^a-zA-Z0-9_-]', '_', item_id)[:100]
+            info = douyin.fetch(item_id)
+            play_url = info.pop('play_url')
+            meta.update(info)
+            meta['video_file'] = download(play_url, out, item_id)
         if asr:
             try:
                 subtitle = out / (item_id + '.srt')
@@ -78,7 +80,7 @@ def process(url, out, asr=False, model='base'):
             except Exception:
                 meta['error'] = '转写失败'
     except Exception as exc:
-        if platform == 'xiaohongshu' and str(exc) == '需要 Cookie/登录（设置环境变量 XHS_COOKIE 或 XHS_COOKIE_FILE）':
+        if platform == 'xiaohongshu' and str(exc) == xiaohongshu.LOGIN_REQUIRED:
             meta['error'] = str(exc)
         else:
             meta['error'] = '链接解析或下载失败'
@@ -87,6 +89,11 @@ def process(url, out, asr=False, model='base'):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'login':
+        parser = argparse.ArgumentParser(description='登录平台')
+        parser.add_argument('platform', choices=('xhs',))
+        parser.parse_args(sys.argv[2:])
+        return xiaohongshu.login()
     parser = argparse.ArgumentParser(description='批量下载视频')
     parser.add_argument('urls', nargs='*')
     parser.add_argument('--input')
