@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import threading
 import time
 from pathlib import Path
@@ -77,10 +76,11 @@ GUARD_JS = """(function(){
   }
   const rawFetch = window.fetch;
   window.fetch = function(input, init){
-    const allowed = consume(typeof input === 'string' ? input : input && input.url);
+    const allowed = consume(typeof input === 'string' ? input : input && (input.url || input.href));
     if (allowed === false) return Promise.reject(new TypeError('blocked'));
     const promise = rawFetch.apply(this, arguments);
-    if (allowed) window.__dycSent = true;
+    const signal = (init && init.signal) || (input && input.signal);
+    if (allowed && !(signal && signal.aborted)) window.__dycSent = true;
     if (allowed) promise.then(r => {
       if (r.redirected || r.type === 'opaqueredirect') window.__dycResult = JSON.stringify({kind:'opaqueredirect', status:r.status});
       else r.clone().text().then(text => { window.__dycResult = JSON.stringify({status:r.status, text}); },
@@ -192,10 +192,10 @@ class QtCommentTransport:
                     self.calls += 1
                 result = _coerce_fetch(state["result"]) if state.get("result") else {}
                 page = parse_probe_js(self._evaluate(PROBE_JS))
-                on_video = page and page.get("path") == "/video/" + video_id
-                if on_video and page.get("verification"):
+                on_site = page and page.get("https") and page.get("host") in site.HOSTS
+                if on_site and page.get("verification"):
                     result["kind"] = "risk"
-                elif on_video and page.get("ready") == "complete" and page.get("login") and not page.get("account"):
+                elif on_site and page.get("ready") == "complete" and page.get("login") and not page.get("account"):
                     result["kind"] = "login"
                 if result:
                     result["request_sent"] = sent
@@ -339,8 +339,8 @@ class CollectJob:
             try:
                 body = json.loads(result.get("text", ""))
                 if isinstance(body, dict):
-                    keys = [key for key in list(body)[:100] if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", key)
-                            and not any(secret in key.lower() for secret in ("cookie", "token", "signature", "bogus"))]
+                    fields = {*site.FIELDS.values(), *site.RISK_FIELDS, *site.LOGIN_FIELDS, "status_msg", "message"}
+                    keys = [key for key in body if key in fields]
             except (ValueError, TypeError):
                 pass
             self.metadata = {"stop_reason": None, "http_status": result.get("status") if type(result.get("status")) is int else None,
@@ -533,6 +533,9 @@ class CommentsHub:
                         if not more:
                             break
                 except Stop as error:
+                    if job.metadata is None:
+                        job.metadata = {"http_status": None, "response_fields": [], "request_sent": False}
+                    job.metadata["stop_reason"] = error.reason
                     reason = pause_reason(error.reason)
                     if error.reason in PAUSE_STOPS:
                         self._halt(True, reason)

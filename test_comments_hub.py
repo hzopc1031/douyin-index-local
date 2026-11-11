@@ -509,7 +509,7 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
         class Transport:
             no_retry = True
             async def fetch(self, *_):
-                return {'status': 429, 'text': '{"status_code":1,"cookie":"secret","message":"signature-value"}', 'request_sent': True}
+                return {'status': 429, 'text': '{"status_code":1,"cookie":"secret","message":"signature-value","secret_body_as_key":1}', 'request_sent': True}
         video = Video('100', 'https://www.douyin.com/video/100')
         job = CollectJob(video, Transport())
         with self.assertRaises(Stop):
@@ -518,3 +518,20 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
                                        'response_fields': ['status_code', 'message'], 'request_sent': True})
         self.assertNotIn('secret', json.dumps(job.metadata))
         self.assertNotIn('signature-value', json.dumps(job.metadata))
+        self.assertNotIn('secret_body_as_key', json.dumps(job.metadata))
+
+    async def test_login_or_verification_after_navigation_stops_without_request(self):
+        for signal, reason in (('login', 'login_expired'), ('verification', 'verification_widget')):
+            with self.subTest(signal=signal), tempfile.TemporaryDirectory() as folder:
+                window = FakeWindow(page={'https': True, 'host': 'www.douyin.com', 'path': '/login',
+                                          'ready': 'complete', 'account': False, signal: True})
+                budget = Budget(DailyCounter(Path(folder)))
+                transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=window.evaluate_js)
+                transport.video_url = 'https://www.douyin.com/video/100'
+                job = CollectJob(Video('100', transport.video_url), transport)
+                from dyc.errors import Stop
+                with self.assertRaises(Stop) as error:
+                    await job.run_slice(1)
+                self.assertEqual(error.exception.reason, reason)
+                self.assertFalse(job.metadata['request_sent'])
+                self.assertEqual((budget.used, budget.counter.usage(), job.video.pages), (0, 0, 0))
