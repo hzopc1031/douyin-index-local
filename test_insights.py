@@ -207,6 +207,8 @@ class InsightApiTests(_ApiTests):
             first = await self.client.post('/api/v1/insights/queries', json=query, headers=headers)
             self.assertEqual(first.status, 202)
             job = (await first.json())['job']
+            self.assertEqual((job['query']['start_date'], job['query']['end_date']),
+                             ('2026-10-14', '2026-10-18'))
             replay = await self.client.post('/api/v1/insights/queries',
                 json=dict(reversed(list(query.items()))), headers=headers)
             self.assertEqual((await replay.json())['job'], job)
@@ -299,11 +301,12 @@ class InsightApiTests(_ApiTests):
                     response = await self.client.get('/api/v1/insights', params={
                         'keyword': '酵素', 'kind': kind, 'start_date': actual['start_date'], 'end_date': actual['end_date']}, headers=self.bearer)
                     self.assertEqual((await response.json())['status'], 'available')
-            for end in ('2026-10-24', '2026-10-25'):
+            expected = {'2026-10-24': '2026-10-18', '2026-10-25': '2026-10-25'}
+            for end, used in expected.items():
                 response = await self.client.post('/api/v1/insights/queries',
                     json={**query, 'kind': 'related', 'end_date': end},
                     headers={**self.bearer, 'Idempotency-Key': 'early-'+end})
-                self.assertEqual((await response.json())['job']['query']['end_date'], end)
+                self.assertEqual((await response.json())['job']['query']['end_date'], used)
             response = await self.client.get('/api/v1/insights', params={
                 'keyword': '酵素', 'kind': 'related', 'start_date': query['start_date'], 'end_date': query['end_date']}, headers=self.bearer)
             self.assertEqual((await response.json())['query']['end_date'], '2026-10-27')

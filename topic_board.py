@@ -28,17 +28,41 @@ def topic_enabled():
 
 
 def category_name_ok(name):
-    return (isinstance(name, str) and name == name.strip() and 1 <= len(name) <= 40
+    return (isinstance(name, str) and name == name.strip() and 1 <= len(name) <= 80
             and not any(ord(char) < 32 or ord(char) == 127 for char in name))
+
+
+def category_entries(saved):
+    """Labels for the flat selector: parent / leaf, plus an id suffix if still tied."""
+    items = []
+    if isinstance(saved, list):
+        for item in saved:
+            if isinstance(item, dict) and category_name_ok(item.get('name') or '') and item.get('id'):
+                items.append(item)
+    by_id = {str(item['id']): item for item in items}
+    entries = []
+    for item in items:
+        name = item['name']
+        parent = by_id.get(str(item.get('parent_id') or ''))
+        parent_name = (parent or {}).get('name') or item.get('parent_name')
+        label = name
+        if category_name_ok(parent_name or '') and ' / ' not in name:
+            label = parent_name + ' / ' + name
+        entries.append({'tag': item, 'label': label})
+    counts = {}
+    for entry in entries:
+        counts[entry['label']] = counts.get(entry['label'], 0) + 1
+    for entry in entries:
+        if counts[entry['label']] > 1:
+            entry['label'] = entry['label'] + ' · ' + str(entry['tag']['id'])
+    return [entry for entry in entries if category_name_ok(entry['label'])]
 
 
 def category_names(saved):
     names = ['全部']
-    if isinstance(saved, list):
-        for item in saved:
-            name = item.get('name') if isinstance(item, dict) else None
-            if category_name_ok(name) and name not in names:
-                names.append(name)
+    for entry in category_entries(saved):
+        if entry['label'] not in names:
+            names.append(entry['label'])
     return names
 
 
@@ -127,11 +151,46 @@ def tag_for(store, category):
     """Return one stored parent or leaf. Lookup failure is a client error."""
     if category == '全部':
         return None
-    saved = store.get('topic_categories') or []
-    matches = [item for item in saved if isinstance(item, dict) and item.get('name') == category and item.get('id')]
-    if len(matches) != 1:
-        raise HubError('invalid_parameters', '垂类不在已保存的分类中。')
-    return matches[0]
+    entries = category_entries(store.get('topic_categories') or [])
+    label_matches = [entry['tag'] for entry in entries if entry['label'] == category]
+    if len(label_matches) == 1:
+        return label_matches[0]
+    name_matches = [entry['tag'] for entry in entries if entry['tag'].get('name') == category]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    raise HubError('invalid_parameters', '垂类不在已保存的分类中。')
+
+
+def topic_category_aliases(store, category):
+    names = []
+    def add(name):
+        if name and name not in names:
+            names.append(name)
+    add(category)
+    for entry in category_entries(store.get('topic_categories') or []):
+        if entry['label'] == category or entry['tag'].get('name') == category:
+            add(entry['label'])
+            add(entry['tag'].get('name'))
+            raw = entry['tag'].get('name') or ''
+            if ' / ' in raw:
+                add(raw.split(' / ', 1)[1].split(' · ', 1)[0])
+    return names
+
+
+def latest_topic_snapshot(store, *, rank, window, category):
+    """Read the newest board for a label or a previously stored short name."""
+    best = None
+    for name in topic_category_aliases(store, category):
+        snapshot = apply_empty_mark(store, store.latest_topics(rank=rank, window=window, category=name))
+        if not snapshot.get('fetched_at') and not snapshot.get('items'):
+            continue
+        if best is None or (snapshot.get('fetched_at') or '') > (best.get('fetched_at') or ''):
+            best = snapshot
+    if best is None:
+        best = apply_empty_mark(store, store.latest_topics(rank=rank, window=window, category=category))
+    marked = dict(best)
+    marked['category'] = category
+    return marked
 
 
 def tag_id_for(store, category):

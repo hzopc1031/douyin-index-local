@@ -52,11 +52,13 @@ class ClampTests(unittest.TestCase):
     def test_trend_based_limit_preserves_earlier_ranges_and_collector_dates(self):
         q = validate_insight(self.query, latest_related_date='2026-10-25')
         self.assertEqual((q['start_date'], q['end_date']), ('2026-10-21', '2026-10-25'))
-        self.assertNotIn('requested_end_date', q)
+        self.assertEqual(q['requested_end_date'], '2026-10-27')
         self.assertEqual(validate_insight(q), q)
-        for end in ('2026-10-24', '2026-10-25'):
-            early = {**self.query, 'end_date': end}
-            self.assertEqual(validate_insight(early, latest_related_date='2026-10-25')['end_date'], end)
+        early = {**self.query, 'end_date': '2026-10-25'}
+        self.assertEqual(validate_insight(early, latest_related_date='2026-10-25')['end_date'], '2026-10-25')
+        saturday = validate_insight({**self.query, 'end_date': '2026-10-24'}, latest_related_date='2026-10-25')
+        self.assertEqual(saturday['end_date'], '2026-10-18')
+        self.assertEqual(saturday['requested_end_date'], '2026-10-24')
         audience = validate_insight({**self.query, 'kind': 'audience'}, latest_related_date='2026-10-25')
         self.assertEqual(audience['end_date'], '2026-10-27')
         with self.assertRaises(HubError):
@@ -64,9 +66,41 @@ class ClampTests(unittest.TestCase):
         historical = validate_insight(self.query, historical=True, latest_related_date='2026-10-25')
         self.assertEqual(historical['end_date'], '2026-10-27')
 
+    def test_non_sunday_end_aligns_even_inside_the_cap(self):
+        class Nov11(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 11, 10, tzinfo=tz)
+        query = {**self.query, 'start_date': '2026-10-03', 'end_date': '2026-10-30'}
+        with patch('hub_insights.dt.datetime', Nov11), patch('hub_store.dt.datetime', Nov11):
+            friday = validate_insight(query, latest_related_date='2026-10-30')
+            self.assertEqual(friday['end_date'], '2026-10-25')
+            self.assertEqual(friday['requested_end_date'], '2026-10-30')
+            sunday = validate_insight({**query, 'end_date': '2026-11-01'},
+                                      latest_related_date='2026-11-01')
+            self.assertEqual(sunday['end_date'], '2026-11-01')
+            self.assertNotIn('requested_end_date', sunday)
+
+    def test_related_latest_date_is_last_sunday_not_trend_minus_two(self):
+        from hub_web import related_latest_date
+        # FixedDatetime is 2026-10-28, so today-3 is already Sunday 10-25.
+        self.assertEqual(related_latest_date(SimpleNamespace(latest_available_date=lambda: '2026-10-27')),
+                         '2026-10-25')
+        self.assertEqual(related_latest_date(SimpleNamespace(latest_available_date=lambda: '2026-10-30')),
+                         '2026-10-25')
+        class Nov11(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 11, 10, tzinfo=tz)
+        store = SimpleNamespace(latest_available_date=lambda: '2026-11-01')
+        with patch('hub_web.dt.datetime', Nov11):
+            self.assertEqual(related_latest_date(store), '2026-11-01')
+
     def test_environment_and_two_year_boundary(self):
-        for value, end in [('0', '2026-10-27'), ('1', '2026-10-27'),
-                           ('5', '2026-10-23'), ('-1', '2026-10-25'),
+
+
+        for value, end in [('0', '2026-10-25'), ('1', '2026-10-25'),
+                           ('5', '2026-10-18'), ('-1', '2026-10-25'),
                            ('oops', '2026-10-25'), ('1.5', '2026-10-25')]:
             with self.subTest(value=value):
                 os.environ['INDEX_HUB_RELATED_END_LAG_DAYS'] = value
@@ -87,7 +121,7 @@ class ClampTests(unittest.TestCase):
         metadata = result['metadata']
         self.assertEqual(metadata['end_date_clamped'], {
             'requested': '2026-10-27', 'used': '2026-10-25',
-            'reason': '关联词数据通常比趋势晚出，截止日限制为今天前 3 天'})
+            'reason': '关联词接口按周出数，截止日已调整为可查范围内最近的周日'})
         self.assertIn('已从 2026-10-27 调整为 2026-10-25', metadata['note'])
         self.assertEqual(client._post.call_args.args[1]['param']['end_date'], '20261025')
         client.session.cookies.clear.assert_called_once()

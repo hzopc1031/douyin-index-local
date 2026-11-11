@@ -41,7 +41,7 @@ class ParseTests(unittest.TestCase):
         ]}})
         self.assertEqual(tags, [
             {'id': '628', 'name': '科技', 'child_ids': ['62801']},
-            {'id': '62801', 'name': '数码', 'parent_id': '628'},
+            {'id': '62801', 'name': '科技 / 数码', 'parent_id': '628', 'parent_name': '科技'},
         ])
         items, _ = parse_board({'code': 0, 'data': {'billboard_list': [
             {'challenge_id': '9', 'challenge_name': '词'},
@@ -75,6 +75,58 @@ class ParseTests(unittest.TestCase):
         self.assertEqual([(item['name'], item.get('parent_id'), item.get('child_ids')) for item in same_name],
                          [('科技', None, ['11']), ('科技 / 数码', '1', None),
                           ('生活', None, ['21']), ('生活 / 数码', '2', None)])
+
+    def test_same_parent_duplicate_leaves_get_id_suffix(self):
+        tags = parse_tags({'code': 0, 'data': [
+            {'label': '电影', 'value': 604, 'children': [
+                {'label': '电影剧情解说', 'value': 60405},
+                {'label': '电影剧情解说', 'value': 60407},
+                {'label': '纪录电影解说', 'value': 60406},
+            ]},
+        ]})
+        self.assertEqual([(item['name'], item.get('parent_id')) for item in tags],
+                         [('电影', None),
+                          ('电影 / 电影剧情解说 · 60405', '604'),
+                          ('电影 / 电影剧情解说 · 60407', '604'),
+                          ('电影 / 纪录电影解说', '604')])
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        from topic_board import category_names, tag_for, latest_topic_snapshot
+        store = Store(Path(temp.name) / 'hub.sqlite3')
+        self.addCleanup(store.close)
+        store.set('topic_categories', tags)
+        names = category_names(tags)
+        self.assertIn('电影 / 纪录电影解说', names)
+        self.assertIn('电影 / 电影剧情解说 · 60405', names)
+        self.assertIn('电影 / 电影剧情解说 · 60407', names)
+        self.assertNotIn('电影 / 电影剧情解说', names)
+        self.assertEqual(tag_for(store, '电影 / 电影剧情解说 · 60405')['id'], '60405')
+        self.assertEqual(tag_for(store, '电影 / 纪录电影解说')['id'], '60406')
+        # Old short snapshots remain readable under the new label.
+        store.save_topic_snapshot({
+            'complete': True, 'rank': 'total', 'window': '1d', 'category': '纪录电影解说',
+            'source': 'douhot.douyin.com', 'fetched_at': '2026-11-08T09:00:00+08:00',
+            'items': [{'item_key': 'id:1', 'title': '样例', 'position': 1,
+                       'hot_value': 1, 'publish_count': None, 'play_count': None, 'cover': None}],
+        })
+        snapshot = latest_topic_snapshot(store, rank='total', window='1d', category='电影 / 纪录电影解说')
+        self.assertEqual([item['title'] for item in snapshot['items']], ['样例'])
+        self.assertEqual(snapshot['category'], '电影 / 纪录电影解说')
+        # Labels are also derived from already-saved short names plus parent_id.
+        stored = [
+            {'id': '628', 'name': '美食', 'child_ids': ['62804']},
+            {'id': '62804', 'name': '美食教程', 'parent_id': '628'},
+            {'id': '60405', 'name': '电影 / 电影剧情解说', 'parent_id': '604'},
+            {'id': '60407', 'name': '电影 / 电影剧情解说', 'parent_id': '604'},
+            {'id': '604', 'name': '电影', 'child_ids': ['60405', '60407']},
+        ]
+        labels = category_names(stored)
+        self.assertIn('美食 / 美食教程', labels)
+        self.assertIn('电影 / 电影剧情解说 · 60405', labels)
+        self.assertIn('电影 / 电影剧情解说 · 60407', labels)
+        store.set('topic_categories', stored)
+        self.assertEqual(tag_for(store, '美食教程')['id'], '62804')
+        self.assertEqual(tag_for(store, '美食 / 美食教程')['id'], '62804')
 
     def test_non_json_summary_keeps_no_body_text(self):
         from topic_fetch import summarize_response

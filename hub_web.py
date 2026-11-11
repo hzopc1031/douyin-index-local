@@ -18,8 +18,8 @@ from hub_paths import state_dir
 from aiohttp import web
 import hub_bridge
 from group_score import GROUP_NOTE, group_score, validate_group
-from topic_board import (apply_empty_mark, category_names, record_topic_result, snapshot_is_fresh,
-                         tag_for, topic_enabled, topic_view, validate_topic_query)
+from topic_board import (category_names, latest_topic_snapshot, record_topic_result,
+                         snapshot_is_fresh, tag_for, topic_enabled, topic_view, validate_topic_query)
 from topic_fetch import DAILY_LIMIT, MIN_GAP_SECONDS, plan_round, request_gate, round_interval_seconds
 from baidu_hotlist_client import BaiduHotListClient, DEFAULT_TABS, KNOWN_TABS, SOURCE
 from hot_rising import RISING_NOTE, rising_report
@@ -34,18 +34,16 @@ logger = logging.getLogger('index_hub')
 
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
-# shortcut: related 暂无可靠最新日来源，确认官方来源后替换趋势减两天的回退。
-RELATED_TREND_LAG_DAYS = 2
-
-
 def related_latest_date(store):
-    from hub_insights import related_end_lag_days
+    """Latest Sunday on or before min(stored trend day, today − lag). Not an official probe."""
+    from hub_insights import last_sunday_on_or_before, related_end_lag_days
     latest = store.latest_available_date()
     if latest is None:
         return None
     try:
-        return min(dt.date.fromisoformat(latest) - dt.timedelta(days=RELATED_TREND_LAG_DAYS),
-                   dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())).isoformat()
+        cap = min(dt.date.fromisoformat(latest),
+                  dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days()))
+        return last_sunday_on_or_before(cap).isoformat()
     except OverflowError:
         return None
 
@@ -1139,7 +1137,7 @@ def mount(app, hub):
         require(request)
         names = category_names(s.get('topic_categories'))
         category, rank, window = validate_topic_query(request.query, names)
-        snapshot = apply_empty_mark(s, s.latest_topics(rank=rank, window=window, category=category))
+        snapshot = latest_topic_snapshot(s, rank=rank, window=window, category=category)
         return reply(topic_view(snapshot, enabled=topic_enabled(), paused=s.get('topic_paused'),
                                 categories=names))
 
@@ -1158,7 +1156,7 @@ def mount(app, hub):
         if key in hub._topic_inflight:
             return reply({'status': 'in_flight', 'item_count': 0, 'fields': [], 'rank': rank,
                           'category': category, 'live_request': False})
-        stored = apply_empty_mark(s, s.latest_topics(rank=rank, window='1d', category=category))
+        stored = latest_topic_snapshot(s, rank=rank, window='1d', category=category)
         if snapshot_is_fresh(stored, now):
             return reply({'status': 'cached', 'item_count': len(stored['items']), 'fields': [],
                           'rank': rank, 'category': category, 'live_request': False})

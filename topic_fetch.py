@@ -169,20 +169,27 @@ def _walk_tags(rows, tags, seen, parent_id=None, parent_name=None, depth=0):
 
 
 def parse_tags(payload):
-    """Keep parents and leaves. The page filters a parent by sending every child id."""
+    """Keep parents and leaves. The page filters a parent by sending every child id.
+
+    Leaf names are stored as "parent / leaf" so the flat category list stays
+    two-level. Same-parent collisions get a stable id suffix.
+    """
     lists = _candidate_lists(payload)
     tags, seen = [], set()
     for rows in lists:
         _walk_tags(rows, tags, seen)
     if not tags:
         raise TopicFetchError('schema_mismatch', '没有识别到垂类。')
+    for tag in tags:
+        parent_name = tag.get('parent_name')
+        if parent_name and ' / ' not in tag['name']:
+            tag['name'] = parent_name + ' / ' + tag['name']
     counts = {}
     for tag in tags:
         counts[tag['name']] = counts.get(tag['name'], 0) + 1
     for tag in tags:
-        parent_name = tag.pop('parent_name', None)
-        if counts[tag['name']] > 1 and parent_name:
-            tag['name'] = parent_name + ' / ' + tag['name']
+        if counts[tag['name']] > 1:
+            tag['name'] = tag['name'] + ' · ' + tag['id']
     return tags
 
 

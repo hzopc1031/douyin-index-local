@@ -16,6 +16,14 @@ def related_end_lag_days():
         return 3
 
 
+def last_sunday_on_or_before(day):
+    """Official related-word windows end on Sunday; other end dates return business 500."""
+    return day - dt.timedelta(days=(day.weekday() + 1) % 7)
+
+
+RELATED_ALIGN_REASON = '关联词接口按周出数，截止日已调整为可查范围内最近的周日'
+
+
 def validate_insight(body, *, historical=False, latest_related_date=None):
     if type(body) is not dict:
         raise HubError('invalid_query', '请求须为 JSON 对象。')
@@ -33,21 +41,22 @@ def _validate_douyin_insight(body, *, historical=False, latest_related_date=None
     if kind == 'related' and not historical:
         end = dt.date.fromisoformat(query['end_date'])
         start = dt.date.fromisoformat(query['start_date'])
+        original_end, original_start = end, start
+        try:
+            cap = dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())
+        except OverflowError:
+            raise HubError('invalid_dates', '关联词截止日上限超出支持的日期范围。') from None
         if latest_related_date is not None:
             limit = dt.date.fromisoformat(latest_related_date)
             if start > limit:
-                raise HubError('invalid_dates', f'关联词可用截止日为 {limit}，开始日须不晚于该日。')
-            end = min(end, limit)
-            query['end_date'] = end.isoformat()
-        try:
-            max_end = dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days())
-        except OverflowError:
-            raise HubError('invalid_dates', '关联词截止日上限超出支持的日期范围。') from None
-        if end > max_end:
-            requested_end = requested_end or query['end_date']
-            if start > max_end:
-                start = max_end - (end - start)
-            query = validate_query({**query, 'start_date': start.isoformat(), 'end_date': max_end.isoformat()}, historical=historical)
+                raise HubError('invalid_dates', f'关联词可用截止日为 {last_sunday_on_or_before(limit)}，开始日须不晚于该日。')
+            cap = min(cap, limit)
+        used = last_sunday_on_or_before(min(end, cap))
+        if used != original_end or start > used:
+            requested_end = requested_end or original_end.isoformat()
+            if start > used:
+                start = used - (original_end - original_start)
+            query = validate_query({**query, 'start_date': start.isoformat(), 'end_date': used.isoformat()}, historical=historical)
         if requested_end is not None:
             try:
                 requested = dt.date.fromisoformat(requested_end)
@@ -135,7 +144,7 @@ def collect(api, body):
             clamp = {}
             note = '扩展接口试验接入；未完成与官方页面的逐项人工核对。'
             if 'requested_end_date' in query:
-                reason = f'关联词数据通常比趋势晚出，截止日限制为今天前 {related_end_lag_days()} 天'
+                reason = RELATED_ALIGN_REASON
                 clamp['end_date_clamped'] = {'requested': query['requested_end_date'],
                                              'used': query['end_date'], 'reason': reason}
                 note += f"{reason}，已从 {query['requested_end_date']} 调整为 {query['end_date']}。"
