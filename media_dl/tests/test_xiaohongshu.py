@@ -216,6 +216,40 @@ class XhsTests(unittest.TestCase):
                 self.assertEqual(statuses[-1], 'expired')
                 context.close.assert_called_once()
 
+    def test_login_retries_missing_container_and_handles_later_create(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock()
+            page.screenshot.return_value = b'page'
+            button = MagicMock()
+            container = MagicMock()
+            statuses = []
+            def click():
+                response = MagicMock(url='https://example.com/login/qrcode/create')
+                response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
+                page.on.call_args.args[1](response)
+            button.click.side_effect = click
+            page.goto.side_effect = lambda *args, **kwargs: self.assertTrue(page.on.called)
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', side_effect=[None, container]), patch.object(xhs, 'login_button', return_value=button), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
+                context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                context.pages = [page]
+                self.assertEqual(xhs.login(), 0)
+                save.assert_called_once()
+                self.assertEqual(statuses, ['need_scan', 'logged_in'])
+                self.assertIn('未找到登录容器，将重试', (root / 'xhs-login.log').read_text())
+
+    def test_login_exception_logs_redacted_reason(self):
+        for detail in ('navigation failed https://example.com/?qr_id=secret', 'failed Cookie: secret', 'failed qr_id=secret', 'failed url=secret'):
+            with self.subTest(detail=detail), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright', side_effect=RuntimeError(detail)):
+                    self.assertEqual(xhs.login(), 1)
+                log = (root / 'xhs-login.log').read_text()
+                self.assertIn('RuntimeError: ', log)
+                self.assertIn('failed', log)
+                for sensitive in ('secret', 'cookie', 'qr_id', 'https://', 'url'):
+                    self.assertNotIn(sensitive, log.lower())
+
 
 if __name__ == '__main__':
     unittest.main()

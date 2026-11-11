@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import re
 from urllib.parse import urlparse, parse_qsl
+from .safety import safe_log
 
 
 def is_xhs(url):
@@ -58,6 +59,10 @@ def logged_in(page, context):
 
 def login_container(page):
     return visible(page, '.login-container, [class*="login-modal"], [role="dialog"]:has-text("登录"), dialog:has-text("登录")')
+
+
+def login_button(page):
+    return visible(page, 'header button:text-is("登录"), header a:text-is("登录"), header button:text-is("Log in"), header a:text-is("Log in"), header button:text-is("Log In"), header a:text-is("Log In")')
 
 
 def qr(container):
@@ -219,7 +224,7 @@ def refresh_qr(page, container):
         page.wait_for_timeout(1000)
         container = login_container(page)
         if not container:
-            button = visible(page, 'text=登录')
+            button = login_button(page)
             if button:
                 button.click()
             container = login_container(page)
@@ -237,7 +242,7 @@ def login():
         path.unlink(missing_ok=True)
         (RUN_DIR / 'xhs-qr.meta').unlink(missing_ok=True)
         save_private(RUN_DIR / 'xhs-login.log', b'')
-        set_status('error')
+        (RUN_DIR / 'xhs-login.status').unlink(missing_ok=True)
         profile = profile_path()
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         profile.chmod(0o700)
@@ -249,45 +254,25 @@ def login():
                 page.on('response', lambda response: response_data(response, events))
                 page.goto('https://www.xiaohongshu.com/login', wait_until='domcontentloaded')
                 page.wait_for_timeout(2000)
-                if logged_in(page, context):
-                    set_status('logged_in')
-                    return 0
-                container = login_container(page)
-                if not container:
-                    button = visible(page, 'text=登录')
-                    if button:
-                        button.click()
-                        page.wait_for_timeout(1000)
-                        container = login_container(page)
-                if not container:
-                    page.goto('https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
-                    page.wait_for_timeout(2000)
-                    if logged_in(page, context):
-                        set_status('logged_in')
-                        return 0
-                    button = visible(page, 'text=登录')
-                    if button:
-                        button.click()
-                    page.wait_for_timeout(1000)
-                    container = login_container(page)
-                if container:
-                    button = visible(container, 'text=扫码登录')
-                    if button:
-                        button.click()
                 save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
-                if not container:
-                    set_status('error')
-                    return 1
                 issued = None
                 refresh_at = None
                 fallback_at = time.monotonic() + 5
                 create_seen = False
                 state = None
+                retry_at = 0
+                had_container = False
                 while time.monotonic() < deadline:
                     if logged_in(page, context):
                         set_status('logged_in')
                         return 0
                     container = login_container(page)
+                    if container and not had_container:
+                        button = visible(container, 'text=扫码登录')
+                        if button:
+                            button.click()
+                        save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
+                    had_container = bool(container)
                     while events:
                         kind, data = events.pop(0)
                         if kind == 'create':
@@ -336,12 +321,25 @@ def login():
                                 state = 'need_scan'
                                 save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                                 break
+                    if not container and time.monotonic() >= retry_at:
+                        log_event('未找到登录容器，将重试')
+                        button = login_button(page)
+                        if button:
+                            button.click()
+                            page.wait_for_timeout(3000)
+                        else:
+                            page.goto('https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
+                            page.wait_for_timeout(3000)
+                        retry_at = time.monotonic() + 3
                     page.wait_for_timeout(1000)
                 set_status('expired')
                 return 1
             finally:
                 context.close()
-    except Exception:
+    except Exception as exc:
+        message = safe_log(str(exc)).replace('\n', ' ').replace('\r', ' ')
+        message = re.sub(r'(?i)(?:https?://|\b(?:cookie|url|qr_?id)\b).*', '[redacted]', message)
+        log_event(f'登录失败: {type(exc).__name__}: {message[:200]}')
         set_status('error')
         return 1
 
