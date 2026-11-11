@@ -18,6 +18,9 @@ from login_driver import CREATOR_PAGE
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "results"
+_DYC_PATH = ROOT / "tools" / "douyin_comments"
+if str(_DYC_PATH) not in sys.path:
+    sys.path.insert(0, str(_DYC_PATH))
 PAGE = CREATOR_PAGE
 TZ = ZoneInfo("Asia/Shanghai")
 
@@ -102,6 +105,9 @@ class Api:
         self._folder = None
         self._attempted = False
         self._store = ResultStore(OUTPUT)
+        self._lock_owner = None
+        self._comments = None
+        self._dyc_window = None
 
     def _topic_window(self):
         window = getattr(self, '_douhot', None)
@@ -122,7 +128,7 @@ class Api:
         import base64
         from login_driver import QtDispatcher
         from topic_qr import extract_topic_qr
-        if not self._lock.acquire(blocking=False):
+        if not self._acquire_lock('topics'):
             return {'state': 'browser_unavailable', 'qr_available': False}
         try:
             window = self._topic_window()
@@ -164,7 +170,7 @@ class Api:
         except Exception:
             return {'state': 'browser_unavailable', 'qr_available': False}
         finally:
-            self._lock.release()
+            self._release_lock()
 
     def topic_fetch(self, payload):
         """One douhot request inside the page. Never returns cookies."""
@@ -172,8 +178,10 @@ class Api:
                                  parse_tags, run_page_request, write_topic_log)
         if not isinstance(payload, dict) or payload.get('action') not in ('tags', 'board'):
             return {'ok': False, 'code': 'invalid_parameters', 'requested': False, 'item_count': 0, 'fields': []}
-        if not self._lock.acquire(blocking=False):
-            return {'ok': False, 'code': 'busy', 'requested': False, 'item_count': 0, 'fields': []}
+        if not self._acquire_lock('topics'):
+            busy = self._busy()
+            busy.update(requested=False, item_count=0, fields=[])
+            return busy
         requested = False
         window = None
         try:
@@ -217,7 +225,91 @@ class Api:
             return {'ok': False, 'code': 'browser_unavailable', 'requested': requested,
                     'item_count': 0, 'fields': []}
         finally:
-            self._lock.release()
+            self._release_lock()
+
+    def _busy(self):
+        from dyc.hub_comments import lock_busy
+        return lock_busy(self._lock_owner)
+
+    def _acquire_lock(self, owner):
+        if not self._lock.acquire(blocking=False):
+            return False
+        self._lock_owner = owner
+        return True
+
+    def _release_lock(self):
+        self._lock_owner = None
+        self._lock.release()
+
+    def _comments_window(self):
+        window = getattr(self, '_dyc_window', None)
+        if window is not None:
+            return window
+        import webview
+        from dyc.hub_comments import LOGIN_URL, GUARD_JS
+        window = webview.create_window('抖音评论', LOGIN_URL,
+                                       width=1000, height=800, x=60, y=60, text_select=True)
+        self._dyc_window = window
+
+        def closed():
+            if getattr(self, '_dyc_window', None) is window:
+                self._dyc_window = None
+        window.events.closed += closed
+        try:
+            self._install_comments_guard(window, GUARD_JS)
+        except Exception:
+            pass
+        return window
+
+    def _install_comments_guard(self, window, source):
+        """Inject the request guard at document start when the Qt view exists."""
+        view = getattr(getattr(window, 'native', None), 'webview', None)
+        if view is None:
+            window.evaluate_js(source)
+            return
+        from login_driver import QtDispatcher
+        from PySide6.QtWebEngineCore import QWebEngineScript
+
+        def install():
+            script = QWebEngineScript()
+            script.setName('dyc-comments-guard')
+            script.setSourceCode(source)
+            script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+            script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            script.setRunsOnSubFrames(True)
+            view.page().scripts().insert(script)
+        QtDispatcher().call(install)
+
+    def _comments_hub(self):
+        from dyc.hub_comments import CommentsHub
+        if self._comments is None:
+            root = Path(os.environ.get('INDEX_HUB_STATE_DIR', str(ROOT / '.cloud-state')))
+            self._comments = CommentsHub(
+                window_factory=self._comments_window,
+                state_dir=root / 'comments',
+                acquire=self._acquire_lock,
+                release=self._release_lock,
+                owner=lambda: self._lock_owner,
+            )
+        return self._comments
+
+    def comments_status(self, payload=None):
+        return self._comments_hub().status()
+
+    def comments_probe(self, payload=None):
+        return self._comments_hub().probe()
+
+    def comments_start(self, payload=None):
+        try:
+            return self._comments_hub().start(payload or {})
+        except ValueError:
+            return {'ok': False, 'code': 'invalid_parameters', 'message': '请提供视频链接列表。'}
+
+    def comments_pause(self, payload=None):
+        return self._comments_hub().pause()
+
+    def comments_resume(self, payload=None):
+        return self._comments_hub().resume()
 
     def show_official_page(self):
         self._page.show()
@@ -342,8 +434,8 @@ class Api:
                 "folder": str(folder), "cache_hit": cache_hit, "comparison": comparison}
 
     def fetch_batch(self, keywords_text, end_date, cloud=False, start_date=None):
-        if not self._lock.acquire(blocking=False):
-            return {"ok": False, "code": "busy", "message": "取数或核对正在进行，请等待。"}
+        if not self._acquire_lock('index'):
+            return self._busy()
         try:
             if not isinstance(keywords_text, str):
                 raise ValueError("请每行输入一个关键词。")
@@ -404,11 +496,11 @@ class Api:
             return safe
         finally:
             self._fetch_cookie_fingerprint = None
-            self._lock.release()
+            self._release_lock()
 
     def compare(self, entries):
-        if not self._lock.acquire(blocking=False):
-            return {"ok": False, "code": "busy", "message": "取数或核对正在进行，请等待。"}
+        if not self._acquire_lock('index'):
+            return self._busy()
         try:
             if self._result is None or self._folder is None:
                 return {"ok": False, "message": "请先获取或加载一组数据。"}
@@ -421,7 +513,7 @@ class Api:
         except Exception as exc:
             return {"ok": False, "code": type(exc).__name__, "message": "核对记录未能保存，请检查本地文件状态。"}
         finally:
-            self._lock.release()
+            self._release_lock()
 
 
 _profile_lock = None
