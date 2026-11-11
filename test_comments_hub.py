@@ -302,7 +302,7 @@ class CommentsHubTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertFalse(self.hub.status()["waiting_for_index"])
         self.assertFalse(self.lock.locked())
-        self.assertTrue(any("__dycAbort &&" in script for script in scripts))
+        self.assertTrue(any("window.__dycArm = false" in script for script in scripts))
 
     def test_invalid_and_short_urls_are_rejected(self):
         for url in ("not-a-url", "https://v.douyin.com/AbCdeFg/"):
@@ -371,7 +371,10 @@ class CommentsHubTests(unittest.TestCase):
         run = Path(self.tmp.name) / "runs" / output["run_id"]
         self.assertTrue((run / "comments.csv").is_file())
         self.assertTrue((run / "run.json").is_file())
-        self.assertNotIn("sessionid", (run / "run.json").read_text())
+        saved = json.loads((run / "run.json").read_text())
+        self.assertEqual(saved["metadata"]["stop_reason"], "verification_widget")
+        self.assertEqual(output["metadata"], saved["metadata"])
+        self.assertNotIn("sessionid", json.dumps(saved))
 
 
 class CollectSliceTests(unittest.IsolatedAsyncioTestCase):
@@ -444,3 +447,74 @@ class IndexBusyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sent_and_unsent_accounting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder)))
+            window = FakeWindow()
+            states = iter([json.dumps({'sent': True, 'result': json.dumps(_page())})])
+            def evaluate(js, arg=None):
+                if 'JSON.stringify({sent:' in js:
+                    return next(states, json.dumps({'sent': False}))
+            transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
+            transport.video_url = 'https://www.douyin.com/video/100'
+            video = Video('100', transport.video_url)
+            job = CollectJob(video, transport)
+            await job.run_slice(1)
+            self.assertEqual((budget.used, budget.counter.usage(), video.pages), (1, 1, 1))
+            self.assertEqual(window.loaded, [transport.video_url])
+            other = Video('100', transport.video_url)
+            job = CollectJob(other, transport)
+            job.queue = [('1', '0')]
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 21]):
+                with self.assertRaises(Exception):
+                    await job.run_slice(1)
+            self.assertEqual((budget.used, budget.counter.usage(), other.pages), (1, 1, 0))
+
+    async def test_reply_response_is_parsed_and_ingested(self):
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder)))
+            def evaluate(js, arg=None):
+                if 'JSON.stringify({sent:' in js:
+                    return json.dumps({'sent': True, 'result': json.dumps(_page([comment(2)]))})
+            transport = QtCommentTransport(FakeWindow(), budget, InstantPacer(), evaluate=evaluate)
+            transport.video_id = '100'
+            video = Video('100', 'https://www.douyin.com/video/100')
+            job = CollectJob(video, transport)
+            job.queue = [('1', '0')]
+            await job.run_slice(1)
+            self.assertEqual(video.comments['2'].root_comment_id, '1')
+            self.assertEqual((budget.used, video.pages), (1, 1))
+
+    async def test_scroll_without_request_uses_no_quota(self):
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder)))
+            window = FakeWindow()
+            def evaluate(js, arg=None):
+                return json.dumps({'sent': False, 'result': None})
+            transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
+            transport.video_id = '100'
+            transport.video_url = 'https://www.douyin.com/video/100'
+            video = Video('100', transport.video_url)
+            job = CollectJob(video, transport)
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 21]):
+                with self.assertRaises(Exception):
+                    await job.run_slice(1)
+            self.assertEqual((budget.used, budget.counter.usage(), video.pages), (0, 0, 0))
+            self.assertFalse(job.metadata['request_sent'])
+
+    async def test_stop_metadata_redacts_values(self):
+        from dyc.errors import Stop
+        class Transport:
+            no_retry = True
+            async def fetch(self, *_):
+                return {'status': 429, 'text': '{"status_code":1,"cookie":"secret","message":"signature-value"}', 'request_sent': True}
+        video = Video('100', 'https://www.douyin.com/video/100')
+        job = CollectJob(video, Transport())
+        with self.assertRaises(Stop):
+            await job.run_slice(1)
+        self.assertEqual(job.metadata, {'stop_reason': 'rate_limited', 'http_status': 429,
+                                       'response_fields': ['status_code', 'message'], 'request_sent': True})
+        self.assertNotIn('secret', json.dumps(job.metadata))
+        self.assertNotIn('signature-value', json.dumps(job.metadata))
