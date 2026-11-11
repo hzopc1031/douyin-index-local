@@ -208,6 +208,75 @@ class XhsTests(unittest.TestCase):
                 self.assertEqual(result, accepted)
                 self.assertNotIn('synthetic-secret', str(result) + output.getvalue())
 
+    def test_native_login_qr_preferred_and_id_checked(self):
+        import qrcode
+        from PIL import Image
+        import zxingcpp
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
+            root = Path(directory)
+            page, container, code = MagicMock(), MagicMock(), MagicMock()
+            page.screenshot.return_value = b'page'
+            image = io.BytesIO()
+            qrcode.make('https://example.com/login?qr_id=native-secret').save(image, format='PNG')
+            code.screenshot.return_value = image.getvalue()
+            data = {'url': 'https://example.com/login?qr_id=native-secret'}
+            with patch.object(xhs, 'qr', return_value=[code]), patch.object(xhs, 'save_url_qr') as fallback:
+                self.assertEqual(xhs.save_login_qr(page, container, data, 'native-secret', root / 'xhs-qr.png'), 'native')
+                fallback.assert_not_called()
+                self.assertIn('native-secret', zxingcpp.read_barcode(Image.open(root / 'xhs-qr.png')).text)
+                self.assertFalse(xhs.save_page_qr(page, container, root / 'other.png', 'different'))
+            self.assertEqual((root / 'xhs-qr.png').stat().st_mode & 0o777, 0o600)
+            self.assertEqual((root / 'xhs-page.png').read_bytes(), b'page')
+            self.assertNotIn('native-secret', (root / 'xhs-login.log').read_text())
+
+    def test_security_qr_refresh_capture_and_wait_for_session(self):
+        import qrcode
+        from PIL import Image
+        import zxingcpp
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://www.rednote.com/explore')
+            page.screenshot.return_value = b'security-page'
+            security, expired, code = MagicMock(), MagicMock(), MagicMock()
+            image = io.BytesIO()
+            qrcode.make('security-secret').save(image, format='PNG')
+            code.screenshot.return_value = image.getvalue()
+            clock = [0]
+            page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
+            def locate(target, selector):
+                if target is security and 'Expired' in selector and not expired.click.called:
+                    return expired
+                return None
+            def container(_):
+                return security if clock[0] < 8 else None
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'security_container', side_effect=container), patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'qr', return_value=[code]), patch.object(xhs, 'refresh_qr') as refresh, patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]):
+                context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                context.pages = [page]
+                context.cookies.side_effect = lambda *args: ([{'name': 'web_session', 'value': 'new-secret'}] if clock[0] >= 10 else [])
+                self.assertEqual(xhs.login(), 0)
+                refresh.assert_not_called()
+                expired.click.assert_called_once()
+                context.close.assert_called_once()
+                page.goto.assert_called_once()
+            self.assertEqual(zxingcpp.read_barcode(Image.open(root / 'xhs-qr.png')).text, 'security-secret')
+            self.assertEqual((root / 'xhs-page.png').read_bytes(), b'security-page')
+            self.assertEqual((root / 'xhs-login.status').read_text().strip(), 'logged_in')
+            log = (root / 'xhs-login.log').read_text()
+            self.assertIn('页面出现安全验证，已截取页面原生码', log)
+            for file in ('xhs-login.log', 'xhs-login.status', 'xhs-qr.meta'):
+                for secret in ('security-secret', 'new-secret', 'qr_id', 'https://', 'cookie'):
+                    self.assertNotIn(secret, (root / file).read_text().lower())
+
+    def test_security_text_selectors(self):
+        page = MagicMock()
+        with patch.object(xhs, 'visible', return_value=None) as find:
+            self.assertIsNone(xhs.security_container(page))
+        selectors = ' '.join(call.args[1] for call in find.call_args_list)
+        for text in ('Security Verification', 'Scan with logged-in', '安全验证', '账户安全', 'Expired', 'QR code expires'):
+            self.assertIn(text, selectors)
+
     def test_create_response_meta_and_redacted_log(self):
         import json
         from PIL import Image
@@ -365,7 +434,7 @@ class XhsTests(unittest.TestCase):
                 page.on.call_args.args[1](response)
             button.click.side_effect = click
             page.goto.side_effect = lambda *args, **kwargs: self.assertTrue(page.on.called)
-            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', side_effect=[None, container]), patch.object(xhs, 'login_button', return_value=button), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', side_effect=[None, container]), patch.object(xhs, 'login_button', return_value=button), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
                 context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
                 context.pages = [page]
                 self.assertEqual(xhs.login(), 0)
@@ -394,7 +463,7 @@ class XhsTests(unittest.TestCase):
                         response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
                         page.on.call_args.args[1](response)
                 page.wait_for_timeout.side_effect = wait
-                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
+                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
                     context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
                     context.pages = [page]
                     self.assertEqual(xhs.login(), 0)
@@ -408,6 +477,7 @@ class XhsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = MagicMock(url='https://www.rednote.com/login')
+            page.screenshot.return_value = b'page'
             clock = [0]
             def navigate(*args, **kwargs):
                 response = MagicMock(url='https://www.rednote.com/login/qrcode/create')
@@ -415,7 +485,7 @@ class XhsTests(unittest.TestCase):
                 page.on.call_args.args[1](response)
             page.goto.side_effect = navigate
             page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(0, clock[0] + ms / 1000)
-            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'save_url_qr', return_value=True), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'save_url_qr', return_value=True), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
                 browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value.pages = [page]
                 self.assertEqual(xhs.login(), 1)
                 refresh.assert_not_called()
@@ -425,6 +495,7 @@ class XhsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = MagicMock(url='https://www.rednote.com/login')
+            page.screenshot.return_value = b'page'
             clock = [0]
             statuses = []
             saved = []
@@ -448,7 +519,7 @@ class XhsTests(unittest.TestCase):
             def save(url, path):
                 saved.append(url)
                 return True
-            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'save_url_qr', side_effect=save), patch.object(xhs, 'poll_status', side_effect=poll), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'save_url_qr', side_effect=save), patch.object(xhs, 'poll_status', side_effect=poll), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'refresh_qr') as refresh:
                 context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
                 context.pages = [page]
                 context.cookies.side_effect = lambda *args: ([{'name': 'web_session', 'value': 'new-session'}] if clock[0] >= 132 else [{'name': 'web_session', 'value': 'old-session'}])
@@ -459,6 +530,8 @@ class XhsTests(unittest.TestCase):
             self.assertIn('second-secret', saved[-1])
             log = (root / 'xhs-login.log').read_text()
             self.assertIn('状态轮询与当前码不一致', log)
+            self.assertIn('状态码: 0', log)
+            self.assertIn('状态码: 1', log)
             self.assertIn('已改为跟随页面正在轮询的码', log)
             self.assertIn('scanned', log)
             self.assertEqual((root / 'xhs-login.status').read_text().strip(), 'logged_in')
