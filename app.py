@@ -146,7 +146,8 @@ class Api:
         from login_driver import QtDispatcher
         from topic_qr import extract_topic_qr
         if not self._acquire_lock('topics'):
-            return {**self._busy(), 'qr_available': False}
+            busy = self._busy()
+            return {**busy, 'state': busy['code'], 'qr_available': False}
         try:
             window = self._topic_window()
             if action == 'refresh':

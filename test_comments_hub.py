@@ -343,6 +343,7 @@ class IndexBusyTests(unittest.TestCase):
         try:
             result = api.topic_login("start")
             self.assertEqual(result["code"], "comments_busy")
+            self.assertEqual(result["state"], "comments_busy")
             self.assertFalse(result["qr_available"])
         finally:
             api._release_lock()

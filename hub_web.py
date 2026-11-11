@@ -1295,7 +1295,7 @@ def mount(app, hub):
         try:
             result = await asyncio.to_thread(hub.bridge, 'topic_login', action, hub_bridge.BRIDGE_TIMEOUT)
             state = result.get('state')
-            if state not in ('logged_in', 'need_scan', 'expired', 'browser_unavailable'):
+            if state not in ('logged_in', 'need_scan', 'expired', 'browser_unavailable', 'busy', 'comments_busy'):
                 state = 'browser_unavailable'
             available = state == 'need_scan' and result.get('qr_available') is True
             if action == 'qr':
@@ -1306,7 +1306,10 @@ def mount(app, hub):
                 if not png.startswith(b'\x89PNG\r\n\x1a\n'):
                     raise ValueError
                 return web.Response(body=png, content_type='image/png', headers={'Cache-Control': 'no-store'})
-            return web.json_response({'state': state, 'qr_available': available}, headers={'Cache-Control': 'no-store'})
+            response = {'state': state, 'qr_available': available}
+            if 'message' in result:
+                response['message'] = result['message']
+            return web.json_response(response, headers={'Cache-Control': 'no-store'})
         except Exception:
             if action == 'qr':
                 raise HubError('browser_unavailable', '二维码尚未就绪。', 503) from None
