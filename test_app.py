@@ -281,7 +281,7 @@ class ControllerTests(unittest.TestCase):
         self.api._lock.acquire()
         try:
             self.assertEqual(self.api.fetch_batch("银杏", "2025-01-07")["code"], "busy")
-            self.assertFalse(self.api.compare([])["ok"])
+            self.assertEqual(self.api.compare([])["code"], "busy")
         finally:
             self.api._lock.release()
 

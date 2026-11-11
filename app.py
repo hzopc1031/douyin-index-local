@@ -408,7 +408,7 @@ class Api:
 
     def compare(self, entries):
         if not self._lock.acquire(blocking=False):
-            return {"ok": False, "message": "取数或核对正在进行，请等待。"}
+            return {"ok": False, "code": "busy", "message": "取数或核对正在进行，请等待。"}
         try:
             if self._result is None or self._folder is None:
                 return {"ok": False, "message": "请先获取或加载一组数据。"}
