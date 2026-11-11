@@ -259,7 +259,9 @@ function initializeRanges(history){
  relatedLatestDate=history.related_latest_available_date||null;
  const latest=history.latest_available_date;
  const valid=typeof latest==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(latest)&&Number.isFinite(Date.parse(latest+'T00:00:00Z'));
- const hint=valid?'本地已知最新可用日：'+latest+'（已存有效搜索指数；不代表官方当前最新日）。':'尚无已知可用日，请先从官方页面确认截止日。';
+ const relatedOk=typeof relatedLatestDate==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(relatedLatestDate)&&Number.isFinite(Date.parse(relatedLatestDate+'T00:00:00Z'));
+ const why={'official_cadence':'按官方搜索指数更新节奏推算','official_latest':'最近一次官方趋势采集确认','stored_search_index':'回退到本地已存搜索指数'}[history.latest_available_date_source];
+ const hint=valid?'默认截止日：'+latest+(why?'（'+why+'）':'')+'。'+(relatedOk?' 关联词默认截至 '+relatedLatestDate+'。':''):'尚无已知可用日，请先从官方页面确认截止日。';
  document.querySelectorAll('[data-latest-date]').forEach(n=>n.textContent=hint+' 快捷段以当前结束日期为准。');
  if(initialRangesSet)return;
  initialRangesSet=true;dateHint();

@@ -60,7 +60,7 @@ OpenAPI 3.1 文档：`GET /api/v1/openapi.json`，需要有效 Key 或管理登�
 | GET `/jobs` | read | 最近三十个任务 |
 | GET `/jobs/{job_id}` | read | 任务状态、标准日序列与完整性 |
 | GET `/series` | read | 读取数据库趋势；必填 keyword，可选 platform、start_date、end_date |
-| GET `/history` | read | 只读最近三十组采集结果与口径，以及本地已知最新搜索日 |
+| GET `/history` | read | 只读最近三十组采集结果与口径，以及抖音默认截止日和关联词可用截止日 |
 | GET `/export.csv` | read | 同 series 参数，CSV 中缺失留空，关键词防表格公式注入 |
 | GET `/tls-certificate.pem` | read | 公共证书，绝不包含私钥 |
 | GET/POST `/keys`、DELETE `/keys/{id}` | 仅管理登录 | 创建、列出前缀或撤销密钥 |
