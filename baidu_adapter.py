@@ -286,12 +286,66 @@ def page_absence(query, state):
     return make_result(q, rows)
 
 
+def safe_extra_shape(value):
+    fields = {'status', 'data', 'uniqid', 'index', 'key', 'userIndexes', 'word', 'name', 'wordType',
+              'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio', 'wordlist', 'wordGraph'}
+    kinds = {'string', 'number', 'boolean', 'null', 'array', 'object'}
+    required = {'http_status', 'business_status', 'body_fields', 'data_fields', 'index_type', 'index_length',
+                'user_indexes_present', 'index_items', 'ptbk_length', 'decoded_points', 'empty_points', 'used_fallback'}
+    if type(value) is not dict or type(value.get('user_indexes_present')) is not bool:
+        raise ValueError
+    required |= {'user_indexes_type', 'user_indexes_length', 'user_indexes_item_fields'} if value['user_indexes_present'] else set()
+    if set(value) != required or type(value['http_status']) is not int or not 200 <= value['http_status'] <= 299 or type(value['business_status']) is not int or value['business_status'] != 0:
+        raise ValueError
+    def names(items):
+        if type(items) is not list or any(type(x) is not str or x not in fields for x in items) or items != sorted(set(items)):
+            raise ValueError
+    def count(n):
+        if type(n) is not int or not 0 <= n <= 1048576:
+            raise ValueError
+    names(value['body_fields']); names(value['data_fields'])
+    if value['index_type'] != 'array' or type(value['used_fallback']) is not bool:
+        raise ValueError
+    for field in ('index_length', 'ptbk_length', 'decoded_points', 'empty_points'):
+        count(value[field])
+    if value['empty_points'] > value['decoded_points'] or type(value['index_items']) is not list or len(value['index_items']) != value['index_length']:
+        raise ValueError
+    for item in value['index_items']:
+        if type(item) is not dict or set(item) != {'field_names', 'data_length', 'start_date', 'end_date'}:
+            raise ValueError
+        names(item['field_names']); count(item['data_length'])
+        for field in ('start_date', 'end_date'):
+            if type(item[field]) is not str or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', item[field]):
+                raise ValueError
+            dt.date.fromisoformat(item[field])
+    if value['user_indexes_present']:
+        kind = value['user_indexes_type']
+        if type(kind) is not str or kind not in kinds or type(value['user_indexes_item_fields']) is not list:
+            raise ValueError
+        items = value['user_indexes_item_fields']
+        if kind == 'array':
+            count(value['user_indexes_length'])
+            if len(items) != value['user_indexes_length']:
+                raise ValueError
+        elif value['user_indexes_length'] is not None or len(items) != (1 if kind == 'object' else 0):
+            raise ValueError
+        for item in items:
+            if type(item) is not list:
+                raise ValueError
+            for entry in item:
+                if type(entry) is not dict or set(entry) != {'field', 'type'} or type(entry['field']) is not str or entry['field'] not in fields or type(entry['type']) is not str or entry['type'] not in kinds:
+                    raise ValueError
+            names([entry['field'] for entry in item])
+    return value
+
+
 def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=None, feed_enabled=False, news_enabled=False):
     import time
     q = validate_query(query)
     budget_day = budget_day or dt.datetime.now(TZ).date().isoformat()
     rows = []
     extras = {field: [] for enabled, field in ((feed_enabled, 'feed_rows'), (news_enabled, 'news_rows')) if enabled}
+    shapes = {}
     for i, chunk in enumerate(chunks(q)):
         if i:
             (sleep or time.sleep)(chunk_interval)
@@ -302,9 +356,14 @@ def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=Non
             rows.extend(answer['rows'])
             for field in extras:
                 extras[field].extend(answer[field])
+                shape_field = field.replace('_rows', '_shape')
+                if shape_field in answer:
+                    shapes.setdefault(field.split('_')[0], []).append(answer[shape_field])
         else:
             rows.extend(answer)
     result = {**make_result(q, rows), **extras}
+    if shapes:
+        result['metadata']['extra_index_shapes'] = shapes
     public_result(result)
     return result
 
@@ -381,9 +440,21 @@ def public_result(result):
                 expected_extra.remove(key)
                 clean_extra.append(dict(keyword=key[0], date=key[1], device='all', value=value, value_status=state))
             extras[field] = clean_extra
+        shapes = {}
+        try:
+            candidate = m.get('extra_index_shapes', {})
+            if type(candidate) is not dict or set(candidate) - {'feed', 'news'}:
+                raise ValueError
+            for name, items in candidate.items():
+                if type(items) is not list or not items or len(items) > 3:
+                    raise ValueError
+                shapes[name] = [safe_extra_shape(item) for item in items]
+        except (TypeError, ValueError, OverflowError):
+            shapes = {}
         return {'rows': clean, **extras, 'metadata': {**DIMENSIONS, **q, 'fetched_at': stamp.isoformat(),
             'complete': m['complete'], 'verification': 'pending', 'metric_name': '整体搜索指数', 'unit': '指数',
             'timezone': 'Asia/Shanghai', 'data_end_date': derived['data_end_date'], 'lagged': derived['lagged'], 'note': note,
+            **({'extra_index_shapes': shapes} if shapes else {}),
             'missing_search_dates': {w: [r['date'] for r in clean if r['keyword'] == w and r['device'] == 'all' and r['search_index'] is None] for w in q['keywords']}}}
     except (KeyError, TypeError, ValueError, OverflowError):
         raise HubError('invalid_result', '百度结果未通过严格校验。', 502) from None

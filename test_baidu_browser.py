@@ -30,6 +30,32 @@ def graph_handler():
     return GraphHandler
 
 class ReadinessTests(unittest.TestCase):
+    def test_success_extra_shape_logging_and_validation(self):
+        import copy
+        import json
+        from unittest.mock import Mock
+        from baidu_browser import PageTransport
+        from hub_logging import redact
+        from test_baidu_adapter import extra_shape
+        page = Mock(url='https://index.baidu.com/')
+        shape = extra_shape()
+        page.evaluate.return_value = {'status': 'ok', 'rows': [], 'news_rows': [], 'news_shape': shape}
+        with self.assertLogs('index_hub.baidu', level='INFO') as logs:
+            answer = PageTransport(page).query({'_news_enabled': True})
+        line = redact(' '.join(logs.output))
+        for field in ('index_length', 'data_length', 'ptbk_length', 'decoded_points', 'empty_points', 'used_fallback', 'user_indexes_present'):
+            self.assertIn('"' + field + '"', line)
+        self.assertEqual(answer['news_shape'], shape)
+        for secret in ('private-cookie-value', 'private-cipher-value'):
+            self.assertNotIn(secret, line + json.dumps(answer))
+        for field in ('cookie', 'data'):
+            bad = copy.deepcopy(shape)
+            bad[field] = 'private-cookie-value' if field == 'cookie' else 'private-cipher-value'
+            page.evaluate.return_value['news_shape'] = bad
+            with self.assertNoLogs('index_hub.baidu', level='INFO'):
+                answer = PageTransport(page).query({'_news_enabled': True})
+            self.assertNotIn('news_shape', answer)
+
     def test_related_query_with_job_id_and_unavailable_signature(self):
         import datetime
         from unittest.mock import Mock

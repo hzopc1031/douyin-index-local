@@ -400,7 +400,20 @@ class PageTransport:
             return result.get('data')
         if query.get('kind') == 'audience':
             return result.get('data')
-        return {'rows': result.get('rows'), **{field: result.get(field) for flag, field in (('_feed_enabled', 'feed_rows'), ('_news_enabled', 'news_rows')) if query.get(flag)}} if query.get('_feed_enabled') or query.get('_news_enabled') else result.get('rows')
+        if query.get('_feed_enabled') or query.get('_news_enabled'):
+            output = {'rows': result.get('rows')}
+            for flag, name in (('_feed_enabled', 'feed'), ('_news_enabled', 'news')):
+                if not query.get(flag):
+                    continue
+                output[name + '_rows'] = result.get(name + '_rows')
+                try:
+                    shape = baidu_adapter.safe_extra_shape(result[name + '_shape'])
+                    logging.getLogger('index_hub.baidu').info('baidu_extra_shape module=%s %s', name, json.dumps(shape, separators=(',', ':')))
+                    output[name + '_shape'] = shape
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    pass
+            return output
+        return result.get('rows')
 
     def _log_entry_keys(self, value):
         keys = _safe_entry_keys(value)
