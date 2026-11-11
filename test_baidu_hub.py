@@ -106,6 +106,40 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict('os.environ', {'INDEX_HUB_BAIDU_NEWS_ENABLED': '0', 'INDEX_HUB_BAIDU_FEED_ENABLED': '0'}):
             self.assertEqual(b.BaiduAdapter().series(self.s, q['keywords'][0], metric='news_index')['points'][0]['value_status'], 'missing')
 
+    async def test_region_budget_success_and_cache(self):
+        for feed, news in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(feed=feed, news=news), patch.dict('os.environ', {
+                    'INDEX_HUB_BAIDU_REGION_ENABLED': '1', 'INDEX_HUB_BAIDU_FEED_ENABLED': str(int(feed)),
+                    'INDEX_HUB_BAIDU_NEWS_ENABLED': str(int(news))}):
+                self.s.set('baidu.next_attempt_at', 0)
+                self.s.set('baidu.daily', {'date': dt.datetime.now(b.TZ).date().isoformat(), 'attempts': 0, 'http_reserved': 0})
+                q = query() | {'regions': ['海南', '北京']}
+                q['keywords'] = [f'合成{int(feed)}{int(news)}']
+                national = [{**r, 'keyword': q['keywords'][0]} for r in result()['rows']]
+                regional = [{**r, 'region': region, 'search_index': None, 'value_status': 'missing'} for region in q['regions'] for r in national]
+                self.response = {'ok': True, **b.make_result(q, national), 'region_rows': regional}
+                self.response['metadata']['complete'] = False
+                for enabled, field in ((feed, 'feed_rows'), (news, 'news_rows')):
+                    if enabled:
+                        self.response[field] = []
+                job = self.submit(q)
+                await self.hub.run_one()
+                self.assertEqual(self.s.job(job['id'])['status'], 'succeeded')
+                self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 6 + 2*feed + 2*news)
+                self.assertIsNone(self.s.cached(q))
+
+    async def test_region_budget_multiple_shards(self):
+        with patch.dict('os.environ', {'INDEX_HUB_BAIDU_REGION_ENABLED': '1',
+                                      'INDEX_HUB_BAIDU_FEED_ENABLED': '1', 'INDEX_HUB_BAIDU_NEWS_ENABLED': '1'}):
+            q = query() | {'regions': ['海南', '北京']}
+            q['start_date'] = (dt.date.fromisoformat(q['end_date']) - dt.timedelta(days=399)).isoformat()
+            self.response = {'ok': False, 'code': 'network_error'}
+            job = self.submit(q)
+            await self.hub.run_one()
+            self.assertEqual(hub_baidu.daily(self.s)['http_reserved'], 20)
+            self.assertEqual(self.s.job(job['id'])['status'], 'failed')
+            self.assertEqual(self.calls.count('baidu_query'), 1)
+
     async def test_both_flags_reserve_six(self):
         q = query()
         missing = [dict(keyword=q['keywords'][0], device='all', date=q['start_date'], value=None, value_status='missing')]
@@ -481,6 +515,18 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(result['points']), 7)
                 csv_text = await (await client.get('/api/v1/export.csv?'+args+'&device='+device)).text()
                 self.assertIn(device+',day,index.baidu.com,available', csv_text)
+            with self.s.db:
+                self.s.db.execute("INSERT INTO baidu_points SELECT platform,metric,device,'北京',granularity,source,keyword,day,'999',value_status,fetched,dataset FROM baidu_points")
+            national = await (await client.get('/api/v1/series?'+args)).json()
+            regional = await (await client.get('/api/v1/series?'+args+'&region=北京')).json()
+            self.assertEqual(national['points'][0]['value'], 12)
+            self.assertEqual(regional['points'][0]['value'], 999)
+            self.assertEqual(len((await (await client.get('/api/v1/series?'+args+'&region=北京&device=all_devices')).json())['points']), 21)
+            self.assertIn('baidu,search_index,北京', await (await client.get('/api/v1/export.csv?'+args+'&region=北京')).text())
+            self.assertEqual((await client.get('/api/v1/series?'+args+'&region=未知')).status, 400)
+            self.assertEqual((await client.get('/api/v1/series?platform=douyin&keyword=x&region=北京')).status, 400)
+            with self.s.db:
+                self.s.db.execute("DELETE FROM baidu_points WHERE region='北京'")
             combined = await (await client.get('/api/v1/series?'+args+'&device=all_devices')).json()
             self.assertEqual(len(combined['points']), 21)
             self.assertEqual({p['device'] for p in combined['points']}, {'all', 'pc', 'wise'})
