@@ -305,7 +305,7 @@ class RuntimeTests(unittest.TestCase):
     def test_no_cap_increase(self):
         counter = DailyCounter(self.base / "state", limit=9000)
         budget = Budget(counter, batch_limit=9000)
-        self.assertEqual((budget.limit, counter.limit), (1500, 3000))
+        self.assertEqual((budget.limit, counter.limit), (25, 150))
 
 
 class PacingTests(unittest.IsolatedAsyncioTestCase):

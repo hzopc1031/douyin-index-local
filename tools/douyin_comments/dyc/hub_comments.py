@@ -18,7 +18,7 @@ from . import site
 from .errors import Stop
 from .models import Video
 from .paging import ingest_page
-from .runtime import Budget, DailyCounter, Pacer
+from .runtime import Budget, DailyCounter, Pacer, atomic_text, private_open
 
 COMMENTS_BUSY = "正在采集评论，稍后重试"
 INDEX_BUSY = "取数或核对正在进行，请等待。"
@@ -26,8 +26,8 @@ LOGIN_URL = "https://www.douyin.com/"
 LOGIN_ENTRY = {"login_entry": "index_sms", "login_path": "/api/v1/login/sms"}
 LOCK_PAGES = 8
 LOCK_TIMEOUT = 30
-BATCH_LIMIT = 1500
-DAILY_LIMIT = 3000
+BATCH_LIMIT = 25
+DAILY_LIMIT = 150
 PAUSE_STOPS = {
     "verification_widget": "verification_required",
     "verification_response": "verification_required",
@@ -117,7 +117,8 @@ FETCH_JS = """(cfg) => {
     if (token) url.searchParams.set(p.token, token);
     window.__dycArm = 'fetch';
     const ac = new AbortController();
-    window.__dycAbort = () => ac.abort();
+    const abort = () => ac.abort();
+    window.__dycAbort = abort;
     const timer = setTimeout(() => ac.abort('timeout'), cfg.timeout);
     return fetch(url.href, {credentials: 'include', redirect: 'manual', signal: ac.signal,
                             headers: Object.assign({}, cfg.headers || {}, {[cfg.markerHeader]: cfg.marker})})
@@ -128,7 +129,7 @@ FETCH_JS = """(cfg) => {
       })
       .catch(err => ({kind: err === 'timeout' || (err && err.name === 'TimeoutError') ? 'timeout'
                       : (err && err.name === 'AbortError' ? 'timeout' : 'network')}))
-      .finally(() => { clearTimeout(timer); window.__dycAbort = null; window.__dycArm = null; });
+      .finally(() => { clearTimeout(timer); if (window.__dycAbort === abort) window.__dycAbort = null; window.__dycArm = null; });
   } catch (e) {
     window.__dycArm = null;
     return Promise.resolve({kind: 'network'});
@@ -186,7 +187,6 @@ class QtCommentTransport:
         self.calls = 0
 
     async def fetch(self, video_id, root, cursor):
-        await self.pacer.before()
         self.budget.reserve()
         self.calls += 1
         cfg = {
@@ -204,9 +204,16 @@ class QtCommentTransport:
             "markerHeader": "X-Dyc-Hub",
             "marker": "1",
         }
-        raw = self._evaluate(FETCH_JS, cfg)
-        self.pacer.completed()
-        return _coerce_fetch(raw)
+        try:
+            self._evaluate("(cfg) => { const request = {}; window.__dycRequest = request; window.__dycResult = null; (" + FETCH_JS + ")(cfg).then(r => { if (window.__dycRequest === request) window.__dycResult = JSON.stringify(r); }); }", cfg)
+            while True:
+                raw = self._evaluate("window.__dycResult")
+                if raw and raw != "null":
+                    return _coerce_fetch(raw)
+                await asyncio.sleep(0.1)
+        finally:
+            self._evaluate("window.__dycAbort && window.__dycAbort()")
+            self.pacer.completed()
 
 
 def _eval(window, js, arg=None):
@@ -365,6 +372,21 @@ class CommentsHub:
             "output": None,
         }
 
+        path = self.state_dir / "pause.json"
+        if path.exists() or path.is_symlink():
+            try:
+                with os.fdopen(private_open(path, os.O_RDONLY)) as stream:
+                    saved = json.load(stream)
+                if set(saved) != {"paused", "pause_reason"} or type(saved["paused"]) is not bool or (saved["pause_reason"] is not None and saved["pause_reason"] not in set(PAUSE_STOPS.values()) | {"user", "browser_unavailable", "not_logged_in"}):
+                    raise ValueError
+                self._snapshot.update(saved)
+            except (OSError, ValueError, TypeError, Stop):
+                self._snapshot.update(paused=True, pause_reason="browser_unavailable")
+
+    def _save_pause(self):
+        atomic_text(self.state_dir / "pause.json", json.dumps({
+            "paused": self._snapshot["paused"], "pause_reason": self._snapshot["pause_reason"]}) + "\n")
+
     def status(self):
         with self._guard:
             data = dict(self._snapshot)
@@ -420,6 +442,7 @@ class CommentsHub:
             self._stop.clear()
             self._snapshot.update(running=True, paused=False, pause_reason=None, busy=False,
                                   waiting_for_index=False, summary=None, output=None)
+            self._save_pause()
         counter = DailyCounter(self.state_dir, limit=DAILY_LIMIT)
         try:
             counter.check_start()
@@ -439,20 +462,23 @@ class CommentsHub:
         with self._guard:
             self._snapshot["paused"] = True
             self._snapshot["pause_reason"] = self._snapshot["pause_reason"] or "user"
+            self._save_pause()
         return {"ok": True, **self.status()}
 
     def resume(self):
         with self._guard:
             was = self._snapshot["pause_reason"]
-            self._snapshot["paused"] = False
-            self._snapshot["pause_reason"] = None
         probed = self.probe()
         if not probed.get("ok") or probed.get("probe") != "logged_in":
             with self._guard:
                 self._snapshot["paused"] = True
                 self._snapshot["pause_reason"] = probed.get("probe") or "not_logged_in"
+                self._save_pause()
             return {"ok": False, "code": probed.get("probe") or probed.get("code") or "not_logged_in",
                     **self.status()}
+        with self._guard:
+            self._snapshot.update(paused=False, pause_reason=None)
+            self._save_pause()
         return {"ok": True, "note": "已清除暂停，请再次调用 start 继续采集。", "probe": probed["probe"],
                 "previous_reason": was}
 
@@ -467,35 +493,12 @@ class CommentsHub:
                         asyncio.run(pacer.between_videos())
                     except Exception:
                         pass
-                job = CollectJob(video, self._make_transport(budget, pacer), BATCH_LIMIT)
+                job = CollectJob(video, self._locked_transport(self._make_transport(budget, pacer), pacer), BATCH_LIMIT)
                 try:
                     while not job.done and not self._stop.is_set():
-                        acquired = self._acquire is None
-                        if self._acquire is not None:
-                            while True:
-                                if self._acquire("comments"):
-                                    acquired = True
-                                    break
-                                if self._stop.is_set():
-                                    break
-                                with self._guard:
-                                    self._snapshot["waiting_for_index"] = True
-                                self._sleeper(0.2)
-                            with self._guard:
-                                self._snapshot["waiting_for_index"] = False
-                        if not acquired:
+                        more = asyncio.run(job.run_slice(1))
+                        if not more:
                             break
-                        try:
-                            with self._guard:
-                                self._snapshot["busy"] = True
-                            more = asyncio.run(self._timed(job.run_slice(self.lock_pages)))
-                            if not more:
-                                break
-                        finally:
-                            with self._guard:
-                                self._snapshot["busy"] = False
-                            if self._acquire is not None and self._release is not None:
-                                self._release()
                 except Stop as error:
                     reason = pause_reason(error.reason)
                     if error.reason in PAUSE_STOPS:
@@ -522,6 +525,35 @@ class CommentsHub:
                 pass
             self._halt(True, "browser_unavailable")
 
+    def _locked_transport(self, transport, pacer):
+        hub = self
+
+        class LockedTransport:
+            async def fetch(self, video_id, root, cursor):
+                await pacer.before()
+                acquired = hub._acquire is None
+                try:
+                    while not acquired and not hub._stop.is_set():
+                        acquired = hub._acquire("comments")
+                        with hub._guard:
+                            hub._snapshot["waiting_for_index"] = not acquired
+                        if not acquired:
+                            await asyncio.sleep(0.2)
+                    if not acquired:
+                        raise Stop(2, "user")
+                    with hub._guard:
+                        hub._snapshot.update(waiting_for_index=False, busy=True)
+                    return await hub._timed(transport.fetch(video_id, root, cursor))
+                finally:
+                    with hub._guard:
+                        hub._snapshot.update(waiting_for_index=False, busy=False)
+                    if acquired and hub._acquire is not None and hub._release is not None:
+                        hub._release()
+                    if acquired:
+                        await asyncio.sleep(0.2)
+
+        return LockedTransport()
+
     async def _timed(self, awaitable):
         try:
             return await asyncio.wait_for(awaitable, timeout=self.lock_timeout)
@@ -542,6 +574,7 @@ class CommentsHub:
             if paused:
                 self._snapshot["paused"] = True
                 self._snapshot["pause_reason"] = reason
+                self._save_pause()
 
     def _store_summary(self, summaries):
         with self._guard:
@@ -567,10 +600,7 @@ class CommentsHub:
             window.load_url(LOGIN_URL)
 
     def _ensure_guard(self, window):
-        try:
-            window.evaluate_js(GUARD_JS)
-        except Exception:
-            pass
+        window.evaluate_js(GUARD_JS)
 
     def _videos(self, payload):
         if not isinstance(payload, dict):

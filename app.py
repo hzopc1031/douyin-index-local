@@ -129,7 +129,7 @@ class Api:
         from login_driver import QtDispatcher
         from topic_qr import extract_topic_qr
         if not self._acquire_lock('topics'):
-            return {'state': 'browser_unavailable', 'qr_available': False}
+            return {**self._busy(), 'qr_available': False}
         try:
             window = self._topic_window()
             if action == 'refresh':
@@ -258,7 +258,7 @@ class Api:
         try:
             self._install_comments_guard(window, GUARD_JS)
         except Exception:
-            pass
+            logging.getLogger('index_hub.comments').warning('comments guard installation failed')
         return window
 
     def _install_comments_guard(self, window, source):

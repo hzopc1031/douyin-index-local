@@ -1,6 +1,7 @@
 """Offline tests for hub comments probe, lock priority, and verification pause."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -178,6 +179,60 @@ class CommentsHubTests(unittest.TestCase):
         self.assertFalse(self.hub.status()["paused"])
 
 
+    def test_pause_survives_restart(self):
+        self.hub._halt(True, "verification_required")
+        restored = CommentsHub(window_factory=lambda: self.window, state_dir=self.tmp.name)
+        self.assertTrue(restored.status()["paused"])
+        self.assertEqual(restored.status()["pause_reason"], "verification_required")
+        self.assertEqual(set(json.loads((Path(self.tmp.name) / "pause.json").read_text())), {"paused", "pause_reason"})
+        self.assertTrue(restored.resume()["ok"])
+        self.assertFalse(CommentsHub(window_factory=lambda: self.window, state_dir=self.tmp.name).status()["paused"])
+
+    def test_pacing_and_yield_do_not_hold_lock(self):
+        hub = self.hub
+        class CheckingPacer(InstantPacer):
+            async def before(self):
+                self_test.assertFalse(hub.lock.locked())
+        self_test = self
+        hub.lock = self.lock
+        class RiskTransport:
+            async def fetch(self, *_):
+                self_test.assertTrue(hub.lock.locked())
+                return {"kind": "risk"}
+        hub._transport_factory = lambda budget, pacer: RiskTransport()
+        hub.start({"videos": ["https://www.douyin.com/video/1234567890"]},
+                  budget=Budget(DailyCounter(Path(self.tmp.name))), pacer=CheckingPacer())
+        hub._worker.join(3)
+        self.assertFalse(hub._worker.is_alive())
+        self.assertFalse(self.lock.locked())
+
+    def test_guard_injection_failure_is_reported(self):
+        self.window.evaluate_js = lambda script: (_ for _ in ()).throw(RuntimeError())
+        self.assertEqual(self.hub.probe()["code"], "browser_unavailable")
+        self.assertFalse(self.lock.locked())
+
+    def test_waiting_and_timeout_abort_release(self):
+        self.lock.acquire()
+        self.hub.lock_timeout = 0.05
+        scripts = []
+        transport = QtCommentTransport(self.window, Budget(DailyCounter(Path(self.tmp.name))), InstantPacer(),
+                                       evaluate=lambda js, arg=None: scripts.append(js))
+        self.hub._transport_factory = lambda budget, pacer: transport
+        worker = threading.Thread(target=self.hub._run, args=([Video("123", "https://www.douyin.com/video/123")],
+                                  Budget(DailyCounter(Path(self.tmp.name))), InstantPacer()))
+        worker.start()
+        for _ in range(100):
+            if self.hub.status()["waiting_for_index"]:
+                break
+            time.sleep(0.01)
+        self.assertTrue(self.hub.status()["waiting_for_index"])
+        self.lock.release()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(self.hub.status()["waiting_for_index"])
+        self.assertFalse(self.lock.locked())
+        self.assertTrue(any("__dycAbort &&" in script for script in scripts))
+
     def test_invalid_and_short_urls_are_rejected(self):
         for url in ("not-a-url", "https://v.douyin.com/AbCdeFg/"):
             with self.subTest(url=url):
@@ -281,6 +336,16 @@ class IndexBusyTests(unittest.TestCase):
                 self.assertFalse(result["ok"])
             finally:
                 api._release_lock()
+
+    def test_topic_login_reports_comments_busy(self):
+        api = app_module.Api()
+        self.assertTrue(api._acquire_lock("comments"))
+        try:
+            result = api.topic_login("start")
+            self.assertEqual(result["code"], "comments_busy")
+            self.assertFalse(result["qr_available"])
+        finally:
+            api._release_lock()
 
     def test_unlabelled_lock_still_returns_generic_busy(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -359,7 +359,7 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 
 - `GET /api/v1/comments/status`：主站登录探测结果与采集状态（`logged_in`、`not_logged_in`、`verification_required`）。未登录时 `login_entry` 为 `index_sms`，入口 `/api/v1/login/sms`。不触发评论请求。
 - `POST /api/v1/comments/probe`：只读再探测一次，请求体为空对象。
-- `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每批短时间持锁，批次之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 1500 次、上海自然日最多 3000 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
+- `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每次请求短时间持锁，请求之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 25 次、上海自然日最多 150 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
 - `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
 - `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
 
