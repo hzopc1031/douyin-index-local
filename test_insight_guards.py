@@ -12,6 +12,14 @@ from hub_insights import collect, validate_insight
 from hub_store import HubError, encode
 from hub_web import Hub
 
+def insight_api(**kwargs):
+    from types import SimpleNamespace
+    api = SimpleNamespace(**kwargs)
+    api._acquire_lock = lambda owner: api._lock.acquire(blocking=False)
+    api._release_lock = api._lock.release
+    api._busy = lambda: {'ok': False, 'code': 'busy'}
+    return api
+
 
 class FixedDatetime(dt.datetime):
     @classmethod
@@ -124,7 +132,7 @@ class ClampTests(unittest.TestCase):
         client = Mock()
         client._post.return_value = {'data': {'relation_word_list': [{'relation_word': '合成关联'}]},
                                     'metadata': {'fetched_at': '2026-10-28T12:00:00+08:00'}}
-        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        api = insight_api(_lock=threading.Lock(), _client=lambda: client)
         result = collect(api, validate_insight(self.query))
         self.assertTrue(result['ok'])
         metadata = result['metadata']
@@ -147,7 +155,7 @@ class ClampTests(unittest.TestCase):
             {'data': {'relation_word_list': [{'relation_word': '合成关联'}]},
              'metadata': {'fetched_at': '2026-10-28T12:00:00+08:00'}},
         ]
-        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        api = insight_api(_lock=threading.Lock(), _client=lambda: client)
         result = collect(api, {**self.query, 'end_date': '2026-10-25'})
         self.assertTrue(result['ok'])
         self.assertEqual(result['metadata']['end_date'], '2026-10-18')
@@ -173,7 +181,7 @@ class ClampTests(unittest.TestCase):
                                     http_status=200, business_code=500)
         client = Mock()
         client._post.side_effect = [limited]
-        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        api = insight_api(_lock=threading.Lock(), _client=lambda: client)
         result = collect(api, {**self.query, 'end_date': '2026-10-25'})
         self.assertEqual((result['ok'], result['code']), (False, 'rate_limited'))
         self.assertEqual(client._post.call_count, 1)

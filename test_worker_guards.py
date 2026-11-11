@@ -17,6 +17,14 @@ from hub_store import Store, TZ
 from hub_web import Hub, PRINCIPAL_KEY, mount
 from test_hub import QUERY
 
+def insight_api(**kwargs):
+    from types import SimpleNamespace
+    api = SimpleNamespace(**kwargs)
+    api._acquire_lock = lambda owner: api._lock.acquire(blocking=False)
+    api._release_lock = api._lock.release
+    api._busy = lambda: {'ok': False, 'code': 'busy'}
+    return api
+
 
 class WorkerGuards(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -222,7 +230,7 @@ class StoreAndCollectGuards(unittest.TestCase):
                 hub.store.close()
 
     def test_collect_validation_logs_only_code(self):
-        api = SimpleNamespace(_lock=Mock())
+        api = insight_api(_lock=Mock())
         for body, code in [(None, 'invalid_query'),
                            ({'kind': 'unknown', 'keywords': ['合成隐私词']}, 'invalid_kind'),
                            ({**QUERY, 'kind': 'audience', 'keywords': []}, 'invalid_keywords'),
@@ -237,7 +245,7 @@ class StoreAndCollectGuards(unittest.TestCase):
     def test_collect_internal_value_error(self):
         client = Mock()
         client._post.side_effect = ValueError('synthetic JSON decode')
-        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        api = insight_api(_lock=threading.Lock(), _client=lambda: client)
         with self.assertLogs('index_hub.insights', 'ERROR') as logs:
             result = collect(api, {**QUERY, 'kind': 'audience'})
         self.assertEqual(result['code'], 'request_failed')
