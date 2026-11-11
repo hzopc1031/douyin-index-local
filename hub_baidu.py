@@ -115,7 +115,7 @@ async def run_one(hub, row, query):
         counter = daily(store)
         feed_enabled = os.environ.get('INDEX_HUB_BAIDU_FEED_ENABLED') == '1' and query.get('kind') not in ('related', 'audience')
         news_enabled = os.environ.get('INDEX_HUB_BAIDU_NEWS_ENABLED') == '1' and query.get('kind') not in ('related', 'audience')
-        http_reserved = 1 if query.get('kind') == 'related' else 3 if query.get('kind') == 'audience' else (2 + 2 * feed_enabled + 2 * news_enabled) * len(list(adapter.chunks(query)))
+        http_reserved = 1 if query.get('kind') == 'related' else 3 if query.get('kind') == 'audience' else (2 + 2 * feed_enabled + 2 * news_enabled + 2 * len(query.get('regions', []))) * len(list(adapter.chunks(query)))
         if counter['attempts'] >= config['logical_daily'] or counter['http_reserved'] + http_reserved > config['http_daily']:
             fail(store, row['id'], 'baidu_daily_limit')
             return True
@@ -142,7 +142,7 @@ async def run_one(hub, row, query):
                 payload['_news_enabled'] = True
             if selected_date:
                 payload['related_date'] = selected_date
-            response = await asyncio.to_thread(hub.bridge, 'baidu_query', payload, 30 + 80 * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
+            response = await asyncio.to_thread(hub.bridge, 'baidu_query', payload, 30 + (80 + 50 * len(query.get('regions', []))) * len(list(adapter.chunks(query))) + config['chunk_interval_seconds'] * (len(list(adapter.chunks(query))) - 1))
             if response.get('ok') is not True:
                 code = response.get('code')
                 fail(store, row['id'], code if code in adapter.ERRORS else 'request_failed')
@@ -163,11 +163,14 @@ async def run_one(hub, row, query):
             if news_enabled and 'news_rows' not in response:
                 raise HubError('invalid_result', '百度媒体结果缺失。')
             result = adapter.public_result(response)
+            if result['metadata'].get('regions') != query.get('regions'):
+                raise HubError('invalid_result', '百度结果与任务不一致。')
             if any(result['metadata'][k] != query[k] for k in ('platform', 'keywords', 'start_date', 'end_date')):
                 raise HubError('invalid_result', '百度结果与任务不一致。')
             store.ingest(result)
             has_values = any(r['search_index'] is not None for r in result['rows'])
-            store.update_job(row['id'], 'succeeded' if result['metadata']['complete'] else 'partial' if has_values else 'no_data', result=result)
+            national_complete = adapter.make_result(query, result['rows'])['metadata']['complete']
+            store.update_job(row['id'], 'succeeded' if national_complete else 'partial' if has_values else 'no_data', result=result)
         except asyncio.CancelledError:
             fail(store, row['id'], 'interrupted')
             raise

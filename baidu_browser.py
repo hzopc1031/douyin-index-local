@@ -364,7 +364,7 @@ class PageTransport:
             count = result.get('requests_sent')
             if type(count) is int and 0 <= count <= 1000 and type(previous) is int:
                 self.requests_sent = previous + count
-            if result.get('stage') in ('search', 'search_ptbk', 'feed', 'feed_ptbk', 'news', 'news_ptbk', 'related', 'audience'):
+            if result.get('stage') in ('search', 'search_ptbk', 'feed', 'feed_ptbk', 'news', 'news_ptbk', 'region', 'region_ptbk', 'related', 'audience'):
                 self.stage = result['stage']
         if not isinstance(result, dict) or result.get('status') != 'ok':
             code = result.get('status') if isinstance(result, dict) else None
@@ -400,7 +400,7 @@ class PageTransport:
             return result.get('data')
         if query.get('kind') == 'audience':
             return result.get('data')
-        if query.get('_feed_enabled') or query.get('_news_enabled'):
+        if query.get('_feed_enabled') or query.get('_news_enabled') or query.get('_regions'):
             output = {'rows': result.get('rows')}
             for flag, name in (('_feed_enabled', 'feed'), ('_news_enabled', 'news')):
                 if not query.get(flag):
@@ -412,6 +412,18 @@ class PageTransport:
                     output[name + '_shape'] = shape
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
+            if query.get('_regions'):
+                output['region_rows'] = result.get('region_rows')
+                output['region_shapes'] = []
+                for item in result.get('region_shapes', []):
+                    try:
+                        shape = baidu_adapter.safe_region_shape(item)
+                        if shape['region'] not in [r['name'] for r in query['_regions']]:
+                            raise ValueError
+                        logging.getLogger('index_hub.baidu').info('baidu_region_shape %s', json.dumps(shape, ensure_ascii=False, separators=(',', ':')))
+                        output['region_shapes'].append(shape)
+                    except (TypeError, ValueError, KeyError):
+                        pass
             return output
         return result.get('rows')
 

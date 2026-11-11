@@ -1,6 +1,7 @@
 """Baidu protocol, validation and browser bridge adapter."""
 import datetime as dt
 import json
+import os
 import re
 from typing import Protocol
 from urllib.parse import urlencode
@@ -59,8 +60,17 @@ def validate_query(body, *, historical=False):
     from hub_store import HubError, _validate_douyin_query
     if type(body) is not dict or body.get('platform') != 'baidu':
         raise HubError('invalid_query', '请选择百度。')
+    regions = body.get('regions')
+    if 'regions' in body and (historical or os.environ.get('INDEX_HUB_BAIDU_REGION_ENABLED') == '1'):
+        from baidu_area_codes import PROVINCE_CODE, CITY_CODE
+        if type(regions) is not list or not 1 <= len(regions) <= 5 or any(type(r) is not str or r not in PROVINCE_CODE and r not in CITY_CODE for r in regions):
+            raise HubError('invalid_regions', '地区须为 1–5 个受支持的省或城市名称。')
+        regions = list(dict.fromkeys(regions))
+        body = {k: v for k, v in body.items() if k != 'regions'}
+    else:
+        regions = None
     q = _validate_douyin_query({**body, 'platform': 'douyin'}, historical=historical)
-    return {**q, 'platform': 'baidu'}
+    return {**q, 'platform': 'baidu', **({'regions': regions} if regions else {})}
 
 
 def validate_insight(body, *, historical=False, **kwargs):
@@ -68,6 +78,8 @@ def validate_insight(body, *, historical=False, **kwargs):
     if body.get('kind') not in ('related', 'audience'):
         raise HubError('platform_unavailable', '百度不支持此分析类型。', 422)
     query = validate_query({k: v for k, v in body.items() if k != 'kind'}, historical=historical)
+    if 'regions' in query:
+        raise HubError('invalid_query', '关联词和画像不支持地区趋势。')
     if len(query['keywords']) != 1:
         raise HubError('invalid_keywords', '关联分析每次仅支持一个关键词。')
     return {**query, 'kind': body['kind']}
@@ -339,6 +351,24 @@ def safe_extra_shape(value):
     return value
 
 
+def safe_region_shape(value):
+    from baidu_area_codes import PROVINCE_CODE, CITY_CODE
+    fields = {'region', 'http_status', 'business_status', 'data_fields', 'user_indexes_type',
+              'user_indexes_length', 'ptbk_length', 'decoded_points', 'empty_points', 'used_fallback'}
+    if type(value) is not dict or set(value) != fields or value['region'] not in (PROVINCE_CODE | CITY_CODE):
+        raise ValueError
+    if type(value['http_status']) is not int or not 200 <= value['http_status'] <= 299 or type(value['business_status']) is not int or value['business_status'] != 0:
+        raise ValueError
+    names = value['data_fields']
+    if type(names) is not list or names != sorted(set(names)) or any(x not in {'status', 'data', 'uniqid', 'index', 'key', 'userIndexes', 'word', 'name', 'wordType', 'all', 'pc', 'wise', 'startDate', 'endDate', 'type', 'generalRatio', 'wordlist', 'wordGraph'} for x in names):
+        raise ValueError
+    if value['user_indexes_type'] != 'array' or type(value['used_fallback']) is not bool:
+        raise ValueError
+    if any(type(value[k]) is not int or not 0 <= value[k] <= 1048576 for k in ('user_indexes_length', 'ptbk_length', 'decoded_points', 'empty_points')) or value['empty_points'] > value['decoded_points']:
+        raise ValueError
+    return value
+
+
 def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=None, feed_enabled=False, news_enabled=False):
     import time
     q = validate_query(query)
@@ -346,16 +376,22 @@ def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=Non
     rows = []
     extras = {field: [] for enabled, field in ((feed_enabled, 'feed_rows'), (news_enabled, 'news_rows')) if enabled}
     shapes = {}
+    if q.get('regions'):
+        extras['region_rows'] = []
+        from baidu_area_codes import PROVINCE_CODE, CITY_CODE
     for i, chunk in enumerate(chunks(q)):
         if i:
             (sleep or time.sleep)(chunk_interval)
-        answer = browser.query({**chunk, '_budget_day': budget_day, **({'_feed_enabled': True} if feed_enabled else {}), **({'_news_enabled': True} if news_enabled else {})})
+        answer = browser.query({**chunk, '_budget_day': budget_day, **({'_feed_enabled': True} if feed_enabled else {}), **({'_news_enabled': True} if news_enabled else {}), **({'_regions': [{'name': r, 'code': (CITY_CODE | PROVINCE_CODE)[r]} for r in q['regions']]} if q.get('regions') else {})})
         if extras:
             if not isinstance(answer, dict) or not isinstance(answer.get('rows'), list) or any(not isinstance(answer.get(field), list) for field in extras):
                 raise BaiduError('response_schema')
             rows.extend(answer['rows'])
             for field in extras:
                 extras[field].extend(answer[field])
+                if field == 'region_rows':
+                    shapes.setdefault('regions', []).extend(answer.get('region_shapes', []))
+                    continue
                 shape_field = field.replace('_rows', '_shape')
                 if shape_field in answer:
                     shapes.setdefault(field.split('_')[0], []).append(answer[shape_field])
@@ -364,6 +400,9 @@ def collect_page(query, browser, *, chunk_interval=8, sleep=None, budget_day=Non
     result = {**make_result(q, rows), **extras}
     if shapes:
         result['metadata']['extra_index_shapes'] = shapes
+    if q.get('regions'):
+        expected_count = len(q['regions']) * len(q['keywords']) * 3 * ((dt.date.fromisoformat(q['end_date']) - dt.date.fromisoformat(q['start_date'])).days + 1)
+        result['metadata']['complete'] &= len(extras['region_rows']) == expected_count and all(r.get('value_status') == 'available' for r in extras['region_rows'])
     public_result(result)
     return result
 
@@ -390,7 +429,7 @@ def public_result(result):
     from hub_store import HubError
     try:
         m = result['metadata']
-        q = validate_query({k: m[k] for k in ('platform', 'keywords', 'start_date', 'end_date')}, historical=True)
+        q = validate_query({k: m[k] for k in ('platform', 'keywords', 'start_date', 'end_date', 'regions') if k in m}, historical=True)
         if any(m.get(k) != v for k, v in DIMENSIONS.items()):
             raise ValueError
         stamp = dt.datetime.fromisoformat(m['fetched_at'])
@@ -419,7 +458,7 @@ def public_result(result):
                 if flags != sorted(flags, reverse=True) or any(((word, device, day) in present) != flag for day, flag in zip(dates, flags) for device in ('pc', 'wise')):
                     raise ValueError
         derived = make_result(q, clean, fetched_at=m['fetched_at'])['metadata']
-        if any(m.get(k, derived[k]) != derived[k] or type(m.get(k, derived[k])) is not type(derived[k]) for k in ('data_end_date', 'lagged')) or type(m.get('complete')) is not bool or m['complete'] != derived['complete']:
+        if any(m.get(k, derived[k]) != derived[k] or type(m.get(k, derived[k])) is not type(derived[k]) for k in ('data_end_date', 'lagged')) or type(m.get('complete')) is not bool:
             raise ValueError
         note = '指数不等于搜索次数。'
         if derived['lagged'] and derived['data_end_date']:
@@ -440,15 +479,34 @@ def public_result(result):
                 expected_extra.remove(key)
                 clean_extra.append(dict(keyword=key[0], date=key[1], device='all', value=value, value_status=state))
             extras[field] = clean_extra
+        if 'regions' in q:
+            if type(result.get('region_rows')) is not list:
+                raise ValueError
+            region_rows = []
+            for region in q['regions']:
+                regional = [r for r in result['region_rows'] if r.get('region') == region]
+                regional_result = make_result({k: v for k, v in q.items() if k != 'regions'}, regional, fetched_at=m['fetched_at'])
+                checked = public_result(regional_result)['rows']
+                region_rows.extend({**r, 'region': region} for r in checked)
+            if len(region_rows) != len(result['region_rows']):
+                raise ValueError
+            extras['region_rows'] = region_rows
+        elif 'region_rows' in result:
+            raise ValueError
+        region_complete = 'regions' not in q or (len(extras['region_rows']) == len(q['regions']) * len(q['keywords']) * 3 * days and all(r['value_status'] == 'available' for r in extras['region_rows']))
+        if m['complete'] != (derived['complete'] and region_complete):
+            raise ValueError
         shapes = {}
         try:
             candidate = m.get('extra_index_shapes', {})
-            if type(candidate) is not dict or set(candidate) - {'feed', 'news'}:
+            if type(candidate) is not dict or set(candidate) - {'feed', 'news', 'regions'}:
                 raise ValueError
             for name, items in candidate.items():
-                if type(items) is not list or not items or len(items) > 3:
+                if type(items) is not list or not items or len(items) > (15 if name == 'regions' else 3):
                     raise ValueError
-                shapes[name] = [safe_extra_shape(item) for item in items]
+                shapes[name] = [safe_region_shape(item) if name == 'regions' else safe_extra_shape(item) for item in items]
+                if name == 'regions' and any(item['region'] not in q.get('regions', []) for item in items):
+                    raise ValueError
         except (TypeError, ValueError, OverflowError):
             shapes = {}
         return {'rows': clean, **extras, 'metadata': {**DIMENSIONS, **q, 'fetched_at': stamp.isoformat(),
@@ -610,7 +668,7 @@ class BaiduAdapter:
         from hub_store import encode, query_hash
         result = public_result(result)
         m = result['metadata']
-        q = {k: m[k] for k in ('platform', 'keywords', 'start_date', 'end_date')}
+        q = {k: m[k] for k in ('platform', 'keywords', 'start_date', 'end_date', 'regions') if k in m}
         stamp = dt.datetime.fromisoformat(m['fetched_at']).timestamp()
         identifier = dataset_id or uuid.uuid4().hex
         for old in store.db.execute('SELECT id,result FROM datasets WHERE qhash=? AND fetched=?', (query_hash(q), stamp)):
@@ -618,12 +676,12 @@ class BaiduAdapter:
                 return old['id']
         with store.db:
             store.db.execute('INSERT INTO datasets VALUES(?,?,?,?,?,?)', (identifier, query_hash(q), encode(q), stamp, encode(result), time.time()))
-            for row in result['rows']:
+            for row in result['rows'] + result.get('region_rows', []):
                 store.db.execute('''INSERT INTO baidu_points VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(platform,metric,device,region,granularity,source,keyword,day)
                     DO UPDATE SET value=excluded.value,value_status=excluded.value_status,fetched=excluded.fetched,dataset=excluded.dataset
                     WHERE excluded.fetched>=baidu_points.fetched''',
-                    ('baidu', 'search_index', row['device'], '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['search_index']), row['value_status'], stamp, identifier))
+                    ('baidu', 'search_index', row['device'], row.get('region', '全国'), 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['search_index']), row['value_status'], stamp, identifier))
             for field, metric in (('feed_rows', 'feed_index'), ('news_rows', 'news_index')):
               for row in result.get(field, []):
                 store.db.execute('''INSERT INTO baidu_points VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
@@ -633,7 +691,7 @@ class BaiduAdapter:
                     ('baidu', metric, 'all', '全国', 'day', 'index.baidu.com', row['keyword'], row['date'], encode(row['value']), row['value_status'], stamp, identifier))
         return identifier
 
-    def series(self, store, keyword, start=None, end=None, device="all", metric="search_index"):
+    def series(self, store, keyword, start=None, end=None, device="all", metric="search_index", region="全国"):
         from hub_store import HubError
         if not isinstance(keyword, str) or not 1 <= len(keyword) <= 100:
             raise HubError('invalid_keyword', '请指定关键词。')
@@ -646,19 +704,22 @@ class BaiduAdapter:
                     raise ValueError
         except (ValueError, TypeError):
             raise HubError('invalid_dates', '最多查询连续 731 天的已存储数据。') from None
+        from baidu_area_codes import PROVINCE_CODE, CITY_CODE
+        if region != '全国' and region not in (PROVINCE_CODE | CITY_CODE):
+            raise HubError('invalid_parameters', '不支持的地区。')
         if metric not in ('search_index', 'feed_index', 'news_index') or (metric != 'search_index' and device != 'all'):
             raise HubError('invalid_parameters', '不支持的指标或设备。')
         if device == 'all_devices':
-            data = self.series(store, keyword, start, end, 'all')
+            data = self.series(store, keyword, start, end, 'all', metric, region)
             data['points'] = [point for name in ('all', 'pc', 'wise')
-                              for point in self.series(store, keyword, start, end, name)['points']]
+                              for point in self.series(store, keyword, start, end, name, metric, region)['points']]
             data['device'] = device
             data['metric_name'] = '搜索指数'
             return data
         if device not in ('all', 'pc', 'wise'):
             raise HubError('invalid_parameters', '不支持的设备。')
-        sql = 'SELECT * FROM baidu_points WHERE keyword=? AND device=? AND metric=?'
-        args = [keyword, device, metric]
+        sql = 'SELECT * FROM baidu_points WHERE keyword=? AND device=? AND metric=? AND region=?'
+        args = [keyword, device, metric, region]
         if start:
             sql += ' AND day BETWEEN ? AND ?'
             args += [start, end]
@@ -672,14 +733,14 @@ class BaiduAdapter:
                       'value': None, 'composite_index': None, 'value_status': 'missing', 'fetched_at': None, 'dataset_id': None})
                       for i in range((b-a).days+1)]
         return {'platform': 'baidu', 'metric': metric, 'metric_name': {'feed_index': '资讯指数', 'news_index': '媒体指数'}.get(metric) or {'all': '整体搜索指数', 'pc': 'PC 搜索指数', 'wise': '移动搜索指数'}[device], 'keyword': keyword,
-                'region': '全国', 'device': device, 'granularity': 'day', 'unit': '指数', 'points': points,
+                'region': region, 'device': device, 'granularity': 'day', 'unit': '指数', 'points': points,
                 'source': 'index.baidu.com', 'live_request': False, 'note': '仅返回已保存数据。'}
 
     def csv_rows(self, data):
         from storage import _csv_keyword
         yield ['platform', 'metric', 'region', 'keyword', 'date', 'search_index', 'composite_index', 'fetched_at', 'device', 'granularity', 'source', 'value_status']
         for p in data['points']:
-            yield ['baidu', data.get('metric', 'search_index'), '全国', _csv_keyword(data['keyword']), p['date'],
+            yield ['baidu', data.get('metric', 'search_index'), data.get('region', '全国'), _csv_keyword(data['keyword']), p['date'],
                    '' if p['value'] is None else p['value'], '', p['fetched_at'], p['device'], 'day', 'index.baidu.com', p['value_status']]
 
     def status_counts(self, store):
