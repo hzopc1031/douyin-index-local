@@ -13,5 +13,5 @@ def format_srt(segments):
 
 def transcribe(video, subtitle, model):
     from faster_whisper import WhisperModel
-    segments, _ = WhisperModel(model).transcribe(str(video))
+    segments, _ = WhisperModel(model, device='cpu', compute_type='int8').transcribe(str(video))
     subtitle.write_text(format_srt(segments), encoding='utf-8')
