@@ -1,3 +1,5 @@
 playwright
 Pillow
 zxing-cpp
+
+qrcode
