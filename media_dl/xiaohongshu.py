@@ -9,7 +9,6 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import re
 from urllib.parse import urlparse, parse_qsl
-from .safety import safe_log
 
 
 def is_xhs(url):
@@ -44,7 +43,8 @@ def write_status(status):
 
 def has_session(context):
     return any(cookie.get('name') == 'web_session' and cookie.get('value')
-               for cookie in context.cookies('https://www.xiaohongshu.com'))
+               for cookie in context.cookies(['https://xiaohongshu.com', 'https://www.xiaohongshu.com',
+                                              'https://rednote.com', 'https://www.rednote.com']))
 
 
 def visible(page, selector):
@@ -55,8 +55,8 @@ def visible(page, selector):
     return None
 
 
-def logged_in(page, context):
-    return bool(has_session(context) and visible(page, 'a[href*="/user/profile/"], [data-testid="user-avatar"]'))
+def logged_in(page, context, authenticated=False):
+    return bool(authenticated and has_session(context))
 
 
 def login_container(page):
@@ -162,7 +162,15 @@ def save_url_qr(payload, path):
 
 def response_data(response, events):
     try:
-        path = urlparse(response.url).path.lower()
+        parsed = urlparse(response.url)
+        path = parsed.path.lower()
+        if (parsed.scheme == 'https' and parsed.hostname in ('xiaohongshu.com', 'www.xiaohongshu.com', 'rednote.com', 'www.rednote.com')
+                and parsed.port in (None, 443) and path == '/api/sns/web/v2/user/me'):
+            body = response.json()
+            data = body.get('data') if isinstance(body, dict) and body.get('success') is True else None
+            if isinstance(data, dict) and data.get('guest') is False:
+                events.append(('identity', True))
+            return
         if 'login/qrcode/create' in path:
             kind = 'create'
         elif 'login/qrcode/status' in path or '/api/qrcode/userinfo' in path:
@@ -303,10 +311,11 @@ def login():
                 no_create_at = time.monotonic() + 20
                 risk_retry_at = 0
                 state = None
+                authenticated = False
                 retry_at = time.monotonic() + 15 if urlparse(page.url).path.rstrip('/') == '/login' else 0
                 had_container = False
                 while time.monotonic() < deadline:
-                    if logged_in(page, context):
+                    if logged_in(page, context, authenticated):
                         set_status('logged_in')
                         return 0
                     on_login_page = urlparse(page.url).path.rstrip('/') == '/login'
@@ -323,7 +332,9 @@ def login():
                     had_container = bool(container)
                     while events:
                         kind, data = events.pop(0)
-                        if kind == 'create':
+                        if kind == 'identity':
+                            authenticated = True
+                        elif kind == 'create' and state not in ('scanned', 'confirmed'):
                             create_seen = True
                             if not isinstance(data.get('url'), str) or not save_url_qr(data['url'], path):
                                 path.unlink(missing_ok=True)
@@ -342,17 +353,24 @@ def login():
                                 set_status('need_scan')
                                 state = 'need_scan'
                                 save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
-                        elif kind == 'status' and issued is not None:
+                        elif kind == 'status' and issued is not None and state != 'confirmed':
                             value = status_code(data)
                             if value == 1 and state != 'scanned':
                                 set_status('scanned')
                                 state = 'scanned'
+                            elif value == 2:
+                                authenticated = True
+                                state = 'confirmed'
                             elif value == 3:
+                                state = 'expired'
                                 refresh_at = 0
+                    if state == 'confirmed' or authenticated:
+                        page.wait_for_timeout(1000)
+                        continue
                     risk = time.monotonic() >= risk_retry_at and visible(page, 'text=薯队长遇到了点小麻烦')
                     no_create = issued is None and not create_seen and time.monotonic() >= no_create_at
                     expired = container and visible(container, 'text=/二维码.*(过期|失效)|点击刷新|刷新二维码/')
-                    if risk or no_create or expired or (refresh_at is not None and time.monotonic() >= refresh_at):
+                    if state != 'scanned' and (risk or no_create or expired or (refresh_at is not None and time.monotonic() >= refresh_at)):
                         if risk or no_create:
                             log_event('登录页风控提示，将重试' if risk else '登录码等待超时，将重试')
                         issued = refresh_at = None
@@ -375,7 +393,7 @@ def login():
                                 state = 'need_scan'
                                 save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                                 break
-                    if not container and time.monotonic() >= retry_at:
+                    if state != 'scanned' and not container and time.monotonic() >= retry_at:
                         log_event('未找到登录容器，将重试')
                         button = None if on_login_page else login_button(page)
                         if button:
@@ -392,9 +410,7 @@ def login():
             finally:
                 context.close()
     except Exception as exc:
-        message = safe_log(str(exc)).replace('\n', ' ').replace('\r', ' ')
-        message = re.sub(r'(?i)(?:https?://|\b(?:cookie|url|qr_?id)\b).*', '[redacted]', message)
-        log_event(f'登录失败: {type(exc).__name__}: {message[:200]}')
+        log_event(f'登录失败: {type(exc).__name__}')
         set_status('error')
         return 1
 

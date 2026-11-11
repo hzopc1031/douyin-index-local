@@ -221,17 +221,70 @@ class XhsTests(unittest.TestCase):
                 self.assertNotIn(secret, log.lower())
             self.assertEqual((root / 'xhs-login.log').stat().st_mode & 0o777, 0o600)
 
-    def test_login_requires_session_and_avatar(self):
+    def test_login_requires_session_and_confirmation(self):
         context = MagicMock()
         page = MagicMock()
-        with patch.object(xhs, 'visible', return_value=object()):
-            context.cookies.return_value = []
-            self.assertFalse(xhs.logged_in(page, context))
-            context.cookies.return_value = [{'name': 'web_session', 'value': 'synthetic'}]
-            self.assertTrue(xhs.logged_in(page, context))
-        with patch.object(xhs, 'visible', return_value=None):
-            self.assertFalse(xhs.logged_in(page, context))
+        context.cookies.return_value = []
+        self.assertFalse(xhs.logged_in(page, context, True))
+        context.cookies.return_value = [{'name': 'web_session', 'value': 'synthetic'}]
+        self.assertFalse(xhs.logged_in(page, context))
+        self.assertTrue(xhs.logged_in(page, context, True))
+        self.assertEqual(context.cookies.call_args.args[0], ['https://xiaohongshu.com', 'https://www.xiaohongshu.com', 'https://rednote.com', 'https://www.rednote.com'])
         self.assertEqual(xhs.status_code({'CODE_STATUS': 2}), 2)
+
+    def test_session_on_rednote_only(self):
+        context = MagicMock()
+        context.cookies.side_effect = lambda urls: ([{'name': 'web_session', 'value': 'synthetic'}]
+                                                    if 'https://www.rednote.com' in urls else [])
+        self.assertTrue(xhs.has_session(context))
+
+    def test_identity_response_keeps_only_authenticated_boolean(self):
+        response = MagicMock(url='https://www.rednote.com/api/sns/web/v2/user/me')
+        events = []
+        response.json.return_value = {'success': True, 'data': {'guest': True}}
+        xhs.response_data(response, events)
+        self.assertEqual(events, [])
+        response.json.return_value = {'success': True, 'data': {'guest': False, 'user_id': 'synthetic'}}
+        xhs.response_data(response, events)
+        self.assertEqual(events, [('identity', True)])
+        response.url = 'https://rednote.com.evil/api/sns/web/v2/user/me'
+        xhs.response_data(response, events)
+        self.assertEqual(events, [('identity', True)])
+
+    def test_scan_waits_without_refresh_and_success_waits_for_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://example.com/login')
+            page.screenshot.return_value = b'page'
+            clock = [0]
+            waits = [0]
+            statuses = []
+            def emit(path, data):
+                response = MagicMock(url='https://example.com/' + path)
+                response.json.return_value = {'data': data}
+                page.on.call_args.args[1](response)
+            def navigate(*args, **kwargs):
+                emit('login/qrcode/create', {'url': 'https://example.com/login?qr_id=synthetic', 'ttl': 1})
+                emit('login/qrcode/status', {'codeStatus': 1})
+            def wait(milliseconds):
+                clock[0] += milliseconds / 1000
+                if milliseconds == 1000:
+                    waits[0] += 1
+                    if waits[0] == 3:
+                        emit('login/qrcode/status', {'code_status': 2})
+                    if waits[0] == 5:
+                        context.cookies.return_value = [{'name': 'web_session', 'value': 'synthetic'}]
+            page.goto.side_effect = navigate
+            page.wait_for_timeout.side_effect = wait
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=None), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'save_url_qr', return_value=True), patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]), patch.object(xhs, 'write_status', side_effect=statuses.append), patch.object(xhs, 'refresh_qr') as refresh:
+                context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                context.pages = [page]
+                context.cookies.return_value = []
+                self.assertEqual(xhs.login(), 0)
+                refresh.assert_not_called()
+                context.close.assert_called_once()
+            self.assertEqual(statuses, ['need_scan', 'scanned', 'logged_in'])
+            self.assertGreaterEqual(waits[0], 5)
 
     def test_status_and_refresh_in_login_loop(self):
         for expire in ('status', 'time'):
@@ -260,7 +313,10 @@ class XhsTests(unittest.TestCase):
                     context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
                     context.pages = [page]
                     self.assertEqual(xhs.login(), 1)
-                    refresh.assert_called()
+                    if expire == 'status':
+                        refresh.assert_called()
+                    else:
+                        refresh.assert_not_called()
                 self.assertIn('need_scan', statuses)
                 self.assertIn('scanned', statuses)
                 self.assertEqual(statuses[-1], 'expired')
@@ -333,14 +389,13 @@ class XhsTests(unittest.TestCase):
         self.assertIn(':text-is("Log in")', selector)
 
     def test_login_exception_logs_redacted_reason(self):
-        for detail in ('navigation failed https://example.com/?qr_id=secret', 'failed Cookie: secret', 'failed qr_id=secret', 'failed url=secret'):
+        for detail in ('navigation failed https://example.com/?qr_id=secret', 'failed Cookie: secret', 'failed qr_id=secret', 'failed url=secret', 'session=secret user_id=secret 手机号=secret'):
             with self.subTest(detail=detail), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright', side_effect=RuntimeError(detail)):
                     self.assertEqual(xhs.login(), 1)
                 log = (root / 'xhs-login.log').read_text()
-                self.assertIn('RuntimeError: ', log)
-                self.assertIn('failed', log)
+                self.assertIn('RuntimeError', log)
                 for sensitive in ('secret', 'cookie', 'qr_id', 'https://', 'url'):
                     self.assertNotIn(sensitive, log.lower())
 
