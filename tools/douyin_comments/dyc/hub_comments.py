@@ -152,11 +152,6 @@ def classify_probe(page):
     on_site = page.get("https") is True and host in ("www.douyin.com", "douyin.com")
     if page.get("account") and on_site:
         return "logged_in"
-    if page.get("login"):
-        return "not_logged_in"
-    # shortcut: account selectors are uncalibrated; no login wall on the main site counts as logged in.
-    if on_site and page.get("ready") == "complete" and not page.get("login") and not page.get("verification"):
-        return "logged_in"
     return "not_logged_in"
 
 
@@ -215,14 +210,11 @@ class QtCommentTransport:
 
 
 def _eval(window, js, arg=None):
+    # pywebview Window.evaluate_js(script, callback=None): the second
+    # argument is a callback, not a JavaScript value.
     if arg is None:
         return window.evaluate_js(js)
-    # pywebview evaluate_js is a string; tests may accept (js, arg).
-    fn = window.evaluate_js
-    try:
-        return fn(js, arg)
-    except TypeError:
-        return fn(f"({js})({json.dumps(arg, ensure_ascii=False)})")
+    return window.evaluate_js(f"({js})({json.dumps(arg, ensure_ascii=False)})")
 
 
 def _coerce_fetch(raw):
@@ -370,6 +362,7 @@ class CommentsHub:
             "busy": False,
             "waiting_for_index": False,
             "summary": None,
+            "output": None,
         }
 
     def status(self):
@@ -403,20 +396,30 @@ class CommentsHub:
                 self._release()
 
     def start(self, payload, *, budget=None, pacer=None):
-        videos = self._videos(payload)
+        try:
+            videos = self._videos(payload)
+        except ValueError:
+            return {"ok": False, "code": "invalid_parameters", "message": "请提供有效的视频链接列表。"}
         probed = self.probe()
         if not probed.get("ok"):
             return probed
         if probed["probe"] != "logged_in":
             return {"ok": False, "code": probed["probe"], "probe": probed["probe"], **login_hint(probed["probe"])}
+        if self._worker is not None and self._worker.is_alive():
+            return {"ok": False, "code": "busy", "message": COMMENTS_BUSY, **self.status()}
         with self._guard:
-            if self._snapshot["running"]:
-                return {"ok": False, "code": "busy", "message": COMMENTS_BUSY, **self.status()}
-            if self._snapshot["paused"] and self._snapshot["pause_reason"] not in (None, "user"):
-                return {"ok": False, "code": "paused", "pause_reason": self._snapshot["pause_reason"], **self.status()}
+            running = self._snapshot["running"]
+            paused = self._snapshot["paused"]
+            reason = self._snapshot["pause_reason"]
+            snap = dict(self._snapshot)
+        if running:
+            return {"ok": False, "code": "busy", "message": COMMENTS_BUSY, **snap, **login_hint(snap.get("probe"))}
+        if paused and reason not in (None, "user"):
+            return {"ok": False, "code": "paused", "pause_reason": reason, **snap, **login_hint(snap.get("probe"))}
+        with self._guard:
             self._stop.clear()
             self._snapshot.update(running=True, paused=False, pause_reason=None, busy=False,
-                                  waiting_for_index=False, summary=None)
+                                  waiting_for_index=False, summary=None, output=None)
         counter = DailyCounter(self.state_dir, limit=DAILY_LIMIT)
         try:
             counter.check_start()
@@ -436,7 +439,6 @@ class CommentsHub:
         with self._guard:
             self._snapshot["paused"] = True
             self._snapshot["pause_reason"] = self._snapshot["pause_reason"] or "user"
-            self._snapshot["running"] = False
         return {"ok": True, **self.status()}
 
     def resume(self):
@@ -468,22 +470,31 @@ class CommentsHub:
                 job = CollectJob(video, self._make_transport(budget, pacer), BATCH_LIMIT)
                 try:
                     while not job.done and not self._stop.is_set():
+                        acquired = self._acquire is None
                         if self._acquire is not None:
-                            while not self._stop.is_set() and not self._acquire("comments"):
+                            while True:
+                                if self._acquire("comments"):
+                                    acquired = True
+                                    break
+                                if self._stop.is_set():
+                                    break
                                 with self._guard:
                                     self._snapshot["waiting_for_index"] = True
                                 self._sleeper(0.2)
                             with self._guard:
                                 self._snapshot["waiting_for_index"] = False
-                                self._snapshot["busy"] = True
+                        if not acquired:
+                            break
                         try:
+                            with self._guard:
+                                self._snapshot["busy"] = True
                             more = asyncio.run(self._timed(job.run_slice(self.lock_pages)))
                             if not more:
                                 break
                         finally:
                             with self._guard:
                                 self._snapshot["busy"] = False
-                            if self._release is not None:
+                            if self._acquire is not None and self._release is not None:
                                 self._release()
                 except Stop as error:
                     reason = pause_reason(error.reason)
@@ -491,17 +502,24 @@ class CommentsHub:
                         self._halt(True, reason)
                         summaries.append(video.summary() if hasattr(video, "summary") else {"reason": reason})
                         self._store_summary(summaries)
+                        self._export(videos, error.code, reason)
                         return
                     video.status, video.reason = "partial", error.reason
                 summaries.append(video.summary() if hasattr(video, "summary") else {"status": video.status,
                                                                                    "reason": video.reason})
             self._store_summary(summaries)
+            self._export(videos, 0 if not self._stop.is_set() else 2,
+                         (self.status().get("pause_reason") or "complete"))
             with self._guard:
                 self._snapshot["running"] = False
                 if self._stop.is_set() and not self._snapshot["pause_reason"]:
                     self._snapshot["paused"] = True
                     self._snapshot["pause_reason"] = "user"
         except Exception:
+            try:
+                self._export(videos, 3, "browser_unavailable")
+            except Exception:
+                pass
             self._halt(True, "browser_unavailable")
 
     async def _timed(self, awaitable):
@@ -533,6 +551,16 @@ class CommentsHub:
                 "reasons": [item.get("reason") if isinstance(item, dict) else None for item in summaries],
             }
 
+    def _export(self, videos, code, reason):
+        from .output import export
+        run_id = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        out = self.state_dir / "runs" / run_id
+        requests = sum(getattr(video, "pages", 0) for video in videos)
+        result = export(out, run_id, videos, code, reason, requests)
+        with self._guard:
+            self._snapshot["output"] = {"run_id": run_id, "requests": requests,
+                                        "videos": result.get("videos")}
+
     def _ensure_url(self, window):
         current = urlsplit(window.get_current_url() or "")
         if current.scheme != "https" or current.hostname not in ("www.douyin.com", "douyin.com") or current.port not in (None, 443):
@@ -554,7 +582,12 @@ class CommentsHub:
         for item in raw:
             if not isinstance(item, str):
                 raise ValueError("invalid_parameters")
-            target = site.parse_url(item)
+            try:
+                target = site.parse_url(item)
+            except Stop:
+                raise ValueError("invalid_parameters") from None
+            if not target.video_id:
+                raise ValueError("invalid_parameters")
             videos.append(Video(target.video_id, target.url))
         return videos
 

@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT / "tools" / "douyin_comments"))
 import app as app_module
 from storage import ResultStore
 from dyc.hub_comments import (
-    COMMENTS_BUSY, CommentsHub, CollectJob, PROBE_JS, classify_probe, lock_busy,
+    COMMENTS_BUSY, CommentsHub, CollectJob, QtCommentTransport, _eval,
+    classify_probe, lock_busy,
 )
 from dyc.models import Video
 from dyc.runtime import Budget, DailyCounter, Pacer
@@ -70,7 +71,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify_probe({**base, "verification": True}), "verification_required")
         self.assertEqual(classify_probe({**base, "login": True, "account": False}), "not_logged_in")
         self.assertEqual(classify_probe({**base, "account": True}), "logged_in")
-        self.assertEqual(classify_probe({**base, "login": False, "verification": False}), "logged_in")
+        self.assertEqual(classify_probe({**base, "login": False, "account": False, "verification": False}), "not_logged_in")
 
     def test_lock_busy_message(self):
         self.assertEqual(lock_busy("comments")["code"], "comments_busy")
@@ -175,6 +176,76 @@ class CommentsHubTests(unittest.TestCase):
         self.assertTrue(resumed["ok"])
         self.assertEqual(resumed["probe"], "logged_in")
         self.assertFalse(self.hub.status()["paused"])
+
+
+    def test_invalid_and_short_urls_are_rejected(self):
+        for url in ("not-a-url", "https://v.douyin.com/AbCdeFg/"):
+            with self.subTest(url=url):
+                result = self.hub.start({"videos": [url]})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "invalid_parameters")
+                self.assertIsNone(self.hub._worker)
+
+    def test_evaluate_js_invokes_fetch_with_serialized_config(self):
+        recorded = []
+
+        class Window:
+            def evaluate_js(self, script, callback=None):
+                recorded.append((script, callback))
+                return {"kind": "risk"}
+
+        raw = _eval(Window(), "(cfg) => cfg", {"video": "123", "path": "/aweme/v1/web/comment/list/"})
+        self.assertEqual(len(recorded), 1)
+        script, callback = recorded[0]
+        self.assertIsNone(callback)
+        self.assertIn('"video": "123"', script)
+        self.assertTrue(script.strip().startswith("("))
+
+    def test_worker_does_not_release_lock_it_never_acquired(self):
+        releases = []
+        acquires = []
+
+        def acquire(name):
+            acquires.append(name)
+            # First acquire is the probe inside start; later ones are the worker.
+            if len(acquires) == 1:
+                return True
+            return False
+
+        def release():
+            releases.append(1)
+
+        self.hub._acquire = acquire
+        self.hub._release = release
+        started = self.hub.start(
+            {"videos": ["https://www.douyin.com/video/1234567890"]},
+            budget=Budget(DailyCounter(Path(self.tmp.name)), batch_limit=1500),
+            pacer=InstantPacer(),
+        )
+        self.assertTrue(started["ok"])
+        self.hub.pause()
+        self.hub._worker.join(5)
+        self.assertEqual(len(releases), 1)
+
+    def test_verification_exports_partial_results(self):
+        class RiskTransport:
+            async def fetch(self, video_id, root, cursor):
+                return {"kind": "risk"}
+
+        self.hub._transport_factory = lambda budget, pacer: RiskTransport()
+        self.hub.start(
+            {"videos": ["https://www.douyin.com/video/1234567890"]},
+            budget=Budget(DailyCounter(Path(self.tmp.name)), batch_limit=1500),
+            pacer=InstantPacer(),
+        )
+        self.hub._worker.join(5)
+        output = self.hub.status()["output"]
+        self.assertIsNotNone(output)
+        self.assertIn("run_id", output)
+        run = Path(self.tmp.name) / "runs" / output["run_id"]
+        self.assertTrue((run / "comments.csv").is_file())
+        self.assertTrue((run / "run.json").is_file())
+        self.assertNotIn("sessionid", (run / "run.json").read_text())
 
 
 class CollectSliceTests(unittest.IsolatedAsyncioTestCase):
