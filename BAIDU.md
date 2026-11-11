@@ -48,3 +48,20 @@
 
 百度失败日志记录可获得的请求阶段、HTTP 和业务 status、异常类型及已发请求数；无法确定的计数标为 unknown。消息只保留安全词汇，不记录 Cookie、密文或关键词。
 成功时，资讯/媒体 extraIndex 的脱敏结构摘要写入 `index_hub.baidu` 的 info 日志（前缀 `baidu_extra_shape`）及结果 `metadata.extra_index_shapes`。摘要只含键名、数组长度、data/ptbk 长度、解密点数与是否回填，不含原文、密文、ptbk 值或词面。
+
+### 分地区搜索趋势（默认关闭）
+
+仅 `INDEX_HUB_BAIDU_REGION_ENABLED=1` 开启，其他值及未设置均关闭。百度趋势查询体可增加 `"regions":["北京","海南"]`，接受 1–5 个省或城市中文名，重复项按首次出现顺序去重；不支持的名称会在请求前拒绝。编码来自仓库 `baidu_area_codes.py` 的 `PROVINCE_CODE`、`CITY_CODE`，源自 longxiaofei/spider-BaiduIndex；海南和吉林在两表重名，按省编码 930、922。关联词、画像不采集地区趋势，资讯及媒体仍只采集全国。
+
+每片先按原流程采集全国搜索及开启的资讯/媒体，再为每个地区调用同一个 `GET /api/SearchApi/index`（`word`、`startDate`、`endDate`、页内 Cipher-Text 不变，`area` 改为地区编码），用该响应的 `/Interface/api/ptbk` 解密 `userIndexes` 的 all/pc/wise 日序列。这里不使用 `/api/SearchApi/region`，后者是画像的相对热度快照。每地区每分片额外预占 2 HTTP；总计 `(2 + 2*feed + 2*news + 2*地区数) * 分片数`，与现有 120/400 工程额度共用。空数据为 missing，不补零；全国完整而地区无数据的任务仍成功，但不作为完整结果缓存。结构或请求失败整单停止，不自动重试。脱敏形状摘要仅记录状态、字段名、长度、点数、回填标记和地区。
+
+`GET /api/v1/series?platform=baidu&keyword=…&region=北京` 和同参数 `/api/v1/export.csv` 读取该地区，省略 `region` 默认全国；关闭开关后已存地区数据仍可读取和导出。真实地区接口响应、解密和数值尚未用本项目账号确认，需独立与官方页面逐日核对。
+
+部署时可由管理员为 gateway 和 desktop 分别配置 systemd drop-in（路径和服务名以实际部署为准）：
+
+```ini
+[Service]
+Environment=INDEX_HUB_BAIDU_REGION_ENABLED=1
+```
+
+配置后执行 daemon-reload，重启 gateway（读取开关）和 desktop（运行页内脚本并读取开关）；重启会中断运行中的登录和任务。本次不修改服务文件、不部署。

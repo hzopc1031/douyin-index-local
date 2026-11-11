@@ -367,3 +367,18 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 `GET /api/v1/series?platform=baidu&keyword=…&metric=news_index` 与同参数 `/api/v1/export.csv` 仅读取已存数据；`device` 仅支持 `all` 或省略，CSV metric 为 `news_index`。关闭开关后仍可读、导出。媒体指数是百度新闻收录的新闻标题含关键词的数量，不是搜索次数，不分 PC/移动，与搜索和资讯指数口径不同，结果待核对。
 
 [官方 Helper](http://index.baidu.com/Helper/) 描述统计口径和低搜索指数时无数据；官方不提供开放 API。[qdata](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/extended_baidu_index.py)、[common](https://github.com/longxiaofei/spider-BaiduIndex/blob/master/qdata/baidu_index/common.py)、[baidux](https://github.com/iamsk/baidux/blob/master/baidux/extended_baidu_index.py) 和 [抓包笔记](https://blog.csdn.net/CY19980216/article/details/107650145) 提供第三方路径和解析：`/api/NewsApi/getNewsIndex` 的 `word`、`startDate`、`endDate`、`area`，响应 `data.uniqid`、`data.index[]` 的 `key`、`startDate`、`endDate`、加密 `data` 及对应 `/Interface/api/ptbk`。真实响应形状、词条实际形态、官方页面数值和自定义地域能否出媒体指数均未用本项目账号核对；第三方称不支持细分地域，官方帮助则同时对三种指数提到自定义地域。本步仅全国。上线更新需重启读取开关的 gateway 和运行页内脚本的 desktop；本次未部署。
+
+### 百度分地区搜索趋势
+
+默认关闭；只有 gateway 和 desktop 的 `INDEX_HUB_BAIDU_REGION_ENABLED=1` 才允许百度查询体增加 `regions`，例如 `{"platform":"baidu","keywords":["示例"],"start_date":"2026-10-01","end_date":"2026-10-07","regions":["北京","海南"]}`。接受 1–5 个受支持省市中文名，按首次出现顺序去重；`baidu_area_codes.py` 的省/市编码来自 longxiaofei/spider-BaiduIndex，海南、吉林按省编码 930、922。非法地区在发送前拒绝；关闭时字段集合及错误提示保持原样。
+
+全国搜索和原有资讯/媒体先采集，每地区每日期分片再用 `/api/SearchApi/index` 的 `area` 编码及对应 `/Interface/api/ptbk` 采集搜索日序列，不使用画像快照 `/api/SearchApi/region`。资讯、媒体、关联词及画像不采集地区趋势。每地区每分片预占额外 2 HTTP，总额为 `(2 + 2*feed + 2*news + 2*地区数) * 分片数`，计入百度 120/400 工程额度。空值为 missing；地区无数据不使全国成功任务失败，但不会缓存不完整结果。地区结果及接口形状尚未用本项目账号及官方页面核对。
+
+`GET /api/v1/series?platform=baidu&keyword=…&region=北京` 或 `/api/v1/export.csv` 同参数只读该地区；省略地区默认全国。关闭开关后已存地区数据仍可读、可导出。启用部署可分别给 gateway 和 desktop 配置 drop-in：
+
+```ini
+[Service]
+Environment=INDEX_HUB_BAIDU_REGION_ENABLED=1
+```
+
+执行 daemon-reload 后重启 gateway（读取开关）和 desktop（读取开关并运行页内脚本）。部署与独立页面验收说明见 [BAIDU.md](BAIDU.md)。
