@@ -107,13 +107,44 @@ GUARD_JS = """(function(){
   };
 })();"""
 
-# shortcut: comment scroll containers are uncalibrated; upgrade after observing the official page.
-SCROLL_JS = """(root => {
-  window.__dycRoot = root;
-  window.__dycResult = null; window.__dycSent = false; window.__dycArm = true;
-  const box = document.querySelector('[data-e2e="comment-list"], [class*="comment-list"]');
-  if (box) box.scrollTop = box.scrollHeight;
+# shortcut: reply matching requires unique visible comment text and nickname; upgrade when stable comment IDs are observed in the DOM.
+SCROLL_JS = r"""(cfg => {
+  const visible = e => {
+    const r = e.getBoundingClientRect(), style = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && r.left < innerWidth && r.right > 0 &&
+      r.top < innerHeight && r.bottom > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const find = q => [...document.querySelectorAll(q)].find(visible);
+  const risk = '[id*="captcha"], [class*="captcha-verify"], [data-e2e="verify-dialog"], iframe[src*="captcha"], iframe[src*="verify"], [data-dyc-risk="yes"]';
+  const text = document.body ? (document.body.innerText || '') : '';
+  if (find(risk) || ['安全验证', '身份验证', '使用原设备'].some(t => text.includes(t))) return false;
+  const box = find('[data-e2e="comment-list"]');
+  const button = find('[data-e2e="feed-comment-icon"], [data-e2e="comment-icon"], [data-e2e="comment-count"]');
+  if (document.readyState !== 'complete' && !box && !button) return false;
+  if (window.__dycSent || window.__dycResult) return true;
+  window.__dycRoot = cfg.root;
+  window.__dycArm = true;
+  if (!box) {
+    if (!button || cfg.opened) return false;
+    button.click();
+    return cfg.root ? "opened" : true;
+  }
+  if (cfg.root) {
+    const items = [...box.querySelectorAll('[data-e2e="comment-item"]')].filter(e =>
+      visible(e) && cfg.text && cfg.nickname && (e.innerText || '').includes(cfg.text) && (e.innerText || '').includes(cfg.nickname));
+    if (items.length === 1) {
+      const control = [...items[0].querySelectorAll('button, span, div, a')].find(e =>
+        visible(e) && /^展开\s*\d*\s*条?回复$/.test((e.innerText || '').trim()));
+      if (control) control.click();
+    }
+    return true;
+  }
+  let scroller = box;
+  while (scroller && !(scroller.scrollHeight > scroller.clientHeight &&
+      /^(auto|scroll)$/.test(getComputedStyle(scroller).overflowY))) scroller = scroller.parentElement;
+  if (scroller) scroller.scrollTop = scroller.scrollHeight;
   else window.scrollTo(0, document.documentElement.scrollHeight);
+  return true;
 })"""
 
 
@@ -174,7 +205,6 @@ class QtCommentTransport:
         if self.budget.video_used >= self.budget.video_limit:
             raise Stop(2, "video_page_budget")
         self.budget.counter.check_start()
-        # shortcut: reply expansion is uncalibrated; upgrade after observing the official page.
         sent = False
         try:
             if self.video_id != video_id:
@@ -182,7 +212,9 @@ class QtCommentTransport:
                 self.window.load_url(self.video_url)
                 self.video_id = video_id
             else:
-                self._evaluate(SCROLL_JS, root or "")
+                self._evaluate("window.__dycSent = false; window.__dycResult = null")
+            acted = False
+            opened = False
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 state = _coerce_fetch(self._evaluate("JSON.stringify({sent:window.__dycSent, result:window.__dycResult})"))
@@ -200,6 +232,13 @@ class QtCommentTransport:
                 if result:
                     result["request_sent"] = sent
                     return result
+                if not acted and not sent and on_site and page.get("path") == f"/video/{video_id}":
+                    comment = getattr(self, "video", None)
+                    comment = comment.comments.get(root) if comment and root else None
+                    action = self._evaluate(SCROLL_JS, {"root": root or "", "text": comment.text if comment else "",
+                                                        "nickname": comment.nickname if comment else "", "opened": opened})
+                    opened = opened or action == "opened"
+                    acted = action is True
                 await asyncio.sleep(0.1)
             return {"kind": "timeout" if sent else "no_request", "request_sent": sent}
         finally:
@@ -526,6 +565,7 @@ class CommentsHub:
                         pass
                 transport = self._make_transport(budget, pacer)
                 transport.video_url = video.video_url
+                transport.video = video
                 job = CollectJob(video, self._locked_transport(transport, pacer), BATCH_LIMIT)
                 try:
                     while not job.done and not self._stop.is_set():

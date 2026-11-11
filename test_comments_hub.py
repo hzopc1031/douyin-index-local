@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "tools" / "douyin_comments"))
 
 import app as app_module
+import dyc.hub_comments as app_module_comments
 from storage import ResultStore
 from dyc.hub_comments import (
     COMMENTS_BUSY, CommentsHub, CollectJob, QtCommentTransport, _eval,
@@ -503,6 +504,31 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
                     await job.run_slice(1)
             self.assertEqual((budget.used, budget.counter.usage(), video.pages), (0, 0, 0))
             self.assertFalse(job.metadata['request_sent'])
+
+    async def test_first_navigation_opens_panel_without_request_or_quota(self):
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder)))
+            window = FakeWindow()
+            events = []
+            def evaluate(js, arg=None):
+                if "__dycNavigate', '1'" in js:
+                    events.append("arm_navigation")
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({"ready": "complete", "https": True, "host": "www.douyin.com",
+                                       "path": "/video/100", "account": True})
+                if js == app_module_comments.SCROLL_JS:
+                    self.assertEqual(window.loaded, [transport.video_url])
+                    events.append("open")
+                    return True
+                return json.dumps({"sent": False, "result": None})
+            transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
+            transport.video_url = 'https://www.douyin.com/video/100'
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 21]), \
+                 patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
+                result = await transport.fetch('100', None, '0')
+            self.assertEqual(events, ["arm_navigation", "open"])
+            self.assertEqual(result, {"kind": "no_request", "request_sent": False})
+            self.assertEqual((budget.used, budget.counter.usage()), (0, 0))
 
     async def test_stop_metadata_redacts_values(self):
         from dyc.errors import Stop
