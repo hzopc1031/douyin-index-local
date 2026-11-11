@@ -854,7 +854,13 @@ def mount(app, hub):
 
     async def platforms(request):
         require(request)
-        return reply({'platforms': registry.descriptions()})
+        from baidu_area_codes import PROVINCE_CODE, CITY_CODE
+        descriptions = registry.descriptions()
+        for item in descriptions:
+            if item['id'] == 'baidu':
+                item.update(region_enabled=os.environ.get('INDEX_HUB_BAIDU_REGION_ENABLED') == '1',
+                            regions=list(dict.fromkeys([*PROVINCE_CODE, *CITY_CODE])))
+        return reply({'platforms': descriptions})
 
     async def status(request):
         require(request)
