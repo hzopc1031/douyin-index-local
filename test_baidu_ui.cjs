@@ -2,7 +2,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8');
 const code=html.slice(html.indexOf('async function loadSeries()'),html.indexOf("document.querySelectorAll('[data-device]')"));
-const nodes={};const $=id=>nodes[id]??={value:'',style:{},dataset:{},textContent:'',innerHTML:''};
+const nodes={};const $=id=>nodes[id]??={value:'',style:{},dataset:{},textContent:'',innerHTML:'',querySelectorAll:()=>[]};
 $('#keywordSelect').value='合成词';$('#baiduWords').hidden=true;
 const modulesCode=html.slice(html.indexOf('function platformInfo('),html.indexOf('function drawPlatforms('));
 const modulesCtx=vm.createContext({platforms:[{id:'douyin',modules:['related','audience']},{id:'baidu',modules:['related','audience']},{id:'empty'}],chosenPlatform:'douyin'});
@@ -10,9 +10,25 @@ vm.runInContext(modulesCode,modulesCtx);
 assert.deepEqual(Array.from(modulesCtx.platformModules('douyin')),['related','audience']);
 assert.deepEqual(Array.from(modulesCtx.platformModules('baidu')),['related','audience']);
 assert.deepEqual(Array.from(modulesCtx.platformModules('empty')),[]);
+const regionCtx=vm.createContext({$,platforms:[{id:'douyin'},{id:'baidu',region_enabled:true,regions:['北京','海南','吉林','上海','天津','重庆']}],chosenPlatform:'douyin',baiduRegions:[],baiduViewRegion:'',esc:String,toast:()=>{},loadSeries:async()=>{}});
+vm.runInContext(html.slice(html.indexOf('function regionOptions()'),html.indexOf('function platformInfo('))+html.slice(html.indexOf('function platformInfo('),html.indexOf('function platformModules(')),regionCtx);
+$('#queryPlatform').value='douyin';vm.runInContext('renderRegions()',regionCtx);assert($('#baiduQueryRegion').hidden);
+assert(!('regions' in regionCtx.queryRegions({platform:'douyin'})));
+$('#queryPlatform').value='baidu';vm.runInContext('renderRegions()',regionCtx);assert(!$('#baiduQueryRegion').hidden);assert(!$('#queryRegionSearch').disabled);
+assert(!('regions' in regionCtx.queryRegions({platform:'baidu'})));
+regionCtx.baiduRegions=['北京','北京','海南'];assert.deepEqual(Array.from(regionCtx.queryRegions({platform:'baidu'}).regions),['北京','海南']);
+regionCtx.baiduRegions=['北京','海南','吉林','上海','天津','重庆'];assert.throws(()=>regionCtx.queryRegions({platform:'baidu'}),/5/);
+regionCtx.platforms[1].region_enabled=false;vm.runInContext('renderRegions()',regionCtx);assert($('#queryRegionSearch').disabled);assert($('#queryRegionHelp').textContent.includes('未开启'));assert(!('regions' in regionCtx.queryRegions({platform:'baidu'})));
+regionCtx.chosenPlatform='baidu';regionCtx.baiduViewRegion='北京';$('#baiduMetricSelect').value='search_index';assert.equal(regionCtx.regionParam().region,'北京');
+for(const metric of ['feed_index','news_index']){$('#baiduMetricSelect').value=metric;assert(!('region' in regionCtx.regionParam()))}
+regionCtx.chosenPlatform='douyin';$('#baiduMetricSelect').value='search_index';assert(!('region' in regionCtx.regionParam()));
+const batchCtx=vm.createContext({insightDates:(kind,start_date,end_date)=>({start_date,end_date}),platformModules:()=>['related','audience']});
+vm.runInContext(html.slice(html.indexOf('function makeReportBatch('),html.indexOf('function renderReportProgress(')),batchCtx);
+const batch=batchCtx.makeReportBatch({platform:'baidu',keywords:['合成词'],start_date:'2026-01-01',end_date:'2026-01-02',regions:['北京']},'synthetic');
+assert.deepEqual(Array.from(batch.entries[0].body.regions),['北京']);assert(batch.entries.slice(1).every(e=>!('regions' in e.body)));
 const calls=[],drawn=[];
 const ctx=vm.createContext({$,chosenPlatform:'douyin',platforms:[{id:'douyin',available:true},{id:'baidu',available:true}],
- baiduDevice:'all',baiduWords:[],rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
+ baiduDevice:'all',baiduWords:[],baiduViewRegion:'',regionParam:()=>ctx.chosenPlatform==='baidu'&&$('#baiduMetricSelect').value==='search_index'&&ctx.baiduViewRegion?{region:ctx.baiduViewRegion}:{},renderRegions:()=>{},rangeError:()=>'',insightContext:()=>ctx.chosenPlatform,readingInfo:()=>false,esc:String,URLSearchParams,drawChart:data=>drawn.push(data),
  api:path=>new Promise(resolve=>calls.push({path,resolve}))});
 vm.runInContext(code,ctx);
 (async()=>{
@@ -23,17 +39,26 @@ vm.runInContext(code,ctx);
  calls[1].resolve({platform:'baidu'});await current;
  calls[0].resolve({platform:'douyin'});await old;
  assert.deepEqual(drawn,[{platform:'baidu'}]);
+ $('#baiduMetricSelect').value='search_index';ctx.baiduViewRegion='北京';const oldRegion=vm.runInContext('loadSeries()',ctx);ctx.baiduViewRegion='';const newRegion=vm.runInContext('loadSeries()',ctx);assert(calls[2].path.includes('region='));assert(!calls[3].path.includes('region='));calls[3].resolve({platform:'baidu',region:'全国'});await newRegion;calls[2].resolve({platform:'baidu',region:'北京'});await oldRegion;assert.equal(drawn.at(-1).region,'全国');
  $('#keywordSelect').value='';$('#exportLink').style.display='';
  await vm.runInContext('loadSeries()',ctx);
  assert.equal($('#exportLink').style.display,'none');
  assert($('#trendSummary').textContent.includes('暂无趋势数据'));
- assert.equal(calls.length,2);
+ assert.equal(calls.length,4);
+ $('#keywordSelect').value='合成词';$('#baiduMetricSelect').value='search_index';ctx.baiduViewRegion='北京';ctx.api=async path=>{assert.equal(new URLSearchParams(path.split('?')[1]).get('region'),'北京');return {platform:'baidu'}};
+ await vm.runInContext('loadSeries()',ctx);
+ const exportLine=html.split('\n').find(line=>line.includes("$('#exportLink').href='/api/v1/export.csv?"));
+ const exportCtx=vm.createContext({$,URLSearchParams,data:{platform:'baidu',keyword:'合成词'},chosenPlatform:'baidu',isDouyin:false,regionParam:ctx.regionParam});
+ vm.runInContext(exportLine,exportCtx);assert.equal(new URLSearchParams($('#exportLink').href.split('?')[1]).get('region'),'北京');
+ ctx.baiduViewRegion='';vm.runInContext(exportLine,exportCtx);assert(!$('#exportLink').href.includes('region='));
+ ctx.baiduViewRegion='北京';for(const metric of ['feed_index','news_index']){exportCtx.data.metric=metric;vm.runInContext(exportLine,exportCtx);assert(!$('#exportLink').href.includes('region='))}
+ ctx.chosenPlatform='douyin';exportCtx.chosenPlatform='douyin';exportCtx.data={platform:'douyin',keyword:'合成词'};exportCtx.isDouyin=true;vm.runInContext(exportLine,exportCtx);assert(!$('#exportLink').href.includes('region='));ctx.chosenPlatform='baidu';
  $('#keywordSelect').value='合成词';$('#baiduMetricSelect').value='feed_index';ctx.api=async path=>{assert(path.includes('metric=feed_index'));assert(!path.includes('device='));return {platform:'baidu',metric:'feed_index'}};
  await vm.runInContext('loadSeries()',ctx);assert.equal(drawn.at(-1).metric,'feed_index');
  $('#baiduMetricSelect').value='news_index';ctx.api=async path=>{assert(path.includes('metric=news_index'));assert(!path.includes('device='));return {platform:'baidu',metric:'news_index'}};
  await vm.runInContext('loadSeries()',ctx);assert.equal(drawn.at(-1).metric,'news_index');
  $('#baiduMetricSelect').onchange();assert.equal($('#baiduDevices').hidden,true);
- assert(html.includes("{metric:data.metric}:{device:'all_devices'}"));
+ assert(html.includes("{metric:data.metric}:{device:'all_devices',...regionParam()}"));
  assert(html.includes('媒体指数 · 待核对'));
  assert(html.includes('资讯指数 · 待核对'));assert(html.includes('不分 PC/移动，与搜索指数口径不同'));
  $('#keywordSelect').value='合成词';$('#chart').dataset.platform='douyin';$('#chartMeta').textContent='old Douyin metadata';$('#exportLink').style.display='';
