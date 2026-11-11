@@ -16,14 +16,14 @@ from .safety import safe_log
 INTERVAL = 3
 
 
-def download(url, out, item_id):
+def download(url, out, item_id, referer=douyin.REFERER):
     if urlparse(url).scheme != 'https':
         raise ValueError('播放地址无效')
     candidates = [url.replace('/playwm/', '/play/', 1), url] if '/playwm/' in url else [url]
     for candidate in candidates:
         name = None
         try:
-            request = Request(candidate, headers={'User-Agent': douyin.UA, 'Referer': douyin.REFERER})
+            request = Request(candidate, headers={'User-Agent': douyin.UA, 'Referer': referer})
             with urlopen(request, timeout=60) as response, tempfile.NamedTemporaryFile(dir=out, delete=False) as temp:
                 name = temp.name
                 content_type = response.headers.get_content_type()
@@ -66,7 +66,7 @@ def process(url, out, asr=False, model='base'):
         info = xiaohongshu.fetch(item_id, cookie) if platform == 'xiaohongshu' else douyin.fetch(item_id)
         play_url = info.pop('play_url')
         meta.update(info)
-        meta['video_file'] = download(play_url, out, item_id)
+        meta['video_file'] = download(play_url, out, item_id, 'https://www.xiaohongshu.com/' if platform == 'xiaohongshu' else douyin.REFERER)
         if asr:
             try:
                 subtitle = out / (item_id + '.srt')

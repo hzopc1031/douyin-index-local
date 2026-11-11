@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import re
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from .douyin import UA
 
 
@@ -43,7 +43,10 @@ def parse_page(html, item_id):
     match = re.search(r'window\.__INITIAL_STATE__\s*=\s*', html)
     if not match:
         raise ValueError('笔记页缺少数据')
-    state = json.JSONDecoder().raw_decode(html[match.end():].lstrip())[0]
+    source = html[match.end():].lstrip()
+    source = re.sub(r'"(?:\\.|[^"\\])*"|\bundefined\b',
+                    lambda match: 'null' if match.group() == 'undefined' else match.group(), source)
+    state = json.JSONDecoder().raw_decode(source)[0]
     note = state['note']['noteDetailMap'][item_id]['note']
     video = note['video']
     streams = video['media']['stream']
@@ -57,8 +60,13 @@ def parse_page(html, item_id):
             'play_url': stream.get('masterUrl') or stream.get('master_url')}
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def fetch(item_id, cookie_value):
     request = Request(f'https://www.xiaohongshu.com/explore/{item_id}',
                       headers={'User-Agent': UA, 'Cookie': cookie_value})
-    with urlopen(request, timeout=30) as response:
+    with build_opener(NoRedirect()).open(request, timeout=30) as response:
         return parse_page(response.read().decode('utf-8'), item_id)

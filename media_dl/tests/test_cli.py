@@ -20,3 +20,21 @@ class CLITests(unittest.TestCase):
                 result = process('https://www.douyin.com/video/123', out)
             self.assertNotIn('test-cookie', json.dumps(result))
             self.assertIsNotNone(result['error'])
+
+    def test_download_fallback(self):
+        import io
+        from email.message import Message
+        from media_dl.__main__ import download
+
+        class Response(io.BytesIO):
+            def __init__(self, content, content_type):
+                super().__init__(content)
+                self.headers = Message()
+                self.headers['Content-Type'] = content_type
+
+        with tempfile.TemporaryDirectory() as directory, patch('media_dl.__main__.urlopen', side_effect=[Response(b'<html>' + b'x' * 2000, 'text/html'), Response(b'\0\0\0\x18ftyp' + b'x' * 2000, 'application/octet-stream')]) as opened:
+            result = download('https://example.com/playwm/video', Path(directory), '123')
+            self.assertEqual(result, '123.mp4')
+            self.assertEqual(opened.call_count, 2)
+            self.assertTrue((Path(directory) / result).exists())
+            self.assertEqual(len(list(Path(directory).iterdir())), 1)

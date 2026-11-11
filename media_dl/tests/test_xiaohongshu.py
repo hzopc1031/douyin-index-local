@@ -34,3 +34,24 @@ class XhsTests(unittest.TestCase):
         for message in ('Cookie: test-cookie', 'ttwid=secret', 'Authorization: Bearer token'):
             self.assertNotIn(message.split()[-1], safe_log(message))
         self.assertNotIn('test-cookie', safe_log('failure test-cookie', ['test-cookie']))
+
+    def test_javascript_undefined_and_cookie_not_redirected(self):
+        page = Path('media_dl/tests/xhs.html').read_text().replace('"title":"测试标题"', '"unused":undefined,"title":"测试标题"')
+        self.assertEqual(xiaohongshu.parse_page(page, 'abc123')['title'], '测试标题')
+        self.assertIsNone(xiaohongshu.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.com'))
+
+    def test_cookie_failure_hidden(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'XHS_COOKIE': 'test-cookie'}, clear=True), patch('media_dl.xiaohongshu.fetch', side_effect=RuntimeError('test-cookie')):
+            result = process('https://www.xiaohongshu.com/explore/abc123', Path(directory))
+            self.assertNotIn('test-cookie', str(result))
+            self.assertNotIn('test-cookie', (Path(directory) / 'abc123.meta.json').read_text())
+
+    def test_fake_cookie_fetches_fixture(self):
+        import io
+        page = Path('media_dl/tests/xhs.html').read_bytes()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'XHS_COOKIE': 'test-cookie'}, clear=True), patch('media_dl.xiaohongshu.build_opener') as opener, patch('media_dl.__main__.download', return_value='abc123.mp4'):
+            opener.return_value.open.return_value.__enter__.return_value = io.BytesIO(page)
+            result = process('https://www.xiaohongshu.com/explore/abc123', Path(directory))
+            self.assertIsNone(result['error'])
+            self.assertEqual(result['title'], '测试标题')
+            self.assertNotIn('test-cookie', (Path(directory) / 'abc123.meta.json').read_text())
