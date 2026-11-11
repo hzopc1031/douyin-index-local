@@ -74,7 +74,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
 
     def args(self):
         return Namespace(profile_dir=self.root / "profile", state_dir=self.root / "state",
-                         display=None, out=self.root / "out", top=30, max_pages=1500,
+                         display=None, out=self.root / "out", top=30, max_pages=25,
                          urls=[site.FAKE_ORIGIN + "/video/100", site.FAKE_ORIGIN + "/video/200"],
                          urls_file=None)
 
@@ -622,13 +622,13 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 args.urls = [site.FAKE_ORIGIN + path for path in
                              ("/video/100", "/short/synthetic-one", "/short/synthetic-two")]
                 counter = DailyCounter(args.state_dir)
-                initial = 2996 if cap == "daily" else 0
+                initial = 146 if cap == "daily" else 0
                 from dyc.runtime import atomic_text
                 atomic_text(counter.state / "usage.json", json.dumps(
                     {"day": counter.today(), "count": initial}))
                 # Leave exactly enough batch/daily budget for the unique video.
                 def budget(counter, **kwargs):
-                    return Budget(counter, batch_limit=4 if cap == "batch" else 1500, **kwargs)
+                    return Budget(counter, batch_limit=4 if cap == "batch" else 25, **kwargs)
                 fake = FakeSite(reply_seed=True)
                 with patch("dyc.runner.Budget", side_effect=budget):
                     code, result = await fetch(args, backend=fake, pacer=FastPacer())
@@ -731,7 +731,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake.calls), 5)
         self.assertEqual(fake.foreign, [])
 
-    async def check_canonical_then_short_links(self, *, batch_limit=1500, daily_used=0):
+    async def check_canonical_then_short_links(self, *, batch_limit=25, daily_used=0):
         fake = FakeSite()
         args = self.args()
         args.urls = [site.FAKE_ORIGIN + path for path in
@@ -763,7 +763,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         await self.check_canonical_then_short_links(batch_limit=4)
 
     async def test_duplicate_short_links_at_daily_cap_keep_success(self):
-        await self.check_canonical_then_short_links(daily_used=2996)
+        await self.check_canonical_then_short_links(daily_used=146)
 
     async def test_slow_initial_seed_is_exported_before_next_video(self):
         race = SeedRace(self)
@@ -932,7 +932,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.foreign, [])
 
     async def check_off_path_top_seed(self, seed, replays, reason, top_ids, *,
-                                      replies=None, reply_ids=(), max_pages=1500):
+                                      replies=None, reply_ids=(), max_pages=25):
         replies = replies or {}
 
         class OffPathTopSeed(FakeSite):
@@ -1261,7 +1261,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_daily_cap_refused_before_browser(self):
         counter = DailyCounter(self.root / "state")
         from dyc.runtime import atomic_text
-        atomic_text(counter.state / "usage.json", json.dumps({"day": counter.today(), "count": 3000}))
+        atomic_text(counter.state / "usage.json", json.dumps({"day": counter.today(), "count": 150}))
         fake = FakeSite()
         code, result = await fetch(self.args(), backend=fake, pacer=FastPacer())
         self.assertEqual(code, 5)
@@ -1271,13 +1271,13 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_daily_cap_during_batch_keeps_output(self):
         counter = DailyCounter(self.root / "state")
         from dyc.runtime import atomic_text
-        atomic_text(counter.state / "usage.json", json.dumps({"day": counter.today(), "count": 2998}))
+        atomic_text(counter.state / "usage.json", json.dumps({"day": counter.today(), "count": 148}))
         fake = FakeSite()
         code, result = await fetch(self.args(), backend=fake, pacer=FastPacer())
         self.assertEqual((code, result["exit_reason"]), (2, "daily_cap"))
         self.assertEqual(result["requests"], 2)
         self.assertEqual(result["videos"][0]["top_count"], 2)
-        self.assertEqual(counter.usage(), 3000)
+        self.assertEqual(counter.usage(), 150)
         self.assertEqual(len(fake.calls), 2)
         self.assertNotIn("/video/200", fake.navigations)
         self.assertEqual(fake.foreign, [])

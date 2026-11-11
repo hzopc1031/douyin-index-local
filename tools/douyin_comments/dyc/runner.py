@@ -210,7 +210,7 @@ async def selftest(args):
         root = Path(temp)
         out = args.out or tempfile.mkdtemp(prefix="dyc-selftest-output-")
         fake = FakeSite()
-        inner = Namespace(out=out, top=args.top, max_pages=1500, urls_file=None,
+        inner = Namespace(out=out, top=args.top, max_pages=25, urls_file=None,
                           urls=[site.FAKE_ORIGIN + "/video/100", site.FAKE_ORIGIN + "/video/200"],
                           profile_dir=root / "profile", state_dir=root / "state", display=args.display)
         code, result = await fetch(inner, backend=fake, pacer=FastPacer())

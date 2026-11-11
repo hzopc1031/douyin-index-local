@@ -20,7 +20,7 @@ async def main():
     fake = FakeSite("normal" if stage == "preflight" else "login-expired")
     args = Namespace(urls=[site.FAKE_ORIGIN + "/video/100"], urls_file=None,
                      out=root / "out", profile_dir=root / "profile", state_dir=root / "state",
-                     display=None, top=30, max_pages=1500)
+                     display=None, top=30, max_pages=25)
     original = Frame.evaluate
 
     def should_hang(url):

@@ -203,6 +203,16 @@ class TopicLoginTests(unittest.TestCase):
 
 
 class TopicLoginApiTests(ApiTests):
+    async def test_login_busy_states_pass_through(self):
+        admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(),
+                 'X-Hub-Request': '1'}
+        for state in ('busy', 'comments_busy'):
+            with self.subTest(state=state):
+                self.hub.bridge = lambda *args: {'state': state, 'qr_available': True, 'message': '稍后重试'}
+                response = await self.client.get('/api/v1/topics/login', headers=admin)
+                self.assertEqual(await response.json(),
+                                 {'state': state, 'qr_available': False, 'message': '稍后重试'})
+
     async def test_login_and_categories_guards_and_redaction(self):
         admin = {'Authorization': 'Basic ' + base64.b64encode(b'fixture:admin-fixture-only').decode(),
                  'X-Hub-Request': '1'}

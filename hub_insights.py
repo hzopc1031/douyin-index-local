@@ -205,7 +205,7 @@ def collect(api, body):
     except HubError as exc:
         logging.getLogger('index_hub.insights').warning('collect invalid_query code=%s', exc.code)
         return {'ok':False,'code':exc.code,'message':str(exc)}
-    if not api._lock.acquire(blocking=False):return {'ok':False,'code':'busy'}
+    if not api._acquire_lock('index'):return api._busy()
     try:
         client=api._client()
         try:
@@ -277,4 +277,4 @@ def collect(api, body):
         return {'ok':False,'code':'request_failed','message':'扩展数据读取失败，未输出原始错误。'}
     finally:
         api._fetch_cookie_fingerprint = None
-        api._lock.release()
+        api._release_lock()

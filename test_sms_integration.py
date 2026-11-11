@@ -86,7 +86,7 @@ class BridgeTests(unittest.TestCase):
             manager = api._sms_manager()
             self.assertIs(manager, api._sms_manager())
             self.assertIs(manager.coordinator, api._login_coordinator)
-            self.assertIs(manager._fetch_lock, api._lock)
+            self.assertIs(manager._fetch_lock, api._login_lock)
             api._page.native.get_cookies.return_value = []
             self.assertFalse(factory.call_args.kwargs['session_present']())
             api._page.get_cookies.assert_not_called()

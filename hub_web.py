@@ -149,6 +149,7 @@ SAFE_ERRORS = {
     'response_format': '平台返回格式异常，请检查官方页面。',
     'cooldown': '采集进程仍处于请求冷却期，任务已回到队列。',
     'busy': '采集进程正忙，任务已回到队列。',
+    'comments_busy': '正在采集评论，稍后重试',
     'skipped_trend_no_data': '该词在相同日期段趋势无数据，已跳过关联词和画像查询，未消耗在线次数。',
     'no_data': '平台未返回该关键词在此日期范围的有效指数；可能未收录或该范围无数据，不代表指数为零。',
     'daily_limit': '已达到本服务今日 50 次在线尝试上限，未发出请求。',
@@ -395,7 +396,7 @@ class Hub:
             self.store.set('consecutive_bridge_timeouts', 0)
             if response.get('ok') is not True:
                 code = response.get('code', '')
-                if code in {'cooldown', 'busy'}:
+                if code in {'cooldown', 'busy', 'comments_busy'}:
                     self._requeue_unattempted(row['id'], today, busy=True)
                     return True
                 if code == 'no_data' and query.get('kind'):
@@ -828,6 +829,14 @@ def openapi():
         ('/api/v1/topics/categories/refresh', 'post', '请求一次热点宝垂类，受间隔、每日上限和暂停限制')):
         paths[path] = {method: {'summary': summary + '（仅管理员）',
                                'responses': {'200': {'description': '成功'}, '403': error, '409': error, '429': error, '503': error}}}
+    for path, method, summary in (
+        ('/api/v1/comments/status', 'get', '评论主站登录探测与采集状态（不触发评论请求）'),
+        ('/api/v1/comments/probe', 'post', '只读探测 www.douyin.com 登录状态'),
+        ('/api/v1/comments/start', 'post', '探测通过后开始分批评论采集'),
+        ('/api/v1/comments/pause', 'post', '暂停评论采集，不自动重试'),
+        ('/api/v1/comments/resume', 'post', '清除评论暂停并重新探测，需再次 start')):
+        paths[path] = {method: {'summary': summary,
+                                'description': '管理员 Basic；POST 需 X-Hub-Request 和同源校验。不返回 Cookie。'}}
     paths['/api/v1/topics/collect-once'] = {'post': {
         'summary': '管理员通过现有浏览器会话打一次话题请求。不重试。',
         'responses': {'200': {'description': '状态、条数和字段名'}, '401': error, '403': error, '409': error, '429': error}}}
@@ -1286,7 +1295,7 @@ def mount(app, hub):
         try:
             result = await asyncio.to_thread(hub.bridge, 'topic_login', action, hub_bridge.BRIDGE_TIMEOUT)
             state = result.get('state')
-            if state not in ('logged_in', 'need_scan', 'expired', 'browser_unavailable'):
+            if state not in ('logged_in', 'need_scan', 'expired', 'browser_unavailable', 'busy', 'comments_busy'):
                 state = 'browser_unavailable'
             available = state == 'need_scan' and result.get('qr_available') is True
             if action == 'qr':
@@ -1297,7 +1306,10 @@ def mount(app, hub):
                 if not png.startswith(b'\x89PNG\r\n\x1a\n'):
                     raise ValueError
                 return web.Response(body=png, content_type='image/png', headers={'Cache-Control': 'no-store'})
-            return web.json_response({'state': state, 'qr_available': available}, headers={'Cache-Control': 'no-store'})
+            response = {'state': state, 'qr_available': available}
+            if 'message' in result:
+                response['message'] = result['message']
+            return web.json_response(response, headers={'Cache-Control': 'no-store'})
         except Exception:
             if action == 'qr':
                 raise HubError('browser_unavailable', '二维码尚未就绪。', 503) from None
@@ -1326,6 +1338,29 @@ def mount(app, hub):
             raise HubError('invalid_parameters', '恢复范围无效。')
         s.set('baidu_hot_paused' if 'baidu' in scopes else 'hot_paused', None)
         return reply({'ok': True, 'note': '已恢复热榜调度。不会立即补抓，仍受间隔和每日成功上限约束。'})
+
+    async def comments_status(request):
+        require(request, admin=True)
+        result = await asyncio.to_thread(hub.bridge, 'comments_status', None, hub_bridge.BRIDGE_TIMEOUT)
+        return web.json_response(result, headers={'Cache-Control': 'no-store'})
+
+    async def comments_action(request):
+        require(request, admin=True)
+        action = request.match_info.get('action')
+        body = await read_json(request)
+        if action in ('probe', 'pause', 'resume') and body != {}:
+            raise HubError('invalid_parameters', '请求体必须为空对象。')
+        if action == 'start' and (type(body) is not dict or not body.get('videos')):
+            raise HubError('invalid_parameters', '请提供 videos 视频链接列表。')
+        command = 'comments_' + action
+        result = await asyncio.to_thread(hub.bridge, command, body if action == 'start' else None,
+                                         hub_bridge.BRIDGE_TIMEOUT)
+        status = 200
+        if result.get('ok') is False:
+            code = result.get('code')
+            status = 409 if code in ('busy', 'comments_busy', 'paused', 'verification_required',
+                                     'not_logged_in', 'logged_out') else 400 if code == 'invalid_parameters' else 200
+        return web.json_response(result, status=status, headers={'Cache-Control': 'no-store'})
 
     async def schema(request):
         require(request)
@@ -1373,6 +1408,8 @@ def mount(app, hub):
     app.router.add_get('/api/v1/topics', topics)
     app.router.add_post('/api/v1/topics/collect-once', topic_once)
     app.router.add_post('/api/v1/topics/resume', topic_resume)
+    app.router.add_get('/api/v1/comments/status', comments_status)
+    app.router.add_post('/api/v1/comments/{action:probe|start|pause|resume}', comments_action)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)
     app.on_startup.append(hub.start)

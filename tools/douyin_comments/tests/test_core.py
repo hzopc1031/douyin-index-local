@@ -15,6 +15,19 @@ from tests.helpers import Transport, comment, response
 
 
 class PaginationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_redirect_and_rate_limit_stop_without_retry(self):
+        for result, reason in (({"status": 302}, "comment_redirect"),
+                               ({"kind": "opaqueredirect"}, "comment_redirect"),
+                               ({"status": 429}, "rate_limited")):
+            with self.subTest(result=result):
+                video = Video("100", "https://dyc.invalid/video/100")
+                transport = Transport({(None, "0"): result})
+                with self.assertRaises(Stop) as caught:
+                    await collect(video, transport)
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertEqual((len(transport.calls), video.status, video.reason),
+                                 (1, "partial", reason))
+
     async def run_pages(self, pages, budget=1500):
         video = Video("100", "https://dyc.invalid/video/100")
         transport = Transport(pages)
@@ -292,7 +305,7 @@ class RuntimeTests(unittest.TestCase):
     def test_no_cap_increase(self):
         counter = DailyCounter(self.base / "state", limit=9000)
         budget = Budget(counter, batch_limit=9000)
-        self.assertEqual((budget.limit, counter.limit), (1500, 3000))
+        self.assertEqual((budget.limit, counter.limit), (25, 150))
 
 
 class PacingTests(unittest.IsolatedAsyncioTestCase):

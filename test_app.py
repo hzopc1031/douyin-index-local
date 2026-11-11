@@ -90,6 +90,19 @@ class DesktopImportTests(unittest.TestCase):
 
 
 class QrManagerConcurrencyTests(unittest.TestCase):
+    def test_login_lock_reports_owner_and_releases(self):
+        api = app.Api()
+        self.assertTrue(api._login_lock.acquire(blocking=False))
+        try:
+            self.assertTrue(api._login_lock.locked())
+            self.assertEqual(api._lock_owner, 'login')
+            self.assertEqual(api._busy()['code'], 'busy')
+            self.assertEqual(api.fetch_batch('synthetic', '2026-10-25', cloud=True)['code'], 'busy')
+        finally:
+            api._login_lock.release()
+        self.assertIsNone(api._lock_owner)
+        self.assertFalse(api._login_lock.locked())
+
     def test_single_lazy_manager(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(app, 'OUTPUT', Path(temp)):
             api = app.Api()
@@ -108,7 +121,7 @@ class QrManagerConcurrencyTests(unittest.TestCase):
                 for thread in threads:
                     thread.join(3)
                     self.assertFalse(thread.is_alive())
-                constructor.assert_called_once_with(coordinator=api._login_coordinator, fetch_lock=api._lock)
+                constructor.assert_called_once_with(coordinator=api._login_coordinator, fetch_lock=api._login_lock)
             self.assertEqual(len(results), 8)
             self.assertTrue(all(result is results[0] for result in results))
 
@@ -281,7 +294,7 @@ class ControllerTests(unittest.TestCase):
         self.api._lock.acquire()
         try:
             self.assertEqual(self.api.fetch_batch("银杏", "2025-01-07")["code"], "busy")
-            self.assertFalse(self.api.compare([])["ok"])
+            self.assertEqual(self.api.compare([])["code"], "busy")
         finally:
             self.api._lock.release()
 

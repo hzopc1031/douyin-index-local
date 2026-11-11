@@ -38,7 +38,7 @@ def parser():
     fetch.add_argument("--urls-file", metavar="FILE")
     fetch.add_argument("--out", metavar="DIR")
     fetch.add_argument("--top", type=positive, default=30)
-    fetch.add_argument("--max-pages", type=positive, default=1500, help="Per-video request budget (at most 1500)")
+    fetch.add_argument("--max-pages", type=positive, default=25, help="Per-video request budget (at most 25)")
     login = subs.add_parser("login", parents=[common], help="Wait for human login; refreshed private QR path on stderr")
     login.add_argument("--wait-seconds", type=positive, default=180, help="Login wait, at most 600 seconds")
     mobile = subs.add_parser("login-web", parents=[common], help="Resident private phone SMS/QR login (loopback only)")
@@ -81,7 +81,7 @@ def check_env(args):
         with Profile(args.profile_dir, clear_stale=False):
             result["profile_state"] = "ready" if present else "created_private"
         result["today_requests"] = DailyCounter(args.state_dir).usage()
-        if result["today_requests"] >= 3000:
+        if result["today_requests"] >= 150:
             raise Stop(5, "daily_cap_at_start")
         if not result["xvfb"] and not args.display:
             raise Stop(5, "xvfb_missing")
