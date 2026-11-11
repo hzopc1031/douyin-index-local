@@ -89,6 +89,22 @@ def compare_result(result, entries, *, compared_at=None):
             "rows": checks}
 
 
+class _LoginLock:
+    def __init__(self, api):
+        self.api = api
+
+    def acquire(self, blocking=False):
+        if blocking:
+            raise ValueError('Login lock only supports nonblocking acquisition')
+        return self.api._acquire_lock('login')
+
+    def release(self):
+        self.api._release_lock()
+
+    def locked(self):
+        return self.api._lock.locked()
+
+
 class Api:
     def __init__(self):
         from browser_login import BrowserLoginState
@@ -100,6 +116,7 @@ class Api:
         self._sms_lock = threading.Lock()
         self._page = None
         self._lock = threading.Lock()
+        self._login_lock = _LoginLock(self)
         self._login_coordinator = LoginCoordinator()
         self._result = None
         self._folder = None
@@ -323,7 +340,7 @@ class Api:
         if not hasattr(self, '_qr'):
             with self._qr_lock:
                 if not hasattr(self, '_qr'):
-                    self._qr = QrLoginManager(coordinator=self._login_coordinator, fetch_lock=self._lock)
+                    self._qr = QrLoginManager(coordinator=self._login_coordinator, fetch_lock=self._login_lock)
         return self._qr
 
     def _on_auth_failed(self):
@@ -354,7 +371,7 @@ class Api:
                         if hasattr(self, '_qr'):
                             self._qr.holder.clear()
                     self._sms = SmsLoginManager(QtLoginDriver(view, session_present=session_present),
-                        self._lock, coordinator=self._login_coordinator, on_success=succeeded)
+                        self._login_lock, coordinator=self._login_coordinator, on_success=succeeded)
         return self._sms
 
     def _login_state(self, *, _test_cookie_host=None):
