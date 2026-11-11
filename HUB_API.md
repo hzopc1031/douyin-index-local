@@ -350,6 +350,21 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 
 热点宝登录与垂类刷新接口仅限管理员 Basic 认证，POST 须带 `X-Hub-Request: 1`、同源 Origin（如提供）及空 JSON 对象。`GET /api/v1/topics/login` 返回 `state`（`logged_in`、`need_scan`、`expired`、`browser_unavailable`）和 `qr_available`；`GET /api/v1/topics/login/qr` 返回授权窗口中定位到、按原像素整数倍放大的二维码 PNG，尚未就绪返回 503，均禁止缓存。检测到失效会重新加载授权页，刷新期间不提供旧码。二维码定位依赖 ZXing；解码失败时仍可返回通过定位角检查的二维码。`POST /api/v1/topics/login/refresh` 打开或重新加载授权页。登录状态根据页面判断，实际登录以垂类请求结果为准；不读取或返回 Cookie。`POST /api/v1/topics/categories/refresh` 发起一次 tags 请求，与话题采集共用 15 秒间隔、上海日 30 次上限和异常暂停；暂停后须人工恢复，不自动重试。返回状态、条数和是否实际发出请求。
 
+
+## 评论采集（第一阶段，待主站探测验收）
+
+评论改在中枢桌面进程的独立 Qt 窗口中打开 `https://www.douyin.com/`，不使用创作者窗口或热点宝窗口，也不用 Playwright 打开 Qt webview 资料目录。接口不接收或返回 Cookie，不拷贝 Cookie。
+
+管理员 Basic 认证；POST 须带 `X-Hub-Request: 1`，有 Origin 时须同源。
+
+- `GET /api/v1/comments/status`：主站登录探测结果与采集状态（`logged_in`、`not_logged_in`、`verification_required`）。未登录时 `login_entry` 为 `index_sms`，入口 `/api/v1/login/sms`。不触发评论请求。
+- `POST /api/v1/comments/probe`：只读再探测一次，请求体为空对象。
+- `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每批短时间持锁，批次之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 1500 次、上海自然日最多 3000 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
+- `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
+- `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
+
+独立的 Playwright `dyc login-web` / CLI 仍保留作退路。主站是否接受已有 `.douyin.com` 会话，须在部署后先做一次只读探测。离线测试不代表线上验收。
+
 ## 百度热搜榜（草稿）
 
 百度热搜来自 `https://top.baidu.com/api/board?platform=pc&tab=<tab>`，免登录；百度热搜热度不是百度搜索指数，缺失为 null，未上榜不记 0。只保存完整快照，不回填历史。默认榜单依次为 `realtime`、`novel`、`movie`、`teleplay`、`livelihood`、`finance`、`sports`、`new_entertainment`、`internation_news`、`challenge`、`car`、`game`（API 榜单名前加 `baidu_`）；每次采集仍须通过完整性校验。默认每轮请求 12 个 tab，至少保存一个榜单时计为一次每日成功。可用 `INDEX_HUB_BAIDU_HOTLIST_TABS` 指定逗号分隔的已知 tab；默认不调度 drama、documentary、homepage，非法项忽略，homepage 不采集。
