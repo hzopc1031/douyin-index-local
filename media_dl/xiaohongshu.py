@@ -1,6 +1,8 @@
 import json
 import io
 import os
+import subprocess
+from contextlib import contextmanager
 import tempfile
 import time
 from pathlib import Path
@@ -238,6 +240,39 @@ def refresh_qr(page, container):
     save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
 
 
+@contextmanager
+def login_display():
+    if os.environ.get('DISPLAY'):
+        yield
+        return
+    read_fd, write_fd = os.pipe()
+    try:
+        process = subprocess.Popen(['Xvfb', '-displayfd', str(write_fd), '-screen', '0', '1280x900x24'],
+                                   pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except BaseException:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd) as output:
+            display = output.readline().strip()
+        if not display.isdigit():
+            raise RuntimeError('虚拟显示启动失败')
+        old_display = os.environ.get('DISPLAY')
+        os.environ['DISPLAY'] = ':' + display
+        try:
+            yield
+        finally:
+            if old_display is None:
+                os.environ.pop('DISPLAY', None)
+            else:
+                os.environ['DISPLAY'] = old_display
+    finally:
+        process.terminate()
+        process.wait()
+
+
 def login():
     deadline = time.monotonic() + 900
     try:
@@ -250,9 +285,11 @@ def login():
         profile = profile_path()
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         profile.chmod(0o700)
-        with playwright() as browser:
-            context = browser.chromium.launch_persistent_context(str(profile), headless=True)
+        with login_display(), playwright() as browser:
+            context = browser.chromium.launch_persistent_context(
+                str(profile), headless=False, args=['--disable-blink-features=AutomationControlled'])
             try:
+                context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 page = context.pages[0] if context.pages else context.new_page()
                 events = []
                 page.on('response', lambda response: response_data(response, events))
@@ -263,6 +300,8 @@ def login():
                 refresh_at = None
                 fallback_at = time.monotonic() + 5
                 create_seen = False
+                no_create_at = time.monotonic() + 20
+                risk_retry_at = 0
                 state = None
                 retry_at = time.monotonic() + 15 if urlparse(page.url).path.rstrip('/') == '/login' else 0
                 had_container = False
@@ -310,14 +349,20 @@ def login():
                                 state = 'scanned'
                             elif value == 3:
                                 refresh_at = 0
+                    risk = time.monotonic() >= risk_retry_at and visible(page, 'text=薯队长遇到了点小麻烦')
+                    no_create = issued is None and not create_seen and time.monotonic() >= no_create_at
                     expired = container and visible(container, 'text=/二维码.*(过期|失效)|点击刷新|刷新二维码/')
-                    if expired or (refresh_at is not None and time.monotonic() >= refresh_at):
+                    if risk or no_create or expired or (refresh_at is not None and time.monotonic() >= refresh_at):
+                        if risk or no_create:
+                            log_event('登录页风控提示，将重试' if risk else '登录码等待超时，将重试')
                         issued = refresh_at = None
                         state = None
                         events.clear()
                         refresh_qr(page, container)
                         fallback_at = time.monotonic() + 5
                         create_seen = False
+                        no_create_at = time.monotonic() + 20
+                        risk_retry_at = no_create_at
                     elif issued is None and not create_seen and container and time.monotonic() >= fallback_at:
                         for code in qr(container):
                             if save_qr(code, path):

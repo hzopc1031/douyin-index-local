@@ -1,5 +1,7 @@
 from pathlib import Path
 import tempfile
+import os
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 from media_dl import xiaohongshu as xhs
@@ -8,6 +10,51 @@ from media_dl.safety import safe_log
 
 
 class XhsTests(unittest.TestCase):
+    def setUp(self):
+        display = patch.dict(os.environ, {'DISPLAY': ':99'})
+        display.start()
+        self.addCleanup(display.stop)
+
+    def test_login_launch_and_risk_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://example.com/login')
+            page.screenshot.return_value = b'page'
+            def locate(target, selector):
+                return object() if selector == 'text=薯队长遇到了点小麻烦' else None
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'logged_in', side_effect=[False, True]), patch.object(xhs, 'refresh_qr') as refresh:
+                chromium = browser.return_value.__enter__.return_value.chromium
+                context = chromium.launch_persistent_context.return_value
+                context.pages = [page]
+                self.assertEqual(xhs.login(), 0)
+                self.assertEqual(chromium.launch_persistent_context.call_args.kwargs, {'headless': False, 'args': ['--disable-blink-features=AutomationControlled']})
+                self.assertIn('navigator', context.add_init_script.call_args.args[0])
+                self.assertIn('webdriver', context.add_init_script.call_args.args[0])
+                refresh.assert_called_once()
+                self.assertIn('登录页风控提示，将重试', (root / 'xhs-login.log').read_text())
+
+    def test_login_retries_when_create_does_not_arrive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            page = MagicMock(url='https://example.com/login')
+            page.screenshot.return_value = b'page'
+            clock = [0]
+            page.wait_for_timeout.side_effect = lambda milliseconds: clock.__setitem__(0, clock[0] + milliseconds / 1000)
+            with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'logged_in', side_effect=lambda *args: clock[0] >= 27), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs, 'refresh_qr') as refresh, patch.object(xhs.time, 'monotonic', side_effect=lambda: clock[0]):
+                browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value.pages = [page]
+                self.assertEqual(xhs.login(), 0)
+                refresh.assert_called_once()
+                self.assertIn('登录码等待超时，将重试', (root / 'xhs-login.log').read_text())
+
+    def test_login_display_starts_and_cleans_up_xvfb(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(xhs.os, 'pipe', return_value=(10, 11)), patch.object(xhs.os, 'close'), patch.object(xhs.os, 'fdopen', return_value=io.StringIO('123\n')), patch.object(xhs.subprocess, 'Popen') as popen:
+            with xhs.login_display():
+                self.assertEqual(os.environ['DISPLAY'], ':123')
+            self.assertNotIn('DISPLAY', os.environ)
+            self.assertEqual(popen.call_args.args[0][0], 'Xvfb')
+            popen.return_value.terminate.assert_called_once()
+            popen.return_value.wait.assert_called_once()
+
     def test_hosts_and_fixture(self):
         for url in ('https://www.xiaohongshu.com/explore/abc123', 'https://www.xiaohongshu.com/discovery/item/abc123', 'https://rednote.com/explore/abc123'):
             self.assertEqual(xhs.resolve_id(url), 'abc123')
