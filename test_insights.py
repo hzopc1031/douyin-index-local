@@ -5,7 +5,28 @@ from hub_insights import project, validate_insight
 from hub_store import HubError, public_result, validate_query
 from test_hub import ApiTests as _ApiTests, fixture, QUERY
 
+def insight_api(**kwargs):
+    from types import SimpleNamespace
+    api = SimpleNamespace(**kwargs)
+    api._acquire_lock = lambda owner: api._lock.acquire(blocking=False)
+    api._release_lock = api._lock.release
+    api._busy = lambda: {'ok': False, 'code': 'busy'}
+    return api
+
 class InsightTests(unittest.TestCase):
+    def test_comments_lock_reports_comments_busy(self):
+        from app import Api
+        from hub_insights import collect
+        api = Api()
+        self.assertTrue(api._acquire_lock('comments'))
+        try:
+            for kind in ('related', 'audience'):
+                result = collect(api, {**QUERY, 'kind': kind})
+                self.assertEqual(result['code'], 'comments_busy')
+                self.assertIn('正在采集评论', result['message'])
+        finally:
+            api._release_lock()
+
     def test_client_precheck_error_classification(self):
         import threading
         from types import SimpleNamespace
@@ -16,7 +37,7 @@ class InsightTests(unittest.TestCase):
             for error, code in ((LoginRequired('请先完成登录。'), 'authentication_required'),
                                 (ValueError('暂时无法识别官方窗口。'), 'request_failed')):
                 with self.subTest(kind=kind, code=code):
-                    api = SimpleNamespace(_lock=threading.Lock(), _client=Mock(side_effect=error),
+                    api = insight_api(_lock=threading.Lock(), _client=Mock(side_effect=error),
                                           _on_auth_failed=Mock())
                     self.assertEqual(collect(api, {**QUERY, 'kind': kind}),
                                      {'ok': False, 'code': code, 'message': str(error) if code == 'authentication_required' else '扩展数据读取失败，未输出原始错误。'})
@@ -35,7 +56,7 @@ class InsightTests(unittest.TestCase):
                 self_outer.assertTrue(allow_empty_data)
                 calls.append((endpoint,body))
                 return {'data':{'relation_word_list':[{'relation_word':'银杏'}]},'metadata':{'fetched_at':'2026-10-28T12:00:00+08:00'}}
-        api=SimpleNamespace(_lock=threading.Lock(),_client=lambda:Client())
+        api=insight_api(_lock=threading.Lock(),_client=lambda:Client())
         body={**QUERY,'kind':'related','end_date':'2025-01-05'}
         result=collect(api,body)
         self.assertTrue(result['ok'])
@@ -68,7 +89,7 @@ class InsightTests(unittest.TestCase):
             for value in values + [{'foo': 1}, {'relation_word_list': [], 'foo': 1}, 'unknown', 0]:
                 with self.subTest(kind=kind, value=value):
                     session = FixtureSession(response({'status': 0, 'data': value}))
-                    api = SimpleNamespace(_lock=threading.Lock(),
+                    api = insight_api(_lock=threading.Lock(),
                                           _client=lambda: DouyinIndexClient(session))
                     result = collect(api, {**QUERY, 'kind': kind})
                     self.assertFalse(result['ok'])
@@ -142,7 +163,7 @@ class InsightWorkerTests(unittest.IsolatedAsyncioTestCase):
                 before = self.hub.store.get('daily', {}).get('count', 0)
                 job, _ = self.hub.store.submit({**QUERY, 'kind': kind}, 'fixture', 'empty-' + kind)
                 session = FixtureSession(response({'status': 0, 'data': None}))
-                api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: DouyinIndexClient(session))
+                api = insight_api(_lock=threading.Lock(), _client=lambda: DouyinIndexClient(session))
                 self.response = collect(api, {**QUERY, 'kind': kind})
                 self.assertEqual(len(session.calls), 1)
                 self.assertTrue(await self.hub.run_one())
