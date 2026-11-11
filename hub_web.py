@@ -35,17 +35,19 @@ logger = logging.getLogger('index_hub')
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
 def related_latest_date(store):
-    """Latest Sunday on or before min(stored trend day, today − lag). Not an official probe."""
-    from hub_insights import last_sunday_on_or_before, related_end_lag_days
-    latest = store.latest_available_date()
-    if latest is None:
-        return None
+    """Latest Sunday on or before today − lag. Independent of local trend data.
+
+    A recent official business 500 may temporarily pin this to the previous Sunday.
+    """
+    from hub_insights import last_sunday_on_or_before, related_end_lag_days, related_sunday_fallback
     try:
-        cap = min(dt.date.fromisoformat(latest),
-                  dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days()))
-        return last_sunday_on_or_before(cap).isoformat()
+        natural = last_sunday_on_or_before(
+            dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days()))
     except OverflowError:
         return None
+    cap = store.get('related_sunday_cap') if hasattr(store, 'get') else None
+    used = related_sunday_fallback(natural, cap)
+    return (used or natural).isoformat()
 
 SAFE_ERRORS = {
     'authentication_required': '登录已失效，请通过远程桌面扫码后手动恢复采集。',
@@ -338,6 +340,9 @@ class Hub:
                 if query.get('kind'):
                     result = {'data':response['data'],'metadata':response['metadata']}
                     self.store.save_insight(query,result)
+                    if query.get('kind') == 'related':
+                        from hub_insights import remember_related_sunday
+                        remember_related_sunday(self.store, result.get('metadata'))
                     self.store.update_job(row['id'],'succeeded',result=result)
                 else:
                     result = require_platform(query['platform']).project(response)

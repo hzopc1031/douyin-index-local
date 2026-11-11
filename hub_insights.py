@@ -22,6 +22,95 @@ def last_sunday_on_or_before(day):
 
 
 RELATED_ALIGN_REASON = '关联词接口按周出数，截止日已调整为可查范围内最近的周日'
+RELATED_WEEK_FALLBACK_REASON = '关联词该周日尚未出数，已回退到上一周日'
+RELATED_SUNDAY_CAP_TTL = 12 * 60 * 60
+
+
+def _iso_date(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        day = dt.date.fromisoformat(value)
+    except ValueError:
+        return None
+    return day if day.isoformat() == value else None
+
+
+def _cap_is_fresh(checked_at, now=None):
+    now = now or dt.datetime.now(TZ)
+    if isinstance(checked_at, (int, float)):
+        then = dt.datetime.fromtimestamp(checked_at, TZ)
+    elif isinstance(checked_at, str):
+        try:
+            then = dt.datetime.fromisoformat(checked_at)
+        except ValueError:
+            return False
+        then = then.replace(tzinfo=TZ) if then.tzinfo is None else then.astimezone(TZ)
+    else:
+        return False
+    return 0 <= (now - then).total_seconds() <= RELATED_SUNDAY_CAP_TTL
+
+
+def related_sunday_fallback(natural, cap, now=None):
+    """Return a stored earlier Sunday if a recent official 500 forced a one-week fallback."""
+    if not isinstance(cap, dict) or cap.get('source') != 'fallback':
+        return None
+    if cap.get('tried') != natural.isoformat():
+        return None
+    used = _iso_date(cap.get('date'))
+    if used is None or used >= natural:
+        return None
+    if not _cap_is_fresh(cap.get('checked_at'), now=now):
+        return None
+    return used
+
+
+def remember_related_sunday(store, metadata):
+    """Persist or clear the short-lived official-week cap after a related collect."""
+    if not isinstance(metadata, dict) or metadata.get('kind') != 'related':
+        return
+    used = _iso_date(metadata.get('end_date'))
+    if used is None:
+        return
+    try:
+        natural = last_sunday_on_or_before(
+            dt.datetime.now(TZ).date() - dt.timedelta(days=related_end_lag_days()))
+    except OverflowError:
+        return
+    clamp = metadata.get('end_date_clamped') or {}
+    if clamp.get('reason') == RELATED_WEEK_FALLBACK_REASON:
+        tried = _iso_date(clamp.get('tried')) or used + dt.timedelta(days=7)
+        store.set('related_sunday_cap', {
+            'date': used.isoformat(),
+            'tried': tried.isoformat(),
+            'source': 'fallback',
+            'checked_at': metadata.get('fetched_at') or dt.datetime.now(TZ).isoformat(),
+        })
+        return
+    if used == natural and store.get('related_sunday_cap'):
+        store.set('related_sunday_cap', None)
+
+
+def _related_week_unready(query, exc):
+    from client import SanitizedClientError
+    return (isinstance(query, dict) and query.get('kind') == 'related'
+            and isinstance(exc, SanitizedClientError)
+            and exc.code == 'business_error'
+            and exc.business_code in (500, '500'))
+
+
+def previous_related_week(query):
+    """Shift a related window back seven days, keeping the original requested end."""
+    end = dt.date.fromisoformat(query['end_date'])
+    start = dt.date.fromisoformat(query['start_date'])
+    used_end = end - dt.timedelta(days=7)
+    used_start = start - dt.timedelta(days=7) if start > used_end else start
+    requested = query.get('requested_end_date') or end.isoformat()
+    body = {k: v for k, v in query.items() if k != 'requested_end_date'}
+    extra = {'requested_end_date': requested} if requested != used_end.isoformat() else {}
+    shifted = validate_insight({**body, 'start_date': used_start.isoformat(),
+                                'end_date': used_end.isoformat(), **extra})
+    return None if shifted['end_date'] == query['end_date'] else shifted
 
 
 def validate_insight(body, *, historical=False, latest_related_date=None):
@@ -47,10 +136,7 @@ def _validate_douyin_insight(body, *, historical=False, latest_related_date=None
         except OverflowError:
             raise HubError('invalid_dates', '关联词截止日上限超出支持的日期范围。') from None
         if latest_related_date is not None:
-            limit = dt.date.fromisoformat(latest_related_date)
-            if start > limit:
-                raise HubError('invalid_dates', f'关联词可用截止日为 {last_sunday_on_or_before(limit)}，开始日须不晚于该日。')
-            cap = min(cap, limit)
+            cap = min(cap, dt.date.fromisoformat(latest_related_date))
         used = last_sunday_on_or_before(min(end, cap))
         if used != original_end or start > used:
             requested_end = requested_end or original_end.isoformat()
@@ -125,8 +211,27 @@ def collect(api, body):
         try:
             from client import ORIGIN
             endpoint=ORIGIN+'/api/v2/index/'+('get_relation_word' if query['kind']=='related' else 'get_portrait')
-            result=client._post(endpoint,{'param':{'keyword':query['keywords'][0],
-                'start_date':query['start_date'].replace('-',''),'end_date':query['end_date'].replace('-',''),'app_name':'aweme'}}, allow_empty_data=True)
+            def post(current):
+                return client._post(endpoint,{'param':{'keyword':current['keywords'][0],
+                    'start_date':current['start_date'].replace('-',''),'end_date':current['end_date'].replace('-',''),'app_name':'aweme'}}, allow_empty_data=True)
+            week_fallback_from=None
+            try:
+                result=post(query)
+            except Exception as exc:
+                fallback=None
+                if _related_week_unready(query, exc):
+                    try:
+                        fallback=previous_related_week(query)
+                    except HubError:
+                        fallback=None
+                if not fallback:
+                    raise
+                try:
+                    result=post(fallback)
+                except Exception:
+                    raise exc
+                week_fallback_from=query['end_date']
+                query=fallback
             raw_data=result['data']
             if raw_data is None or raw_data == {}:
                 return {'ok':False,'code':'no_data'}
@@ -143,11 +248,18 @@ def collect(api, body):
             data=project(result['data'],query['kind'])
             clamp = {}
             note = '扩展接口试验接入；未完成与官方页面的逐项人工核对。'
-            if 'requested_end_date' in query:
-                reason = RELATED_ALIGN_REASON
-                clamp['end_date_clamped'] = {'requested': query['requested_end_date'],
-                                             'used': query['end_date'], 'reason': reason}
-                note += f"{reason}，已从 {query['requested_end_date']} 调整为 {query['end_date']}。"
+            if week_fallback_from or 'requested_end_date' in query:
+                if week_fallback_from:
+                    reason = RELATED_WEEK_FALLBACK_REASON
+                    clamp['end_date_clamped'] = {'requested': query.get('requested_end_date') or week_fallback_from,
+                                                 'tried': week_fallback_from,
+                                                 'used': query['end_date'], 'reason': reason}
+                    note += f"{reason}，已从 {week_fallback_from} 调整为 {query['end_date']}。"
+                else:
+                    reason = RELATED_ALIGN_REASON
+                    clamp['end_date_clamped'] = {'requested': query['requested_end_date'],
+                                                 'used': query['end_date'], 'reason': reason}
+                    note += f"{reason}，已从 {query['requested_end_date']} 调整为 {query['end_date']}。"
             return {'ok':True,'data':data,'metadata':{**query,**clamp,'source':'creator.douyin.com',
                 'fetched_at':result['metadata']['fetched_at'],'verification':'pending',
                 'note':note}}

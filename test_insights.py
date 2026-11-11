@@ -36,12 +36,13 @@ class InsightTests(unittest.TestCase):
                 calls.append((endpoint,body))
                 return {'data':{'relation_word_list':[{'relation_word':'银杏'}]},'metadata':{'fetched_at':'2026-10-28T12:00:00+08:00'}}
         api=SimpleNamespace(_lock=threading.Lock(),_client=lambda:Client())
-        result=collect(api,{**QUERY,'kind':'related'})
+        body={**QUERY,'kind':'related','end_date':'2025-01-05'}
+        result=collect(api,body)
         self.assertTrue(result['ok'])
-        self.assertEqual(calls[0][1],{'param':{'keyword':'酵素','start_date':'20250101','end_date':'20250107','app_name':'aweme'}})
+        self.assertEqual(calls[0][1],{'param':{'keyword':'酵素','start_date':'20250101','end_date':'20250105','app_name':'aweme'}})
         self.assertFalse(api._lock.locked())
         # A second explicit call has no browser-side cooldown.
-        self.assertTrue(collect(api,{**QUERY,'kind':'related'})['ok'])
+        self.assertTrue(collect(api,body)['ok'])
         self.assertEqual(len(calls),2)
         api._lock.acquire()
         try:
@@ -280,12 +281,19 @@ class InsightApiTests(_ApiTests):
         self.assertEqual(list(self.hub.store.db.execute('SELECT * FROM insights ORDER BY fetched LIMIT 1').fetchone()), original)
         self.assertEqual(self.calls, [])
 
-    async def test_related_uses_stored_trend_limit_and_exact_history(self):
+    async def test_related_uses_sunday_cap_not_stored_trend_and_exact_history(self):
         from unittest.mock import patch
+        class Nov11(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 11, 10, tzinfo=tz)
         query = {**QUERY, 'start_date': '2026-09-28', 'end_date': '2026-10-27'}
-        with patch.object(self.hub.store, 'latest_available_date', return_value='2026-10-27'):
+        with patch('hub_web.dt.datetime', Nov11), \
+                patch('hub_insights.dt.datetime', Nov11), \
+                patch('hub_store.dt.datetime', Nov11), \
+                patch.object(self.hub.store, 'latest_available_date', return_value='2026-11-01'):
             history = await (await self.client.get('/api/v1/history', headers=self.bearer)).json()
-            self.assertEqual(history['related_latest_available_date'], '2026-10-25')
+            self.assertEqual(history['related_latest_available_date'], '2026-11-08')
             for kind in ('related', 'audience', None):
                 body = {**query, **({'kind': kind} if kind else {})}
                 response = await self.client.post('/api/v1/'+('insights/queries' if kind else 'queries'),

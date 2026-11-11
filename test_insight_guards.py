@@ -21,7 +21,7 @@ class FixedDatetime(dt.datetime):
 
 class ClampTests(unittest.TestCase):
     def setUp(self):
-        for target in ('hub_insights.dt.datetime', 'hub_store.dt.datetime'):
+        for target in ('hub_insights.dt.datetime', 'hub_store.dt.datetime', 'hub_web.dt.datetime'):
             p = patch(target, FixedDatetime)
             p.start()
             self.addCleanup(p.stop)
@@ -61,8 +61,9 @@ class ClampTests(unittest.TestCase):
         self.assertEqual(saturday['requested_end_date'], '2026-10-24')
         audience = validate_insight({**self.query, 'kind': 'audience'}, latest_related_date='2026-10-25')
         self.assertEqual(audience['end_date'], '2026-10-27')
-        with self.assertRaises(HubError):
-            validate_insight({**self.query, 'start_date': '2026-10-26'}, latest_related_date='2026-10-25')
+        shifted = validate_insight({**self.query, 'start_date': '2026-10-26'}, latest_related_date='2026-10-25')
+        self.assertEqual((shifted['start_date'], shifted['end_date']), ('2026-10-24', '2026-10-25'))
+        self.assertEqual(shifted['requested_end_date'], '2026-10-27')
         historical = validate_insight(self.query, historical=True, latest_related_date='2026-10-25')
         self.assertEqual(historical['end_date'], '2026-10-27')
 
@@ -81,20 +82,28 @@ class ClampTests(unittest.TestCase):
             self.assertEqual(sunday['end_date'], '2026-11-01')
             self.assertNotIn('requested_end_date', sunday)
 
-    def test_related_latest_date_is_last_sunday_not_trend_minus_two(self):
+    def test_related_latest_date_ignores_stale_trend_and_honors_fallback_cap(self):
         from hub_web import related_latest_date
         # FixedDatetime is 2026-10-28, so today-3 is already Sunday 10-25.
-        self.assertEqual(related_latest_date(SimpleNamespace(latest_available_date=lambda: '2026-10-27')),
-                         '2026-10-25')
-        self.assertEqual(related_latest_date(SimpleNamespace(latest_available_date=lambda: '2026-10-30')),
+        empty = SimpleNamespace(latest_available_date=lambda: None)
+        self.assertEqual(related_latest_date(empty), '2026-10-25')
+        self.assertEqual(related_latest_date(SimpleNamespace(latest_available_date=lambda: '2026-10-18')),
                          '2026-10-25')
         class Nov11(dt.datetime):
             @classmethod
             def now(cls, tz=None):
                 return cls(2026, 11, 11, 10, tzinfo=tz)
-        store = SimpleNamespace(latest_available_date=lambda: '2026-11-01')
-        with patch('hub_web.dt.datetime', Nov11):
-            self.assertEqual(related_latest_date(store), '2026-11-01')
+        stale = SimpleNamespace(latest_available_date=lambda: '2026-11-01')
+        with patch('hub_web.dt.datetime', Nov11), patch('hub_insights.dt.datetime', Nov11):
+            self.assertEqual(related_latest_date(stale), '2026-11-08')
+            cap = {'source': 'fallback', 'date': '2026-11-01', 'tried': '2026-11-08',
+                   'checked_at': '2026-11-11T10:00:00+08:00'}
+            pinned = SimpleNamespace(get=lambda key, default=None: cap if key == 'related_sunday_cap' else default,
+                                     latest_available_date=lambda: '2026-11-01')
+            self.assertEqual(related_latest_date(pinned), '2026-11-01')
+            stale_cap = dict(cap, checked_at='2026-11-10T21:00:00+08:00')
+            expired = SimpleNamespace(get=lambda key, default=None: stale_cap if key == 'related_sunday_cap' else default)
+            self.assertEqual(related_latest_date(expired), '2026-11-08')
 
     def test_environment_and_two_year_boundary(self):
 
@@ -126,6 +135,53 @@ class ClampTests(unittest.TestCase):
         self.assertEqual(client._post.call_args.args[1]['param']['end_date'], '20261025')
         client.session.cookies.clear.assert_called_once()
         client.session.close.assert_called_once()
+
+    def test_collect_retries_previous_sunday_on_business_500(self):
+        from client import SanitizedClientError
+        from hub_insights import RELATED_WEEK_FALLBACK_REASON, remember_related_sunday
+        client = Mock()
+        fail = SanitizedClientError('business_error', '平台返回未成功的业务状态，本次请求已停止。',
+                                    http_status=200, business_code=500)
+        client._post.side_effect = [
+            fail,
+            {'data': {'relation_word_list': [{'relation_word': '合成关联'}]},
+             'metadata': {'fetched_at': '2026-10-28T12:00:00+08:00'}},
+        ]
+        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        result = collect(api, {**self.query, 'end_date': '2026-10-25'})
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['metadata']['end_date'], '2026-10-18')
+        self.assertEqual(result['metadata']['start_date'], '2026-10-14')
+        self.assertEqual(result['metadata']['end_date_clamped'], {
+            'requested': '2026-10-25', 'tried': '2026-10-25', 'used': '2026-10-18',
+            'reason': RELATED_WEEK_FALLBACK_REASON})
+        self.assertEqual([call.args[1]['param']['end_date'] for call in client._post.call_args_list],
+                         ['20261025', '20261018'])
+        store = SimpleNamespace(values={})
+        store.get = lambda key, default=None: store.values.get(key, default)
+        store.set = lambda key, value: store.values.__setitem__(key, value)
+        remember_related_sunday(store, result['metadata'])
+        self.assertEqual(store.values['related_sunday_cap']['date'], '2026-10-18')
+        self.assertEqual(store.values['related_sunday_cap']['tried'], '2026-10-25')
+        self.assertEqual(store.values['related_sunday_cap']['source'], 'fallback')
+
+    def test_collect_does_not_retry_non_500_and_gives_up_after_one_fallback(self):
+        from client import SanitizedClientError
+        limited = SanitizedClientError('rate_limited', '平台返回限频信号，本次请求已停止。',
+                                       http_status=200, business_code=429)
+        fail = SanitizedClientError('business_error', '平台返回未成功的业务状态，本次请求已停止。',
+                                    http_status=200, business_code=500)
+        client = Mock()
+        client._post.side_effect = [limited]
+        api = SimpleNamespace(_lock=threading.Lock(), _client=lambda: client)
+        result = collect(api, {**self.query, 'end_date': '2026-10-25'})
+        self.assertEqual((result['ok'], result['code']), (False, 'rate_limited'))
+        self.assertEqual(client._post.call_count, 1)
+        client._post.side_effect = [fail, fail]
+        result = collect(api, {**self.query, 'end_date': '2026-10-25'})
+        self.assertEqual((result['ok'], result['code'], result.get('business_code')),
+                         (False, 'business_error', 500))
+        self.assertEqual(client._post.call_count, 3)
 
 
 class SkipTests(unittest.IsolatedAsyncioTestCase):
