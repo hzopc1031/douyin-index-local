@@ -146,6 +146,8 @@ def _signals(obj):
 
 
 def decode_page(result):
+    if result.get("kind") == "opaqueredirect" or (type(result.get("status")) is int and 300 <= result["status"] < 400):
+        raise Stop(3, "comment_redirect")
     if result.get("kind") in ("timeout", "network"):
         raise Stop(2, result["kind"])
     if result.get("kind") == "login":
@@ -154,6 +156,8 @@ def decode_page(result):
         raise Stop(3, "verification_widget")
     if result.get("status") in (401, 403):
         raise Stop(4 if result["status"] == 401 else 3, "access_denied")
+    if result.get("status") == 429:
+        raise Stop(3, "rate_limited")
     if result.get("status") != 200:
         raise Stop(3, "suspicious_http_status")
     try:
