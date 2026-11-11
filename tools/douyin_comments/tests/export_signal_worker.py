@@ -39,7 +39,7 @@ async def main():
     fake = LargeBatch()
     args = Namespace(urls=[site.FAKE_ORIGIN + "/video/100"], urls_file=None,
                      out=root / "out", profile_dir=root / "profile", state_dir=root / "state",
-                     display=None, top=30, max_pages=1500)
+                     display=None, top=30, max_pages=25)
 
     def gate():
         (root / "ready").write_text(stage)

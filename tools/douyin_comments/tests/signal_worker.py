@@ -15,7 +15,7 @@ async def main():
     fake = FakeSite("hang")
     args = Namespace(urls=[site.FAKE_ORIGIN + "/video/100", site.FAKE_ORIGIN + "/video/200"],
                      urls_file=None, out=root / "out", profile_dir=root / "profile",
-                     state_dir=root / "state", display=None, top=30, max_pages=1500)
+                     state_dir=root / "state", display=None, top=30, max_pages=25)
     async def ready():
         while len(fake.calls) < 3:
             await asyncio.sleep(0.02)
