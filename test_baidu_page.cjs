@@ -52,19 +52,44 @@ async function run(mode) {
     if (news) assert.equal(result.news_rows.length, 7);
     if (enabled) { assert.equal(result.feed_rows.length,7); assert.equal(result.feed_rows[1].value,null); assert.equal(result.feed_rows[0].value,1); }
   }
-  async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词'], news = false) {
+  async function feedFixture(items, mapping = 'abc1,2', keywords = ['人工智能', '另一词'], news = false, users = undefined) {
     const series = {startDate:query.start_date, endDate:query.end_date, data:'abcbabcbabcba'};
     const fetch = async url => {
-      const data = (url.includes('FeedSearchApi') || url.includes('NewsApi')) ? {uniqid:'private-feed-id', index:items} :
+      const data = (url.includes('FeedSearchApi') || url.includes('NewsApi')) ? {uniqid:'private-feed-id', index:items, ...(users === undefined ? {} : {userIndexes:users})} :
         url.includes('SearchApi/index') ? {uniqid:'search-id', userIndexes:[]} :
         url.includes('feed-id') ? mapping : 'abc1,2';
-      return new Response(JSON.stringify({status:0, data}), {headers:{'content-type':'application/json'}});
+      return new Response(JSON.stringify({status:0, data}), {status:url.includes('feed-id') ? 201 : 200, headers:{'content-type':'application/json'}});
     };
     const timer = (...args) => {const h=setTimeout(...args); h.unref(); return h;};
     const context = {location:{origin:query._origin}, window:{Paris:{getAcsInstance:cb=>cb(null,{getSign:cb=>cb(null,'synthetic-signature')})}}, fetch, URLSearchParams, AbortController, TextDecoder, Uint8Array, Response, setTimeout:timer, clearTimeout};
     return vm.runInNewContext(script, context)({...query, keywords, ...(news ? {_news_enabled:true} : {_feed_enabled:true})});
   }
   const feedSeries = {startDate:query.start_date, endDate:query.end_date, data:'abbcbabcbabc'};
+  for (const news of [false, true]) {
+    for (const [items, users, fallback, empty, length] of [
+      [[{key:'人工智能',...feedSeries}], undefined, false, 1, 12],
+      [[], undefined, true, 7, null],
+      [[{key:'人工智能',...feedSeries,data:''}], undefined, false, 7, 0],
+      [[{key:'人工智能',...feedSeries}], [{word:'private-user-value', all:{data:'private-cipher'}}], false, 1, 12]
+    ]) {
+      const result = await feedFixture(items, 'abc1,2', ['人工智能'], news, users);
+      assert.equal(result.status, 'ok');
+      const shape = result[news ? 'news_shape' : 'feed_shape'];
+      assert.equal(shape.index_length, items.length);
+      assert.equal(shape.used_fallback, fallback);
+      assert.equal(shape.decoded_points, 7);
+      assert.equal(shape.empty_points, empty);
+      assert.equal(shape.ptbk_length, 6);
+      assert.equal(shape.http_status, 200); assert.equal(shape.business_status, 0);
+      if (items.length) assert.equal(shape.index_items[0].data_length, length);
+      assert.equal(shape.user_indexes_present, users !== undefined);
+      if (users) {
+        assert.equal(shape.user_indexes_length, 1);
+        assert.deepEqual(JSON.parse(JSON.stringify(shape.user_indexes_item_fields)), [[{field:'all',type:'object'}, {field:'word',type:'string'}]]);
+      }
+      for (const secret of ['人工智能','private-feed-id','abbcbabcbabc','abc1,2','private-user-value','private-cipher','fake-cookie-secret']) assert(!JSON.stringify(shape).includes(secret));
+    }
+  }
   for (const identity of [{key:'人工智能'}, {name:'人工智能'}, {word:'人工智能'},
     {key:[{name:'人工智能',wordType:1}]}, {key:[[{name:'人工智能',wordType:1}]]}, {key:[{name:'人工智能'}]},
     {word:[{name:'人工智能',wordType:1}]}, {word:[[{name:'人工智能',wordType:1}]]},
