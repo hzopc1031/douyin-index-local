@@ -159,7 +159,9 @@ class XhsTests(unittest.TestCase):
             xhs.write_meta(120)
             xhs.log_event('二维码生成')
             xhs.set_status('need_scan')
-            xhs.refresh_qr(MagicMock(), None)
+            page = MagicMock(url='https://example.com/explore')
+            page.screenshot.return_value = b'page'
+            xhs.refresh_qr(page, None)
             meta = json.loads((root / 'xhs-qr.meta').read_text()) if (root / 'xhs-qr.meta').exists() else None
             self.assertIsNone(meta)
             xhs.write_meta(120)
@@ -189,6 +191,7 @@ class XhsTests(unittest.TestCase):
             with self.subTest(expire=expire), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 page = MagicMock()
+                page.url = 'https://example.com/explore'
                 page.screenshot.return_value = b'page'
                 statuses = []
                 times = iter([0, 1, 2, 3, 4, 5, 6, 105, 106, 901, 902])
@@ -220,6 +223,7 @@ class XhsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = MagicMock()
+            page.url = 'https://example.com/explore'
             page.screenshot.return_value = b'page'
             button = MagicMock()
             container = MagicMock()
@@ -237,6 +241,49 @@ class XhsTests(unittest.TestCase):
                 save.assert_called_once()
                 self.assertEqual(statuses, ['need_scan', 'logged_in'])
                 self.assertIn('未找到登录容器，将重试', (root / 'xhs-login.log').read_text())
+
+    def test_login_page_waits_for_later_create_without_modal(self):
+        for body_visible in (False, True):
+            with self.subTest(body_visible=body_visible), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                page = MagicMock()
+                page.url = 'https://example.com/login?synthetic=1'
+                page.screenshot.return_value = b'page'
+                body, dismiss = MagicMock(), MagicMock()
+                statuses = []
+                def locate(target, selector):
+                    if selector == 'body' and body_visible:
+                        return body
+                    if selector == 'text="我知道了"' and not dismiss.click.called:
+                        return dismiss
+                    return None
+                def wait(milliseconds):
+                    if milliseconds == 1000:
+                        response = MagicMock(url='https://example.com/login/qrcode/create')
+                        response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
+                        page.on.call_args.args[1](response)
+                page.wait_for_timeout.side_effect = wait
+                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'visible', side_effect=locate), patch.object(xhs, 'logged_in', side_effect=[False, False, True]), patch.object(xhs, 'save_url_qr', return_value=True) as save, patch.object(xhs.time, 'monotonic', return_value=1), patch.object(xhs, 'write_status', side_effect=statuses.append):
+                    context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
+                    context.pages = [page]
+                    self.assertEqual(xhs.login(), 0)
+                    save.assert_called_once()
+                page.goto.assert_called_once_with('https://www.xiaohongshu.com/login', wait_until='domcontentloaded')
+                page.wait_for_timeout.assert_any_call(5000)
+                dismiss.click.assert_called_once()
+                self.assertEqual(statuses, ['need_scan', 'logged_in'])
+
+    def test_login_button_selectors_include_sidebar_and_exclude_submit(self):
+        page = MagicMock()
+        with patch.object(xhs, 'visible', return_value=object()) as find:
+            self.assertIsNotNone(xhs.login_button(page))
+        selector = find.call_args.args[1]
+        for part in selector.split(', '):
+            self.assertIn(':not([class*="submit"])', part)
+            self.assertNotIn('header', part)
+        self.assertIn('button.login-btn', selector)
+        self.assertIn(':text-is("登录")', selector)
+        self.assertIn(':text-is("Log in")', selector)
 
     def test_login_exception_logs_redacted_reason(self):
         for detail in ('navigation failed https://example.com/?qr_id=secret', 'failed Cookie: secret', 'failed qr_id=secret', 'failed url=secret'):

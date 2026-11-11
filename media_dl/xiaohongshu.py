@@ -58,11 +58,14 @@ def logged_in(page, context):
 
 
 def login_container(page):
-    return visible(page, '.login-container, [class*="login-modal"], [role="dialog"]:has-text("登录"), dialog:has-text("登录")')
+    container = visible(page, '.login-container, [class*="login-modal"], [role="dialog"]:has-text("登录"), dialog:has-text("登录")')
+    if not container and urlparse(page.url).path.rstrip('/') == '/login':
+        container = visible(page, 'body')
+    return container
 
 
 def login_button(page):
-    return visible(page, 'header button:text-is("登录"), header a:text-is("登录"), header button:text-is("Log in"), header a:text-is("Log in"), header button:text-is("Log In"), header a:text-is("Log In")')
+    return visible(page, 'button.login-btn:not([class*="submit"]), button:not([class*="submit"]):text-is("登录"), a:not([class*="submit"]):text-is("登录"), button:not([class*="submit"]):text-is("Log in"), a:not([class*="submit"]):text-is("Log in"), button:not([class*="submit"]):text-is("Log In"), a:not([class*="submit"]):text-is("Log In")')
 
 
 def qr(container):
@@ -232,6 +235,7 @@ def refresh_qr(page, container):
             button = visible(container, 'text=扫码登录')
             if button:
                 button.click()
+    save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
 
 
 def login():
@@ -253,22 +257,27 @@ def login():
                 events = []
                 page.on('response', lambda response: response_data(response, events))
                 page.goto('https://www.xiaohongshu.com/login', wait_until='domcontentloaded')
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(5000)
                 save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                 issued = None
                 refresh_at = None
                 fallback_at = time.monotonic() + 5
                 create_seen = False
                 state = None
-                retry_at = 0
+                retry_at = time.monotonic() + 15 if urlparse(page.url).path.rstrip('/') == '/login' else 0
                 had_container = False
                 while time.monotonic() < deadline:
                     if logged_in(page, context):
                         set_status('logged_in')
                         return 0
+                    on_login_page = urlparse(page.url).path.rstrip('/') == '/login'
+                    if on_login_page:
+                        dismiss = visible(page, 'text="我知道了"')
+                        if dismiss:
+                            dismiss.click()
                     container = login_container(page)
                     if container and not had_container:
-                        button = visible(container, 'text=扫码登录')
+                        button = None if on_login_page else visible(container, 'text=扫码登录')
                         if button:
                             button.click()
                         save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
@@ -323,13 +332,14 @@ def login():
                                 break
                     if not container and time.monotonic() >= retry_at:
                         log_event('未找到登录容器，将重试')
-                        button = login_button(page)
+                        button = None if on_login_page else login_button(page)
                         if button:
                             button.click()
                             page.wait_for_timeout(3000)
                         else:
                             page.goto('https://www.xiaohongshu.com/explore', wait_until='domcontentloaded')
                             page.wait_for_timeout(3000)
+                        save_private(RUN_DIR / 'xhs-page.png', page.screenshot(full_page=True))
                         retry_at = time.monotonic() + 3
                     page.wait_for_timeout(1000)
                 set_status('expired')
