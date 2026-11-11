@@ -61,7 +61,7 @@ class XhsTests(unittest.TestCase):
 
     def test_status_values(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
-            for status in ('need_scan', 'logged_in', 'expired', 'error'):
+            for status in ('need_scan', 'scanned', 'logged_in', 'expired', 'error'):
                 xhs.write_status(status)
                 path = Path(directory) / 'xhs-login.status'
                 self.assertEqual(path.read_text().strip(), status)
@@ -74,9 +74,10 @@ class XhsTests(unittest.TestCase):
         for payload in ('https://rednote.onelink.me/example', 'https://example.com/?af_xp=qr',
                         'https://example.com/download/app?login=1'):
             self.assertFalse(xhs.qr_valid(payload, True))
-        for payload in ('https://example.com/scan?qr_id=synthetic', 'https://example.com/login?token=synthetic'):
+        for payload in ('https://example.com/scan?qr_id=synthetic', 'https://example.com/login?qrId=synthetic'):
             self.assertTrue(xhs.qr_valid(payload, True))
-        self.assertTrue(xhs.qr_valid(None, True))
+        self.assertFalse(xhs.qr_valid(None, True))
+        self.assertFalse(xhs.qr_valid('https://example.com/mobile/login', True))
         self.assertFalse(xhs.qr_valid(None, False))
         self.assertFalse(xhs.qr_valid('https://example.com/login?token=synthetic', False))
 
@@ -108,16 +109,14 @@ class XhsTests(unittest.TestCase):
         image.save(data, format='PNG')
         code = MagicMock()
         code.screenshot.return_value = data.getvalue()
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
             path = Path(directory) / 'qr.png'
             with patch.object(zxingcpp, 'read_barcode', return_value=MagicMock(text='https://onelink.me/?af_xp=qr')):
                 self.assertFalse(xhs.save_qr(code, path))
                 self.assertFalse(path.exists())
             with patch.object(zxingcpp, 'read_barcode', return_value=None):
-                self.assertTrue(xhs.save_qr(code, path))
-            with Image.open(path) as saved:
-                self.assertEqual(saved.size, (138, 138))
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(xhs.save_qr(code, path))
+            self.assertFalse(path.exists())
 
     def test_synthetic_qr_decoded_without_exposing_payload(self):
         import contextlib
@@ -136,31 +135,85 @@ class XhsTests(unittest.TestCase):
             code = MagicMock()
             code.screenshot.return_value = data.getvalue()
             output = io.StringIO()
-            with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                 result = xhs.save_qr(code, Path(directory) / 'qr.png')
                 self.assertEqual(result, accepted)
                 self.assertNotIn('synthetic-secret', str(result) + output.getvalue())
 
-    def test_login_success_and_timeout(self):
-        for success in (True, False):
-            with self.subTest(success=success), tempfile.TemporaryDirectory() as directory:
+    def test_create_response_meta_and_redacted_log(self):
+        import json
+        from PIL import Image
+        import zxingcpp
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(xhs, 'RUN_DIR', Path(directory)):
+            root = Path(directory)
+            for key in ('qr_id', 'qrId'):
+                payload = 'https://example.com/mobile/login?' + key + '=synthetic-secret'
+                response = MagicMock(url='https://example.com/api/sns/web/v1/login/qrcode/create')
+                response.json.return_value = {'data': {'url': payload, 'qr_id': 'synthetic-secret', 'code': 'synthetic-code'}}
+                events = []
+                xhs.response_data(response, events)
+                self.assertTrue(xhs.save_url_qr(events[0][1]['url'], root / 'xhs-qr.png'))
+                decoded = zxingcpp.read_barcode(Image.open(root / 'xhs-qr.png'))
+                self.assertEqual(decoded.text, payload)
+            xhs.write_meta(120)
+            xhs.log_event('二维码生成')
+            xhs.set_status('need_scan')
+            xhs.refresh_qr(MagicMock(), None)
+            meta = json.loads((root / 'xhs-qr.meta').read_text()) if (root / 'xhs-qr.meta').exists() else None
+            self.assertIsNone(meta)
+            xhs.write_meta(120)
+            self.assertEqual(set(json.loads((root / 'xhs-qr.meta').read_text())), {'generated_at', 'expires_at'})
+            self.assertEqual((root / 'xhs-qr.meta').stat().st_mode & 0o777, 0o600)
+            log = (root / 'xhs-login.log').read_text()
+            for word in ('二维码生成', '刷新二维码', '状态变化', 'example.com /mobile/login'):
+                self.assertIn(word, log)
+            for secret in ('synthetic-secret', 'synthetic-code', 'qr_id', 'cookie', 'https://', '?'):
+                self.assertNotIn(secret, log.lower())
+            self.assertEqual((root / 'xhs-login.log').stat().st_mode & 0o777, 0o600)
+
+    def test_login_requires_session_and_avatar(self):
+        context = MagicMock()
+        page = MagicMock()
+        with patch.object(xhs, 'visible', return_value=object()):
+            context.cookies.return_value = []
+            self.assertFalse(xhs.logged_in(page, context))
+            context.cookies.return_value = [{'name': 'web_session', 'value': 'synthetic'}]
+            self.assertTrue(xhs.logged_in(page, context))
+        with patch.object(xhs, 'visible', return_value=None):
+            self.assertFalse(xhs.logged_in(page, context))
+        self.assertEqual(xhs.status_code({'CODE_STATUS': 2}), 2)
+
+    def test_status_and_refresh_in_login_loop(self):
+        for expire in ('status', 'time'):
+            with self.subTest(expire=expire), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 page = MagicMock()
-                code = MagicMock()
-                statuses = []
                 page.screenshot.return_value = b'page'
-                def save_code(code, path):
-                    xhs.save_private(path, b'qr')
-                    return True
-                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'qr', return_value=[code]), patch.object(xhs, 'save_qr', side_effect=save_code), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'logged_in', side_effect=[False, False, success]), patch.object(xhs.time, 'monotonic', side_effect=[0, 1, 2, 601]), patch.object(xhs, 'write_status', side_effect=lambda value: statuses.append(value)):
+                statuses = []
+                times = iter([0, 1, 2, 3, 4, 5, 6, 105, 106, 901, 902])
+                def now():
+                    return next(times, 902)
+                def navigate(*args, **kwargs):
+                    callback = page.on.call_args.args[1]
+                    response = MagicMock(url='https://example.com/login/qrcode/create')
+                    response.json.return_value = {'data': {'url': 'https://example.com/login?qr_id=synthetic'}}
+                    callback(response)
+                    response = MagicMock(url='https://example.com/api/qrcode/userinfo')
+                    response.json.return_value = {'data': {'codeStatus': 1}}
+                    callback(response)
+                    if expire == 'status':
+                        response.json.return_value = {'data': {'code_status': 3}}
+                        callback(response)
+                page.goto.side_effect = navigate
+                with patch.object(xhs, 'RUN_DIR', root), patch.object(xhs, 'profile_path', return_value=root / 'profile'), patch.object(xhs, 'playwright') as browser, patch.object(xhs, 'login_container', return_value=MagicMock()), patch.object(xhs, 'visible', return_value=None), patch.object(xhs, 'logged_in', return_value=False), patch.object(xhs, 'qr', return_value=[]), patch.object(xhs.time, 'monotonic', side_effect=now), patch.object(xhs, 'write_status', side_effect=statuses.append), patch.object(xhs, 'refresh_qr') as refresh:
                     context = browser.return_value.__enter__.return_value.chromium.launch_persistent_context.return_value
                     context.pages = [page]
-                    result = xhs.login()
-                self.assertEqual(statuses, ['error', 'need_scan', 'logged_in' if success else 'expired'])
-                self.assertEqual(result, 0 if success else 1)
-                self.assertEqual((root / 'profile').stat().st_mode & 0o777, 0o700)
-                self.assertEqual((root / 'xhs-qr.png').stat().st_mode & 0o777, 0o600)
-                self.assertEqual((root / 'xhs-page.png').stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(xhs.login(), 1)
+                    refresh.assert_called()
+                self.assertIn('need_scan', statuses)
+                self.assertIn('scanned', statuses)
+                self.assertEqual(statuses[-1], 'expired')
                 context.close.assert_called_once()
 
 

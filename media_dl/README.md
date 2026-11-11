@@ -18,7 +18,7 @@ python -m media_dl login xhs
 python -m media_dl 小红书链接 --out ./out
 ```
 
-登录默认无头运行，二维码保存在 `/workspace/dev/media-dl-run/xhs-qr.png`，状态保存在 `/workspace/dev/media-dl-run/xhs-login.status`（`need_scan`、`logged_in`、`expired` 或 `error`）。登录资料保存在 `~/.config/media-dl/xhs-profile`。小红书流程尚未进行真实网络验证。
+登录默认无头运行，二维码保存在 `/workspace/dev/media-dl-run/xhs-qr.png`，二维码优先由页面接口地址生成并自动刷新；生成和预计过期时间保存在 `xhs-qr.meta`，事件保存在 `xhs-login.log`。状态保存在 `/workspace/dev/media-dl-run/xhs-login.status`（`need_scan`、`scanned`、`logged_in`、`expired` 或 `error`）。登录资料保存在 `~/.config/media-dl/xhs-profile`。小红书流程尚未进行真实网络验证。
 
 整页截图保存在 `/workspace/dev/media-dl-run/xhs-page.png`，可用于核对登录弹窗；截图可能包含敏感信息，请妥善保管。
 
