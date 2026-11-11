@@ -43,7 +43,10 @@ def encode(value):
 
 
 def validate_query(body, *, historical=False):
-    if type(body) is not dict or set(body) - {'platform', 'keywords', 'start_date', 'end_date'}:
+    allowed = {'platform', 'keywords', 'start_date', 'end_date'}
+    if type(body) is dict and body.get('platform') == 'baidu' and os.environ.get('INDEX_HUB_BAIDU_REGION_ENABLED') == '1':
+        allowed.add('regions')
+    if type(body) is not dict or set(body) - allowed:
         raise HubError('invalid_query', '仅接受 platform、keywords、start_date、end_date。')
     return require_platform(body.get('platform', 'douyin')).validate_query(body, historical=historical)
 
