@@ -294,6 +294,8 @@ class InsightApiTests(_ApiTests):
                 patch.object(self.hub.store, 'latest_available_date', return_value='2026-11-01'):
             history = await (await self.client.get('/api/v1/history', headers=self.bearer)).json()
             self.assertEqual(history['related_latest_available_date'], '2026-11-08')
+            self.assertEqual(history['latest_available_date'], '2026-11-10')
+            self.assertEqual(history['latest_available_date_source'], 'official_cadence')
             for kind in ('related', 'audience', None):
                 body = {**query, **({'kind': kind} if kind else {})}
                 response = await self.client.post('/api/v1/'+('insights/queries' if kind else 'queries'),

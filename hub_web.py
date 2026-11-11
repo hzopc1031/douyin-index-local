@@ -34,6 +34,90 @@ logger = logging.getLogger('index_hub')
 
 PRINCIPAL_KEY = web.RequestKey('principal', dict)
 
+TREND_END_LAG_DAYS = 1  # Official search index is T+1 (checked 2026-11-11: data through yesterday).
+TREND_END_CAP_TTL = 12 * 60 * 60
+TREND_END_FAIL_CODES = frozenset({'business_error', 'request_failed', 'http_error', 'no_data', 'response_schema'})
+
+
+def expected_douyin_trend_end(today=None):
+    today = today or dt.datetime.now(TZ).date()
+    return today - dt.timedelta(days=TREND_END_LAG_DAYS)
+
+
+def _iso_day(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        day = dt.date.fromisoformat(value)
+    except ValueError:
+        return None
+    return day if day.isoformat() == value else None
+
+
+def _trend_cap_fresh(checked_at, now=None):
+    now = now or dt.datetime.now(TZ)
+    if isinstance(checked_at, (int, float)):
+        then = dt.datetime.fromtimestamp(checked_at, TZ)
+    elif isinstance(checked_at, str):
+        try:
+            then = dt.datetime.fromisoformat(checked_at)
+        except ValueError:
+            return False
+        then = then.replace(tzinfo=TZ) if then.tzinfo is None else then.astimezone(TZ)
+    else:
+        return False
+    return 0 <= (now - then).total_seconds() <= TREND_END_CAP_TTL
+
+
+def douyin_default_end_date(store):
+    """Douyin query default end: official T+1, unless a recent official miss falls back to local."""
+    local = store.latest_available_date() if hasattr(store, 'latest_available_date') else None
+    try:
+        expected = expected_douyin_trend_end()
+    except OverflowError:
+        return local, 'stored_search_index'
+    cap = store.get('douyin_trend_end_cap') if hasattr(store, 'get') else None
+    if isinstance(cap, dict) and cap.get('tried') == expected.isoformat() and _trend_cap_fresh(cap.get('checked_at')):
+        if cap.get('source') == 'failed':
+            return local, 'stored_search_index'
+        official = _iso_day(cap.get('date'))
+        if cap.get('source') == 'official' and official is not None and official <= expected:
+            return official.isoformat(), 'official_latest'
+    return expected.isoformat(), 'official_cadence'
+
+
+def remember_douyin_trend_end(store, query, result=None, error=None):
+    """Record official search-index freshness after a Douyin trend collect. No upstream probe."""
+    if query.get('kind') or (query.get('platform') or 'douyin') != 'douyin':
+        return
+    try:
+        expected = expected_douyin_trend_end()
+    except OverflowError:
+        return
+    end = _iso_day(query.get('end_date'))
+    if end is None or end < expected:
+        return
+    now = dt.datetime.now(TZ).isoformat()
+    if result is not None:
+        days = [_iso_day(row.get('date')) for row in (result.get('rows') or [])
+                if isinstance(row, dict) and row.get('search_index') is not None]
+        days = [day for day in days if day]
+        if days:
+            store.set('douyin_trend_end_cap', {
+                'source': 'official', 'date': max(days).isoformat(),
+                'tried': expected.isoformat(), 'checked_at': now,
+            })
+        elif end >= expected:
+            store.set('douyin_trend_end_cap', {
+                'source': 'failed', 'tried': expected.isoformat(), 'checked_at': now,
+            })
+        return
+    if error and (error.get('code') in TREND_END_FAIL_CODES or error.get('http_status') == 422):
+        store.set('douyin_trend_end_cap', {
+            'source': 'failed', 'tried': expected.isoformat(), 'checked_at': now,
+        })
+
+
 def related_latest_date(store):
     """Latest Sunday on or before today − lag. Independent of local trend data.
 
@@ -334,6 +418,8 @@ class Hub:
                         self.store.refund_attempt(today)
                 self.store.update_job(row['id'], 'failed', error=details)
                 self.store.set('last_result', {'ok': False, 'code': code, 'at': time.time()})
+                if not query.get('kind'):
+                    remember_douyin_trend_end(self.store, query, error=details)
                 if code in PAUSING:
                     self.store.set('paused', {'code': code, 'since': time.time()})
             else:
@@ -350,6 +436,7 @@ class Hub:
                     has_values=any(r['search_index'] is not None for r in result['rows'])
                     self.store.update_job(row['id'], 'succeeded' if result['metadata']['complete'] else 'partial' if has_values else 'no_data', result=result,
                                           error=None if has_values else {'code':'no_data','message':SAFE_ERRORS['no_data']})
+                    remember_douyin_trend_end(self.store, query, result=result)
                 self.store.set('last_result', {'ok': True, 'at': time.time()})
         except asyncio.CancelledError:
             # Restart handling marks any interrupted job failed; never automatically replay it.
@@ -1031,10 +1118,11 @@ def mount(app, hub):
 
     async def history(request):
         require(request)
+        latest, source = douyin_default_end_date(s)
         return reply({'datasets': [{k: r[k] for k in ('id', 'fetched', 'metadata')} for r in s.history()],
-                      'latest_available_date': s.latest_available_date(),
+                      'latest_available_date': latest,
                       'related_latest_available_date': related_latest_date(s),
-                      'latest_available_date_source': 'stored_search_index'})
+                      'latest_available_date_source': source})
 
     async def keys(request):
         require(request, admin=True)

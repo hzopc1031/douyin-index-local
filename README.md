@@ -206,7 +206,9 @@ INDEX_HUB_REQUIRE_BROWSER_TESTS=1 INDEX_HUB_REQUIRE_SOLVER_TESTS=1 xvfb-run -a .
 
 `GET /history` 只读数据库，连 Bearer 密钥使用时间也不更新；旧桌面结果在网关启动时导入，
 运行中新落盘的桌面结果等下次启动才导入。Hub 任务完成后直接入库，刷新历史不再触发导入。
-返回的 `latest_available_date` 从全部已存非空搜索日值计算（包括真实零值），
+返回的 `latest_available_date` 是抖音搜索指数按官方 T+1 推算的默认截止日，
+不再用本地已存最新搜索日，以免默认日期自锁。采集失败时回退到本地已存日。
+Store 中的本地最新日仍从全部已存非空搜索日值计算（包括真实零值），
 不受历史列表最近 30 组或采集时间排序影响；缺失值及仅有综合指数的日期不算可用搜索日。
 
 这三项修复需要一起更新后重启 gateway；desktop 无需重启，无数据库迁移，不重试旧失败任务。

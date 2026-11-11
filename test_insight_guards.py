@@ -184,6 +184,50 @@ class ClampTests(unittest.TestCase):
         self.assertEqual(client._post.call_count, 3)
 
 
+
+class TrendDefaultTests(unittest.TestCase):
+    def setUp(self):
+        p = patch('hub_web.dt.datetime', FixedDatetime)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_default_end_follows_official_cadence_not_stale_local(self):
+        from hub_web import douyin_default_end_date
+        stale = SimpleNamespace(latest_available_date=lambda: '2026-10-18')
+        self.assertEqual(douyin_default_end_date(stale), ('2026-10-27', 'official_cadence'))
+        empty = SimpleNamespace(latest_available_date=lambda: None)
+        self.assertEqual(douyin_default_end_date(empty), ('2026-10-27', 'official_cadence'))
+
+    def test_default_end_falls_back_and_records_official_latest(self):
+        from hub_web import douyin_default_end_date, remember_douyin_trend_end
+        failed = {'source': 'failed', 'tried': '2026-10-27',
+                  'checked_at': '2026-10-28T12:00:00+08:00'}
+        store = SimpleNamespace(latest_available_date=lambda: '2026-10-18',
+                                get=lambda key, default=None: failed if key == 'douyin_trend_end_cap' else default)
+        self.assertEqual(douyin_default_end_date(store), ('2026-10-18', 'stored_search_index'))
+        stale = dict(failed, checked_at='2026-10-27T12:00:00+08:00')
+        expired = SimpleNamespace(latest_available_date=lambda: '2026-10-18',
+                                  get=lambda key, default=None: stale if key == 'douyin_trend_end_cap' else default)
+        self.assertEqual(douyin_default_end_date(expired), ('2026-10-27', 'official_cadence'))
+        mem = SimpleNamespace(values={}, latest_available_date=lambda: '2026-10-18')
+        mem.get = lambda key, default=None: mem.values.get(key, default)
+        mem.set = lambda key, value: mem.values.__setitem__(key, value)
+        remember_douyin_trend_end(mem, {'platform': 'douyin', 'end_date': '2026-10-20'},
+                                  result={'rows': [{'date': '2026-10-20', 'search_index': 1}]})
+        self.assertEqual(douyin_default_end_date(mem), ('2026-10-27', 'official_cadence'))
+        remember_douyin_trend_end(mem, {'platform': 'douyin', 'end_date': '2026-10-27'},
+                                  result={'rows': [{'date': '2026-10-26', 'search_index': 1},
+                                                   {'date': '2026-10-27', 'search_index': None}]})
+        self.assertEqual(douyin_default_end_date(mem), ('2026-10-26', 'official_latest'))
+        remember_douyin_trend_end(mem, {'platform': 'douyin', 'end_date': '2026-10-27'},
+                                  error={'code': 'business_error'})
+        self.assertEqual(douyin_default_end_date(mem), ('2026-10-18', 'stored_search_index'))
+        mem.values.clear()
+        remember_douyin_trend_end(mem, {'platform': 'douyin', 'kind': 'related', 'end_date': '2026-10-27'},
+                                  error={'code': 'business_error'})
+        self.assertEqual(douyin_default_end_date(mem), ('2026-10-27', 'official_cadence'))
+
+
 class SkipTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         async def inline_thread(func, *args):

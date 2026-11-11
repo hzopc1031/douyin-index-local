@@ -302,9 +302,14 @@ Hub 启动脚本和 systemd 模板默认 `INDEX_HUB_LOGIN_MODE=sms`；显式 `de
 说明这是中枢跳过，并非关联/人群平台返回无数据。没有数据库迁移，不更改旧任务记录。
 
 `GET /history` 另外返回 `latest_available_date`（YYYY-MM-DD 或 null）及
-`latest_available_date_source=stored_search_index`。日期取全部本地全国抖音搜索日值中
-非空且早于上海今天的最大日期；不是最近采集任务的请求截止日，也不是官方实时最新日期。
-页面首次初始化截至该日最近 30 天；未知时留空，未确认批次保留原日期，刷新不覆盖用户选择。
+`latest_available_date_source`。抖音默认截止日按官方搜索指数 T+1（上海今天减一天），
+不把本地已存最新搜索日当作默认；否则完整查询会一直沿用过期的本地截止日。
+`latest_available_date_source` 为 `official_cadence`（按更新节奏推算）、
+`official_latest`（最近一次覆盖该截止日的趋势采集确认的实际最新日，约 12 小时）或
+`stored_search_index`（该次采集失败或无数据时回退到本地已存最新搜索日）。
+历史接口本身只读，不向官方探测最新日。百度路径不变。页面首次初始化截至该日最近 30 天；
+未知时留空，未确认批次保留原日期，刷新不覆盖用户选择。
+Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值。
 
 ### 关联词独立截止日（周日对齐）
 

@@ -240,8 +240,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(datasets), 1)
         self.assertEqual(datasets[0]['metadata']['end_date'], END)
         body = await response.json()
-        self.assertEqual(body['latest_available_date'], END)
-        self.assertEqual(body['latest_available_date_source'], 'stored_search_index')
+        from hub_web import expected_douyin_trend_end
+        self.assertEqual(body['latest_available_date'], expected_douyin_trend_end().isoformat())
+        self.assertEqual(body['latest_available_date_source'], 'official_cadence')
+        self.assertEqual(self.hub.store.latest_available_date(), END)
         self.assertEqual(self.calls, [])
 
     async def test_request_source_admin_only_and_idempotent(self):
