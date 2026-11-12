@@ -50,6 +50,8 @@ class FakeWindow:
 
     def evaluate_js(self, js, arg=None):
         self.scripts.append(js)
+        if app_module_comments.ARM_JS in js:
+            return True
         if "user-avatar" in js or "document.readyState" in js:
             return json.dumps(self.page)
         return "null"
@@ -457,6 +459,9 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             actions = []
             state = {'sent': False, 'result': None}
             def evaluate(js, arg=None):
+                if js == app_module_comments.ARM_JS:
+                    state.update(sent=False, result=None)
+                    return True
                 if js == app_module_comments.PROBE_JS:
                     return json.dumps({'ready': 'complete', 'https': True, 'host': 'www.douyin.com',
                                        'path': '/video/100', 'account': True})
@@ -489,6 +494,8 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             window = FakeWindow()
             states = iter([json.dumps({'sent': True, 'result': json.dumps(_page())})])
             def evaluate(js, arg=None):
+                if js == app_module_comments.ARM_JS:
+                    return True
                 if 'JSON.stringify({sent:' in js:
                     return next(states, json.dumps({'sent': False}))
             transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
@@ -544,8 +551,15 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             window = FakeWindow()
             events = []
             def evaluate(js, arg=None):
-                if "__dycNavigate', '1'" in js:
+                if js == app_module_comments.GUARD_JS:
+                    self.assertEqual(window.loaded, [])
+                    events.append("install_guard")
+                if js == app_module_comments.ARM_JS:
+                    self.assertEqual(window.loaded, [])
+                    self.assertEqual(events, ["install_guard"])
+                    self.assertEqual(arg, {"video": "100", "root": ""})
                     events.append("arm_navigation")
+                    return True
                 if js == app_module_comments.PROBE_JS:
                     return json.dumps({"ready": "complete", "https": True, "host": "www.douyin.com",
                                        "path": "/video/100", "account": True})
@@ -559,9 +573,19 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 21]), \
                  patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
                 result = await transport.fetch('100', None, '0')
-            self.assertEqual(events, ["arm_navigation", "open"])
+            self.assertEqual(events, ["install_guard", "arm_navigation", "open"])
             self.assertEqual(result, {"kind": "no_request", "request_sent": False})
             self.assertEqual((budget.used, budget.counter.usage()), (0, 0))
+
+    async def test_navigation_refused_when_guard_not_armed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = FakeWindow()
+            transport = QtCommentTransport(window, Budget(DailyCounter(Path(folder))), InstantPacer(),
+                                           evaluate=lambda js, arg=None: False)
+            transport.video_url = 'https://www.douyin.com/video/100'
+            with self.assertRaisesRegex(RuntimeError, 'guard could not be armed'):
+                await transport.fetch('100', None, '0')
+            self.assertEqual(window.loaded, [])
 
     async def test_stop_metadata_redacts_values(self):
         from dyc.errors import Stop
