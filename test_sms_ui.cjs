@@ -23,6 +23,17 @@ function fixture(){
 }
 
 
+test('paused login hints follow status and reject an older status response',async()=>{
+ const f=fixture();f.run('renderLoginHints=(...args)=>globalThis.loginHintArgs=args');
+ f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present',paused:{code:'manual_resume_required'}})");
+ assert.deepEqual(JSON.parse(JSON.stringify(f.run('loginHintArgs'))),['douyin',true,false,{code:'manual_resume_required'}]);
+ f.run("smsLoginRevision++;setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present',paused:null},smsLoginRevision-1)");
+ assert.equal(f.run('douyinPaused.code'),'manual_resume_required');
+ f.run("setSmsLoginStatus({browser:'browser_ready',login_state:'cookie_present',paused:null})");
+ assert.deepEqual(JSON.parse(JSON.stringify(f.run('loginHintArgs'))),['douyin',true,false,null]);
+ assert.equal(f.calls.length,0);
+});
+
 test('manual QR follows frame and disappears with verification',async()=>{
  const f=fixture();await f.manual();await f.render({qr_available:true});
  assert(!f.$('#smsQrPanel').hidden);assert.equal(f.$('#smsQrImage').src,'/api/v1/login/sms/qr?v=1');

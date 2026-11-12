@@ -472,19 +472,19 @@ loadComments();
 let smsTimer=null,smsEnabled=false,smsInitialized=false,smsLoading=false,smsActing=false;
 let smsCancelling=false,smsRevision=0;
 let smsSnapshot=null,smsFrame=null,smsFrameLoading=false,smsFrameRequest=0,smsGesture=null;
-let smsLoggedIn=false,smsLoginRevision=0;
+let smsLoggedIn=false,smsLoginRevision=0,douyinPaused=null;
 function renderDouyinLoginActions(){
  const commentsNeedLogin=['not_logged_in','verification_required'].includes(commentsProbe);
  $('#smsDesktop').hidden=smsLoggedIn;
  $('#desktopLogin').hidden=(smsLoggedIn&&!commentsNeedLogin)||(!smsLoggedIn&&smsEnabled)||!$('#qrDesktop').hidden;
  document.querySelectorAll('[data-login-platform="douyin"]').forEach(button=>button.hidden=!douyinNeedsLogin);
- renderLoginHints('douyin',smsLoggedIn,douyinNeedsLogin);
+ renderLoginHints('douyin',smsLoggedIn,douyinNeedsLogin,douyinPaused);
 }
 function setSmsLoginStatus(state,revision=smsLoginRevision){
  if(revision!==smsLoginRevision)return;
  const loggedIn=state?.browser==='browser_ready'&&['cookie_present','qr_session'].includes(state.login_state);
  if(loggedIn&&!smsLoggedIn&&douyinNeedsLogin)commentsAction('probe',{});
- smsLoggedIn=loggedIn;douyinNeedsLogin=['login_required','login_in_progress'].includes(state?.browser)||['expired','rejected','no_session_cookie'].includes(state?.login_state);
+ douyinPaused=state?.paused;smsLoggedIn=loggedIn;douyinNeedsLogin=['login_required','login_in_progress'].includes(state?.browser)||['expired','rejected','no_session_cookie'].includes(state?.login_state);
  renderSms(smsSnapshot||{state:'idle'});
 }
 async function loadHubStatus(){
@@ -602,14 +602,21 @@ let baiduLoginState=null,douyinNeedsLogin=false,baiduLoginOpening=false;
 const baiduLoginErrors=['login_required','authentication_required','verification_required','not_logged_in'];
 function baiduLoggedIn(){return ['browser_ready','signature_unavailable'].includes(baiduLoginState?.browser)}
 function baiduNeedsLogin(){return !baiduLoggedIn()&&(['login_required','login_in_progress'].includes(baiduLoginState?.browser)||baiduLoginErrors.includes(baiduLoginState?.paused?.code))}
-function loginAction(job){const platform=job?.query?.platform,needsLogin=platform==='baidu'?baiduNeedsLogin():platform==='douyin'&&douyinNeedsLogin;return needsLogin&&baiduLoginErrors.includes(job.error?.code)?' <button type="button" class="text-button" data-login-platform="'+platform+'">去平台连接登录</button>':''}
-function renderLoginHints(platform,loggedIn,needsLogin){
- const name=platform==='baidu'?'百度':'抖音',note=$('#'+platform+'QueryNote');
- note.hidden=$('#queryPlatform').value!==platform||loggedIn;
- note.querySelector('span').textContent=needsLogin?name+'未登录：只能返回已缓存的完整结果，新的在线查询需先登录。':name+'登录状态待确认；已保存的结果可查看，新的在线查询需有效登录。';
+function resumeAction(platform,label){return ' <button type="button" class="text-button" data-resume-platform="'+esc(platform)+'">'+esc(label)+'</button>'}
+function loginAction(job){
+ const platform=job?.query?.platform,needsLogin=platform==='baidu'?baiduNeedsLogin():platform==='douyin'&&douyinNeedsLogin,paused=job?.error?.code==='collection_paused';
+ if(paused&&platform==='baidu'&&baiduLoggedIn())return (baiduLoginState?.paused?resumeAction(platform,'恢复百度采集'):'')+' 恢复后请重新提交查询';
+ return needsLogin&&(paused||baiduLoginErrors.includes(job.error?.code))?' <button type="button" class="text-button" data-login-platform="'+platform+'">去平台连接登录</button>':'';
+}
+function renderLoginHints(platform,loggedIn,needsLogin,paused=false){
+ const name=platform==='baidu'?'百度':'抖音',note=$('#'+platform+'QueryNote'),resume=loggedIn&&paused;
+ note.hidden=$('#queryPlatform').value!==platform||(loggedIn&&!paused);
+ note.querySelector('span').textContent=resume?name+'已登录，但采集仍暂停：请先恢复'+name+'采集，否则新的在线查询会被拒绝（已缓存的完整结果仍可返回）。':needsLogin?name+'未登录：只能返回已缓存的完整结果，新的在线查询需先登录。':name+'登录状态待确认；已保存的结果可查看，新的在线查询需有效登录。';
+ note.querySelector('button').outerHTML=resume?resumeAction(platform,'恢复'+name+'采集'):' <button type="button" class="text-button" data-login-platform="'+platform+'">去平台连接登录</button>';
+ note.querySelector('button').hidden=!resume&&!needsLogin;
  if(chosenPlatform!==platform)return;
  const status=$('#indexLoginStatus');status.hidden=chosenSource!=='index'||!platformInfo().available;
- status.innerHTML=esc('实时查询需登录 · '+name+(loggedIn?'已登录':needsLogin?'未登录':'登录状态待确认'))+(needsLogin?' <button type="button" class="text-button" data-login-platform="'+platform+'">去登录</button>':'');
+ status.innerHTML=esc('实时查询需登录 · '+name+(loggedIn?'已登录':needsLogin?'未登录':'登录状态待确认')+(resume?' · 采集已暂停':''))+(resume?resumeAction(platform,'恢复'):needsLogin?' <button type="button" class="text-button" data-login-platform="'+platform+'">去登录</button>':'');
 }
 function renderBaiduLogin(state=baiduLoginState){
  baiduLoginState=state;
@@ -618,9 +625,10 @@ function renderBaiduLogin(state=baiduLoginState){
  $('#baiduLoginButton').disabled=baiduLoginOpening||!platformInfo('baidu').available;$('#baiduLoginButton').hidden=baiduLoggedIn();
  if(baiduLoggedIn()){baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=true;$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent}
  document.querySelectorAll('[data-login-platform="baidu"]').forEach(button=>button.hidden=!needsLogin);
- renderLoginHints('baidu',baiduLoggedIn(),needsLogin);
+ renderLoginHints('baidu',baiduLoggedIn(),needsLogin,state?.paused);
 }
 document.addEventListener('click',e=>{
+ const resume=e.target.closest('[data-resume-platform]');if(resume){$(resume.dataset.resumePlatform==='baidu'?'#baiduResumeButton':'#resumeButton').onclick();return}
  const button=e.target.closest('[data-login-platform]');if(!button)return;
  $('#queryDialog').close();tab('connections');const card=button.dataset.loginPlatform==='baidu'?$('#baiduLoginCard'):$('#douyinLoginCard');card.focus({preventScroll:true});card.scrollIntoView({block:'center'});
 });
@@ -646,7 +654,7 @@ $('#baiduQrRefresh').onclick=loadBaiduQr;$('#baiduDesktop').onclick=openDesktop;
 $('#baiduLoginButton').onclick=async()=>{
  const button=$('#baiduLoginButton');if(button.disabled||baiduLoginOpening)return;
  baiduLoginOpening=true;button.disabled=true;button.textContent='正在打开…';baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=false;$('#baiduDesktop').hidden=true;$('#baiduQrState').textContent='正在打开百度登录窗口，最长约 35 秒…';const revision=baiduQrRevision;
- try{const result=await api('login/baidu/open',{method:'POST',body:{}});if(revision!==baiduQrRevision)return;renderBaiduLogin({browser:result.state});$('#baiduQrPanel').hidden=false;if(baiduLoggedIn()){$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent;$('#baiduQrPanel').hidden=true;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}
+ try{const result=await api('login/baidu/open',{method:'POST',body:{}});if(revision!==baiduQrRevision)return;renderBaiduLogin({...baiduLoginState,browser:result.state});$('#baiduQrPanel').hidden=false;if(baiduLoggedIn()){$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent;$('#baiduQrPanel').hidden=true;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}
  catch(e){if(revision!==baiduQrRevision)return;$('#baiduQrPanel').hidden=false;$('#baiduQrState').textContent=e.message;$('#baiduDesktop').hidden=false;toast(e.message)}
  finally{baiduLoginOpening=false;button.disabled=!platformInfo('baidu').available;button.textContent='打开百度登录窗口'}
 };
@@ -812,7 +820,7 @@ function renderReportProgress(){
  const q=reportBatch.query,done=reportBatch.entries.filter(e=>['succeeded','partial','failed','no_data'].includes(e.status)).length;
  $('#reportProgressTitle').textContent='本次完整查询 · '+done+' / '+reportBatch.entries.length+' 项已结束';
  $('#reportProgressRange').innerHTML=infoTip(q.keywords.join('、')+' · '+q.start_date+' — '+q.end_date,q.platform==='douyin'?'各模块独立完成；排队共享至少 15 秒请求间隔，指数任务优先。':'任务按平台各自的采集规则执行。');
- $('#reportProgressRows').innerHTML=reportBatch.entries.map(e=>'<div style="padding:10px 0;border-bottom:1px solid #edf0eb"><strong>'+esc(e.label)+'</strong> <span class="status '+esc(e.status)+'">'+esc(e.jobId||e.rejected?statusName(e.status):e.error?'提交未确认':'待提交')+'</span>'+(e.cache_hit?' <small>缓存</small>':'')+(e.error?'<div class="tiny">'+esc(e.error)+loginAction(e.lastJob)+'</div>':'')+'</div>').join('');
+ $('#reportProgressRows').innerHTML=reportBatch.entries.map(e=>'<div style="padding:10px 0;border-bottom:1px solid #edf0eb"><strong>'+esc(e.label)+'</strong> <span class="status '+esc(e.status)+'">'+esc(e.rejected?'未创建':e.jobId?statusName(e.status):e.error?'提交未确认':'待提交')+'</span>'+(e.cache_hit?' <small>缓存</small>':'')+(e.error?'<div class="tiny">'+esc(e.error)+'<div>'+loginAction(e.rejected?{query:e.body,error:{code:e.code}}:e.lastJob)+'</div></div>':'')+'</div>').join('');
  $('#retryBundle').hidden=!reportBatch.entries.some(e=>!e.jobId&&!e.rejected);$('#retryBundle').disabled=bundleSubmitting;
 }
 async function submitReportBatch(){
@@ -821,7 +829,7 @@ async function submitReportBatch(){
   for(const entry of reportBatch.entries){
    if(entry.jobId||entry.rejected)continue;
    try{const {job}=await api(entry.path,{method:'POST',headers:{'Idempotency-Key':entry.idem},body:entry.body});entry.jobId=job.id;entry.status=job.status;entry.cache_hit=job.cache_hit;entry.error=job.error?(job.error.message+(job.error.http_status?' HTTP '+job.error.http_status:'')+(job.error.business_code!=null?' 业务码 '+job.error.business_code:'')):null;saveBatch();renderReportProgress()}
-   catch(e){const unconfirmed=entry.error!=null;entry.error=e.message;if(!unconfirmed&&entry.body.platform==='baidu'&&[400,401,403,409,422,429].includes(e.status)&&['invalid_query','invalid_dates','invalid_keywords','platform_unavailable','collection_paused','queue_full','unauthorized','forbidden','csrf_rejected','authentication_throttled','api_rate_limited'].includes(e.code)){entry.rejected=true;entry.status='failed';saveBatch();renderReportProgress();toast('百度任务未创建，请处理提示后重新提交。');break}saveBatch();renderReportProgress();toast('部分任务尚未确认。可点击“继续提交未确认任务”，将沿用原幂等标识，避免重复创建。');break}
+   catch(e){const unconfirmed=entry.error!=null;entry.error=e.message;if(!unconfirmed&&entry.body.platform==='baidu'&&[400,401,403,409,422,429].includes(e.status)&&['invalid_query','invalid_dates','invalid_keywords','platform_unavailable','collection_paused','queue_full','unauthorized','forbidden','csrf_rejected','authentication_throttled','api_rate_limited'].includes(e.code)){entry.rejected=true;entry.code=e.code;entry.status='failed';saveBatch();renderReportProgress();toast(e.code==='collection_paused'?'百度采集已暂停，任务未创建：请先登录或恢复采集后重新提交。':'百度任务未创建，请处理提示后重新提交。');break}saveBatch();renderReportProgress();toast('部分任务尚未确认。可点击“继续提交未确认任务”，将沿用原幂等标识，避免重复创建。');break}
   }
  }finally{bundleSubmitting=false;renderReportProgress()}
 }
