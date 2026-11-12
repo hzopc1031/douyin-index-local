@@ -553,16 +553,29 @@ def login_qr(context):
             url = urlsplit(frame.url)
             if url.scheme != 'https' or url.netloc not in ('index.baidu.com', 'passport.baidu.com'):
                 continue
-            elements = frame.locator('.pass-qrcode-img img, img.pass-qrcode-img, .pass-qrcode-img canvas, .pass-login-pop-content img[id*="qrcode"], .pass-login-pop-content canvas[id*="qrcode"]')
-            for i in range(min(elements.count(), 10)):
-                element = elements.nth(i)
-                box = element.bounding_box()
-                if not box or not element.is_visible() or not (50 <= box['width'] <= 512 and 50 <= box['height'] <= 512 and .8 <= box['width'] / box['height'] <= 1.25):
-                    continue
-                png = element.screenshot(type='png', timeout=3000)
-                encoded = base64.b64encode(png).decode('ascii')
-                if png.startswith(b'\x89PNG\r\n\x1a\n') and len(encoded) <= FRAME_BASE64_LIMIT:
-                    return {'ok': True, 'png_base64': encoded}
+            for scan in range(2):
+                elements = frame.locator('img.tang-pass-qrcode-img, .pass-qrcode-img img, img.pass-qrcode-img, .pass-qrcode-img canvas, .pass-login-pop-content img[id*="qrcode"], .pass-login-pop-content canvas[id*="qrcode"]')
+                for i in range(min(elements.count(), 10)):
+                    element = elements.nth(i)
+                    box = element.bounding_box()
+                    if not box or not element.is_visible() or not (50 <= box['width'] <= 512 and 50 <= box['height'] <= 512 and .8 <= box['width'] / box['height'] <= 1.25):
+                        continue
+                    png = element.screenshot(type='png', timeout=3000)
+                    encoded = base64.b64encode(png).decode('ascii')
+                    if png.startswith(b'\x89PNG\r\n\x1a\n') and len(encoded) <= FRAME_BASE64_LIMIT:
+                        return {'ok': True, 'png_base64': encoded}
+                if scan:
+                    break
+                try:
+                    toggle = frame.locator('.tang-pass-footerBarQrcode:visible').first
+                    box = toggle.bounding_box(timeout=1000)
+                    if not box or not toggle.is_visible() or box['width'] <= 24 or box['height'] <= 24:
+                        break
+                    # Only the top-right triangle is clear of the password form.
+                    toggle.click(position={'x': box['width'] - 12, 'y': 12}, timeout=3000)
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    break
     return {'ok': False, 'code': 'qr_not_ready'}
 
 
