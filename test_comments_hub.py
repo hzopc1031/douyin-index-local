@@ -450,6 +450,39 @@ if __name__ == "__main__":
     unittest.main()
 
 class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_capture_and_next_page_use_replay(self):
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder)))
+            window = FakeWindow()
+            actions = []
+            state = {'sent': False, 'result': None}
+            def evaluate(js, arg=None):
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({'ready': 'complete', 'https': True, 'host': 'www.douyin.com',
+                                       'path': '/video/100', 'account': True})
+                if 'JSON.stringify({sent:' in js:
+                    return json.dumps(state)
+                if '__dycReplay &&' in js:
+                    actions.append(('replay', arg['cursor']))
+                    if arg['cursor'] == '0':
+                        return False
+                    state.update(sent=True, result=json.dumps(_page()))
+                    return True
+                if js == app_module_comments.SCROLL_JS:
+                    actions.append(('ui', '0'))
+                    state.update(sent=True, result=json.dumps(_page([comment(1)], cursor=2, more=1)))
+                    return True
+                if 'window.__dycSent = false' in js:
+                    state.update(sent=False, result=None)
+            transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
+            transport.video_url = 'https://www.douyin.com/video/100'
+            video = Video('100', transport.video_url)
+            job = CollectJob(video, transport)
+            await job.run_slice(2)
+            self.assertIn('1', video.comments)
+            self.assertEqual(actions, [('replay', '0'), ('ui', '0'), ('replay', '2')])
+            self.assertEqual((budget.used, budget.counter.usage(), video.pages), (2, 2, 2))
+
     async def test_sent_and_unsent_accounting(self):
         with tempfile.TemporaryDirectory() as folder:
             budget = Budget(DailyCounter(Path(folder)))
