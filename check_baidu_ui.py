@@ -24,6 +24,7 @@ def run(output=None):
                 low_volume = [False]
                 baidu_state = ['login_in_progress']
                 baidu_paused = [None]
+                qr_failed, history_failed = [False], [False]
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def route(r):
                     url = urlsplit(r.request.url)
@@ -35,6 +36,8 @@ def run(output=None):
                         return r.fulfill(content_type='text/html', body=Path('hub.html').read_text())
                     if path == 'login/baidu/qr':
                         assert r.request.headers.get('x-hub-request') == '1'
+                        if qr_failed[0]:
+                            return r.fulfill(status=503, content_type='application/json', body='{"error":{"code":"qr_not_ready"}}')
                         return r.fulfill(content_type='image/png', body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1kAAAAASUVORK5CYII='))
                     if path == 'login/baidu/open':
                         assert r.request.method == 'POST'
@@ -54,6 +57,8 @@ def run(output=None):
                                         daily=dict(attempts=0, http_reserved=0),
                                         limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
+                        if history_failed[0]:
+                            return r.fulfill(status=503, content_type='application/json', body='{"error":{"message":"合成历史读取失败"}}')
                         data = {'datasets': [{'metadata': {**raw['metadata'], 'keywords': ['合成词甲', '合成词乙'], 'verification': 'pending'}, 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
                     elif path == 'comments/status': data = {'probe': 'not_logged_in', 'running': False, 'paused': False}
@@ -118,27 +123,18 @@ def run(output=None):
                 page.locator('#platformChips [data-platform=baidu]').click()
                 baidu_state[0] = 'login_required'
                 page.evaluate('refresh()')
-                result_login = page.locator('#baiduLoginNotice [data-login-platform=baidu]')
-                assert result_login.is_visible() and result_login.inner_text() == '去平台连接登录'
-                if output:
-                    page.screenshot(path=str(output/f'baidu-result-login-{width}.png'))
-                result_login.focus()
-                page.keyboard.press('Enter')
-                assert page.locator('[data-section=connections]').is_visible()
-                assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                assert page.locator('#baiduLoginNotice').count() == 0
                 assert not login_opens and not writes
-                page.locator('[data-tab=overview]').click()
                 page.locator('#viewChips [data-source=hot_search]').click()
-                assert page.locator('#baiduLoginNotice').is_hidden()
+                assert page.locator('#baiduLoginNotice').count() == 0
                 page.locator('#viewChips [data-source=index]').click()
-                assert result_login.is_visible()
+                assert page.locator('#baiduLoginNotice').count() == 0
                 baidu_state[0] = 'browser_ready'
                 baidu_paused[0] = {'code': 'login_required'}
                 page.evaluate('refresh()')
-                assert result_login.is_visible()
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
-                assert page.locator('#baiduQueryNote').is_visible()
+                assert page.locator('#baiduQueryNote').is_hidden()
                 page.locator('#closeQuery').click()
                 baidu_state[0] = 'login_required'
                 baidu_paused[0] = None
@@ -205,7 +201,8 @@ def run(output=None):
                 assert query_login.is_visible() and query_login.inner_text() == '去平台连接登录'
                 if output:
                     page.screenshot(path=str(output/f'baidu-query-login-{width}.png'))
-                query_login.click()
+                query_login.focus()
+                page.keyboard.press('Enter')
                 assert not page.locator('#queryDialog').evaluate('(node)=>node.open')
                 assert page.locator('[data-section=connections]').is_visible()
                 assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
@@ -213,16 +210,34 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
                 assert login_opens == ['login/baidu/open']
                 assert page.locator('#baiduQrImage').is_visible()
+                assert page.locator('#baiduDesktop').is_hidden()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                qr_failed[0] = True
+                page.locator('#baiduQrRefresh').click()
+                page.wait_for_function("!document.querySelector('#baiduDesktop').hidden")
+                assert page.locator('#baiduLoginCard #baiduDesktop').is_visible()
+                assert page.locator('#baiduQrImage').is_hidden()
+                assert page.evaluate("document.querySelector('#baiduDesktop').onclick === openDesktop")
+                qr_failed[0] = False
                 page.locator('#baiduQrRefresh').click()
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
+                assert page.locator('#baiduDesktop').is_hidden()
                 baidu_state[0] = 'browser_ready'
+                baidu_paused[0] = {'code': 'login_required'}
                 page.evaluate('pollBaiduLogin()')
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('已登录')")
                 assert page.locator('#baiduQrImage').is_hidden()
+                assert page.locator('#baiduQrPanel').is_hidden()
+                assert page.locator('#baiduLoginButton').is_hidden()
                 assert '已登录' in page.locator('#baiduLoginStatus').inner_text()
+                assert '采集已暂停' in page.locator('#baiduLoginStatus').inner_text()
+                history_failed[0] = True
+                page.evaluate('refresh()')
+                assert page.locator('#baiduLoginButton').is_hidden()
+                assert '已登录' in page.locator('#baiduLoginStatus').inner_text()
+                history_failed[0] = False
                 page.locator('[data-tab=overview]').click()
-                assert page.locator('#baiduLoginNotice').is_hidden()
+                assert page.locator('#baiduLoginNotice').count() == 0
                 page.locator('#openQuery').click()
                 assert page.locator('#queryPlatform').input_value() == 'baidu'
                 assert page.locator('#baiduQueryNote').is_hidden()
@@ -262,11 +277,38 @@ def run(output=None):
                 assert progress_login.is_visible() and progress_login.inner_text() == '去平台连接登录'
                 progress_login.click()
                 assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
-                page.evaluate("renderBaiduLogin({browser:'browser_ready'})")
+                # A completed login does not clear the worker's manual-resume pause.
+                for browser_state in ('browser_ready', 'signature_unavailable'):
+                    for pause_code in ('login_required', 'authentication_required', 'verification_required', 'not_logged_in'):
+                        page.evaluate('state => renderBaiduLogin(state)',
+                                      dict(browser=browser_state, paused={'code': pause_code}))
+                        assert page.locator('#baiduLoginButton').is_hidden()
+                        assert page.locator('#baiduQrPanel').is_hidden()
+                        assert '采集已暂停' in page.locator('#baiduLoginStatus').inner_text()
+                        assert '需要登录' not in page.locator('#baiduLoginStatus').inner_text()
+                        page.locator('[data-tab=tasks]').click()
+                        assert job_login.is_hidden()
+                        assert page.locator('#baiduResumeButton').is_visible()
+                        page.locator('[data-tab=overview]').click()
+                        assert progress_login.is_hidden()
+                        assert page.locator('#baiduLoginNotice').count() == 0
+                        page.locator('#openQuery').click()
+                        assert page.locator('#baiduQueryNote').is_hidden()
+                        page.locator('#closeQuery').click()
+                        page.locator('[data-tab=connections]').click()
+                # Rendering history after login must not recreate login actions.
+                page.evaluate('renderJobs();renderReportProgress()')
+                assert job_login.count() == 0 and progress_login.count() == 0
+                page.evaluate("renderBaiduLogin({browser:'login_required'});renderJobs();renderReportProgress()")
+                assert page.locator('#baiduLoginButton').is_visible()
                 page.locator('[data-tab=tasks]').click()
-                assert job_login.is_hidden()
+                assert job_login.is_visible()
                 page.locator('[data-tab=overview]').click()
-                assert progress_login.is_hidden()
+                assert progress_login.is_visible()
+                assert page.locator('#baiduLoginNotice').count() == 0
+                page.locator('#openQuery').click()
+                assert query_login.is_visible()
+                page.locator('#closeQuery').click()
                 assert not errors, errors
                 assert not unexpected, unexpected
                 print(f'PASS Baidu {width}px: selectable, pending login, null/low-volume, source, trend and related tasks')

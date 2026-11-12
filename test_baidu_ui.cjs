@@ -66,7 +66,7 @@ vm.runInContext(code,ctx);
  await assert.rejects(vm.runInContext('loadSeries()',ctx));
  assert.equal($('#exportLink').style.display,'none');assert.equal($('#chartMeta').textContent,'');
  assert.equal($('#chart').dataset.platform,'baidu');
- const posted=[];ctx.toast=()=>{};ctx.refresh=async()=>{};ctx.api=async(path,options)=>posted.push(options.body);ctx.document={addEventListener(){}};
+ const posted=[];ctx.toast=()=>{};ctx.refresh=async()=>{};ctx.api=async(path,options)=>posted.push(options.body);ctx.document={addEventListener(){}};ctx.openDesktop=()=>{};
  vm.runInContext(html.slice(html.indexOf("$('#resumeButton').onclick"),html.indexOf('async function loadKeys(')),ctx);
  await $('#resumeButton').onclick();await $('#baiduResumeButton').onclick();
  assert.deepEqual(JSON.parse(JSON.stringify(posted)),[{}, {platform:'baidu'}]);
