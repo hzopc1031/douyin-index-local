@@ -147,8 +147,7 @@ function drawPlatforms(){
  $('#baiduDevices').hidden=chosenPlatform!=='baidu'||$('#baiduMetricSelect').value!=='search_index';
  $('#baiduMetric').hidden=chosenPlatform!=='baidu';
  if(chosenPlatform!=='baidu'){baiduViewRegion='';$('#viewRegionSearch').value=''}
- if(chosenPlatform!=='baidu')baiduWordList='';
- renderBaiduWords();
+ renderHistory();
  const compositeOption=$('#relatedSort option[value=composite_index]');compositeOption.hidden=chosenPlatform==='baidu';if(compositeOption.hidden&&$('#relatedSort').value==='composite_index')$('#relatedSort').value='relation_score';
  $('#queryPlatform').innerHTML=platforms.map(p=>'<option value="'+esc(p.id)+'" '+(p.available?'':'disabled')+'>'+esc(p.id==='douyin'?'抖音搜索指数':p.name)+(p.available?'':' · 待接入')+'</option>').join('');
  $('#queryPlatform').value=platforms.some(p=>p.id===selected&&p.available)?selected:(platformInfo().available?chosenPlatform:'douyin');renderRegions();
@@ -249,7 +248,7 @@ $('#topicCategoryList').addEventListener('click',event=>{const item=event.target
 $('#topicRankTotal').onclick=()=>{topicRank='total';paintTopicRank();loadTopics(true).catch(e=>toast(e.message))};
 $('#topicRankRising').onclick=()=>{topicRank='rising';paintTopicRank();loadTopics(true).catch(e=>toast(e.message))};
 function renderHistory(){
- const words=[...new Set([...(reportBatch?.query.keywords||[]),...datasets.flatMap(d=>d.metadata.keywords)])];const previous=$('#keywordSelect').value;
+ const words=[...new Set([...(reportBatch?.query.platform===chosenPlatform?reportBatch.query.keywords:[]),...datasets.filter(d=>(d.metadata.platform||'douyin')===chosenPlatform).flatMap(d=>d.metadata.keywords)])];const previous=$('#keywordSelect').value;
  $('#keywordSelect').innerHTML=words.length?words.map(w=>'<option>'+esc(w)+'</option>').join(''):'<option value="">暂无关键词</option>';
  if(words.includes(previous))$('#keywordSelect').value=previous;
  renderBaiduWords();
@@ -353,10 +352,13 @@ function renderJobs(){
 function renderBaiduWords(){
  const words=[...$('#keywordSelect').options].map(o=>o.value).filter(Boolean),key=JSON.stringify(words);
  const compare=chosenPlatform==='baidu'&&words.length>=2;
- if(compare&&key!==baiduWordList){baiduWords=words.slice(0,5);baiduWordList=key}
+ if(chosenPlatform==='baidu'){
+  if(key!==baiduWordList){const recent=(reportBatch?.query.platform==='baidu'?reportBatch.query.keywords:datasets.find(d=>d.metadata.platform==='baidu')?.metadata.keywords)||[];baiduWords=recent.filter(w=>words.includes(w)).slice(0,5);baiduWordList=key}
+  if(baiduWords.length)$('#keywordSelect').value=baiduWords[0];
+ }
  $('#keywordSelect').hidden=compare;$('#baiduWords').hidden=!compare;
- $('#baiduWords').innerHTML=compare?words.slice(0,5).map((w,i)=>'<button type="button" class="chip '+(baiduWords.includes(w)?'active':'')+'" data-word-index="'+i+'" aria-pressed="'+baiduWords.includes(w)+'">'+esc(w)+'</button>').join(''):'';
- $('#baiduWords').querySelectorAll('[data-word-index]').forEach(b=>b.onclick=()=>{const word=words[Number(b.dataset.wordIndex)];if(baiduWords.includes(word)){if(baiduWords.length===1)return;baiduWords=baiduWords.filter(w=>w!==word)}else baiduWords.push(word);$('#keywordSelect').value=baiduWords[0];renderBaiduWords();Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message))});
+ $('#baiduWords').innerHTML=compare?words.slice(0,8).map((w,i)=>'<button type="button" class="chip '+(baiduWords.includes(w)?'active':'')+'" data-word-index="'+i+'" aria-pressed="'+baiduWords.includes(w)+'"'+(!baiduWords.includes(w)&&baiduWords.length>=5?' disabled':'')+'>'+esc(w)+'</button>').join(''):'';
+ $('#baiduWords').querySelectorAll('[data-word-index]').forEach(b=>b.onclick=()=>{const word=words[Number(b.dataset.wordIndex)];if(baiduWords.includes(word)){if(baiduWords.length===1)return;baiduWords=baiduWords.filter(w=>w!==word)}else{if(baiduWords.length>=5)return;baiduWords.push(word)}$('#keywordSelect').value=baiduWords[0];renderBaiduWords();Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message))});
 }
 function drawChart(data, comparisons=[data]){
  const platform=platformInfo(data.platform), isDouyin=(data.platform||chosenPlatform)==='douyin', metric=(data.platform||chosenPlatform)==='baidu'?(data.metric==='feed_index'?'资讯指数 · 待核对':data.metric==='news_index'?'媒体指数 · 待核对':({'all':'整体搜索指数','pc':'PC 搜索指数','wise':'移动搜索指数'}[data.device]||'搜索指数')):(platform.metric_name||data.metric_name||'指数');
@@ -823,7 +825,7 @@ $('#queryForm').onsubmit=async e=>{
   if(reportBatch?.entries.some(e=>!e.jobId&&!e.rejected)){
    if(JSON.stringify(reportBatch.query)!==JSON.stringify(query))throw Error('上一批存在提交未确认的任务，请先点击“继续提交未确认任务”核实，避免遗留重复请求。');
   }else reportBatch=makeReportBatch(query,crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
-  saveBatch();chosenPlatform=query.platform;drawPlatforms();renderHistory();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
+  saveBatch();chosenPlatform=query.platform;baiduWordList='';drawPlatforms();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
   $('#queryDialog').close();updateRange('insight');renderReportProgress();await submitReportBatch();await refresh();
  }catch(e){if($('#queryDialog').open){const error=$('#queryError');error.textContent=e.message;error.hidden=false;error.focus();error.scrollIntoView({block:'nearest'})}else toast(e.message)}finally{button.disabled=false}
 };

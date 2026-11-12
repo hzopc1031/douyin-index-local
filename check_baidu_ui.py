@@ -59,7 +59,13 @@ def run(output=None):
                     elif path == 'history':
                         if history_failed[0]:
                             return r.fulfill(status=503, content_type='application/json', body='{"error":{"message":"合成历史读取失败"}}')
-                        data = {'datasets': [{'metadata': {**raw['metadata'], 'keywords': ['合成词甲', '合成词乙'], 'verification': 'pending'}, 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
+                        metadata = {**raw['metadata'], 'verification': 'pending'}
+                        data = {'datasets': [
+                            {'metadata': {**metadata, 'platform': 'douyin', 'keywords': ['grok', 'ai']}, 'fetched': 4},
+                            {'metadata': {**metadata, 'keywords': ['合成词甲', '合成词乙']}, 'fetched': 3},
+                            {'metadata': {k: v for k, v in {**metadata, 'keywords': ['金华']}.items() if k != 'platform'}, 'fetched': 2},
+                            {'metadata': {**metadata, 'keywords': [f'合成旧词{i}' for i in range(1, 10)]}, 'fetched': 1},
+                        ], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
                     elif path == 'comments/status': data = {'probe': 'not_logged_in', 'running': False, 'paused': False}
                     elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
@@ -94,6 +100,7 @@ def run(output=None):
                 page.route('**/*', route)
                 page.goto('http://baidu-ui.invalid/')
                 page.wait_for_function('!refreshing && platforms.length===3')
+                assert page.locator('#keywordSelect option').all_text_contents() == ['grok', 'ai', '金华']
                 assert '登录中' in page.locator('#baiduBudgetStatus').inner_text()
                 page.locator('[data-tab=connections]').click()
                 assert page.locator('[data-section=connections] #baiduLoginCard').is_visible()
@@ -123,6 +130,37 @@ def run(output=None):
                 page.locator('#platformChips [data-platform=baidu]').click()
                 baidu_state[0] = 'login_required'
                 page.evaluate('refresh()')
+                assert page.locator('#keywordSelect option').all_text_contents() == ['合成词甲', '合成词乙'] + [f'合成旧词{i}' for i in range(1, 10)]
+                assert page.locator('#baiduWords .chip').count() == 8
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == ['合成词甲', '合成词乙']
+                page.locator('#baiduWords button', has_text='合成旧词1').click()
+                page.evaluate('refresh()')
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == ['合成词甲', '合成词乙', '合成旧词1']
+                page.locator('#platformChips [data-platform=douyin]').click()
+                assert page.locator('#keywordSelect option').all_text_contents() == ['grok', 'ai', '金华']
+                page.locator('#platformChips [data-platform=baidu]').click()
+                assert page.locator('#baiduWords [aria-pressed=true]').count() == 3
+                for i in (2, 3):
+                    page.locator('#baiduWords button', has_text=f'合成旧词{i}').click()
+                assert page.locator('#baiduWords [aria-pressed=true]').count() == 5
+                assert page.locator('#baiduWords [aria-pressed=false]:disabled').count() == 3
+                for i in (1, 2, 3):
+                    page.locator('#baiduWords button', has_text=f'合成旧词{i}').click()
+                page.locator('#baiduWords button', has_text='合成词甲').click()
+                page.locator('#platformChips [data-platform=douyin]').click()
+                page.locator('#platformChips [data-platform=baidu]').click()
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == ['合成词乙']
+                assert page.locator('#keywordSelect').input_value() == '合成词乙'
+                # A saved query takes precedence over the latest dataset; another platform's query does not.
+                page.evaluate("reportBatch={query:{platform:'baidu',keywords:['合成旧词1']},entries:[]};renderHistory()")
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == ['合成旧词1']
+                page.evaluate("reportBatch={query:{platform:'douyin',keywords:['抖音批次词']},entries:[]};renderHistory()")
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == ['合成词甲', '合成词乙']
+                assert '抖音批次词' not in page.locator('#baiduWords').inner_text()
+                page.locator('#platformChips [data-platform=douyin]').click()
+                assert page.locator('#keywordSelect option').all_text_contents() == ['抖音批次词', 'grok', 'ai', '金华']
+                page.evaluate('reportBatch=null;renderHistory()')
+                page.locator('#platformChips [data-platform=baidu]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 assert not login_opens and not writes
                 page.locator('#viewChips [data-source=hot_search]').click()
@@ -251,9 +289,19 @@ def run(output=None):
                 page.locator('#queryEnd').fill(q['end_date'])
                 page.locator('#submitButton').click()
                 page.wait_for_function('reportBatch?.entries.every(e=>e.jobId)')
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == q['keywords']
                 assert writes == [('queries', q), ('insights/queries', {**q, 'kind': 'related'}), ('insights/queries', {**q, 'kind': 'audience'})], writes
+                # Submitting the same query resets a manual comparison even with unchanged candidates.
+                page.locator('#baiduWords button', has_text='合成词甲').click()
+                assert page.locator('#baiduWords [aria-pressed=true]').count() == 2
+                page.locator('#openQuery').click()
+                page.locator('#submitButton').click()
+                page.wait_for_function('reportBatch?.entries.every(e=>e.jobId) && !document.querySelector("#submitButton").disabled')
+                assert page.locator('#baiduWords [aria-pressed=true]').all_text_contents() == q['keywords']
+                assert len(writes) == 6
                 page.locator('#platformChips [data-platform=douyin]').click()
                 assert page.locator('#baiduWords').is_hidden() and page.locator('#keywordSelect').is_visible()
+                assert page.locator('#keywordSelect option').all_text_contents() == ['grok', 'ai', '金华']
                 page.wait_for_function("!document.querySelector('#showComposite').parentElement.hidden")
                 page.locator('#platformChips [data-platform=baidu]').click()
                 baidu_state[0] = 'login_required'
@@ -309,6 +357,9 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 assert query_login.is_visible()
                 page.locator('#closeQuery').click()
+                page.evaluate('reportBatch=null;datasets=[];renderHistory();loadSeries()')
+                assert page.locator('#baiduWords').is_hidden()
+                assert '暂无趋势数据' in page.locator('#chart').inner_text()
                 assert not errors, errors
                 assert not unexpected, unexpected
                 print(f'PASS Baidu {width}px: selectable, pending login, null/low-volume, source, trend and related tasks')
