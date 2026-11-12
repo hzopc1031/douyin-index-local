@@ -8,8 +8,8 @@ function fixture(){
  const nodes={},calls=[],timers=new Map(),revoked=[],notices=[];let serial=0,blobs=0;
  const $=id=>nodes[id]??=(function(){let src='';const node={hidden:false,disabled:false,value:'',textContent:'',style:{},captured:null,getBoundingClientRect:()=>({left:10,top:20,width:200,height:100}),setPointerCapture(id){this.captured=id},hasPointerCapture(id){return this.captured===id},releasePointerCapture(){this.captured=null},getAttribute(key){return key==='src'?src:null},removeAttribute(key){if(key==='src')src=''}};Object.defineProperty(node,'src',{get:()=>src,set:value=>{src=value;queueMicrotask(()=>node.onload?.())}});return node})();
  const state={state:'idle',phone:'',resend_in:0,attempts_left:0,frame_id:0,challenge_epoch:0,verification_mode:null,message:'尚未开始短信登录'};
- const f={$,calls,timers,revoked,notices,state,error:null,frameError:null};
- const ctx=vm.createContext({$,Math,Image:class{set src(value){if(f.preview)f.preview(this);else queueMicrotask(()=>this.onload())}},URL:{createObjectURL(){return 'blob:synthetic-'+(++blobs)},revokeObjectURL(url){revoked.push(url)}},
+ const f={$,calls,timers,revoked,notices,state,probes:[],error:null,frameError:null};
+ const ctx=vm.createContext({$,Math,douyinNeedsLogin:false,commentsProbe:null,document:{querySelectorAll:()=>[]},commentsAction(action,body){f.probes.push({action,body})},renderBaiduLogin(){},Image:class{set src(value){if(f.preview)f.preview(this);else queueMicrotask(()=>this.onload())}},URL:{createObjectURL(){return 'blob:synthetic-'+(++blobs)},revokeObjectURL(url){revoked.push(url)}},
    setTimeout(fn,delay){const id=++serial;timers.set(id,{fn,delay});return id},clearTimeout(id){timers.delete(id)},
    localStorage:{setItem(){throw Error('storage write')}},sessionStorage:{setItem(){throw Error('storage write')}},
    toast(message){notices.push(message)},openDesktop(){f.desktop=true},
@@ -43,12 +43,24 @@ test('all states and buttons, masked number only',async()=>{
  }
  const f=fixture();await f.render({phone:'13800138000'});assert.equal(f.$('#smsNumber').textContent,'');
 });
+
+test('completed login refreshes the comments probe once and keeps its fallback when needed',async()=>{
+ const f=fixture();f.run("setSmsLoginStatus({browser:'login_required',login_state:'no_session_cookie'})");
+ await f.render({state:'opening'});await f.render({state:'succeeded'});
+ assert.equal(f.probes.length,1);assert.equal(f.probes[0].action,'probe');assert.deepEqual(Object.keys(f.probes[0].body),[]);
+ await f.render({state:'succeeded'});assert.equal(f.probes.length,1);
+ f.$('#qrDesktop').hidden=true;
+ for(const probe of ['not_logged_in','verification_required']){
+  f.run(`commentsProbe='${probe}';renderDouyinLoginActions()`);assert(!f.$('#desktopLogin').hidden);
+ }
+ f.run("commentsProbe='logged_in';renderDouyinLoginActions()");assert(f.$('#desktopLogin').hidden);assert(f.$('#smsDesktop').hidden);
+});
 test('restored browser login hides idle SMS form without sending anything',async()=>{
  for(const login_state of ['cookie_present','qr_session']){
   const f=fixture();await f.render({state:'idle'});
   f.run(`setSmsLoginStatus({browser:'browser_ready',login_state:'${login_state}'})`);
   assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
-  assert(f.$('#smsState').textContent.startsWith('已登录'));
+  assert(f.$('#smsState').textContent.startsWith('已登录'));assert(f.$('#smsDesktop').hidden);
   assert(f.$('#smsNumber').textContent.includes('未提供脱敏手机号'));
   await f.render({state:'idle'});assert(f.$('#smsPhoneForm').hidden);
   assert.equal(f.calls.length,0);
@@ -103,7 +115,7 @@ test('connection loss and logout restore form; only masked phone is displayed',a
  for(const phone of ['13800138000','<img src=x onerror=alert(1)>','138****8000 extra']){
   await f.render({phone});assert.equal(f.$('#smsNumber').textContent,'账号信息：当前会话未提供脱敏手机号');
  }
- assert(source.includes('catch(e){setSmsLoginStatus(null,revision);throw e}'));
+ assert(source.includes('catch(e){setSmsLoginStatus(null,revision);renderBaiduLogin(null);throw e}'));
 });
 test('status response or failure started before SMS success cannot override it',async()=>{
  for(const response of ["{browser:'login_required',login_state:'no_session_cookie'}",'null']){
@@ -153,7 +165,7 @@ test('actual dashboard refresh preserves confirmed login when history, jobs or c
    return path==='history'?{datasets:[]}:path==='jobs'?{jobs:[]}:f.state;
   };
   f.run(`let refreshing=false,datasets=[],jobs=[],platforms=[],qrEnabled=false,qrInitialized=false,qrTimer=null,reportBatch=null;
-   const document={title:''},esc=String;function readingInfo(){return false};function infoTip(status){return status};function fmt(){};function initializeRanges(){};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};
+   const document={title:'',querySelectorAll:()=>[]},esc=String;function readingInfo(){return false};function infoTip(status){return status};function fmt(){};function initializeRanges(){};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};function renderBaiduLogin(){};
    async function refreshReportBatch(){};async function loadInsights(){};async function loadSeries(){${failure==='series'?"throw Error('synthetic series failure')":''}}`);
   f.run(html.slice(html.indexOf('async function refresh(){'),html.indexOf("$('#refreshButton').onclick")));
   await f.run('refresh()');assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);

@@ -5,6 +5,7 @@ No gateway, account, browser profile or live platform endpoint is used.
 """
 import argparse
 import json
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -41,7 +42,7 @@ def run(output=None):
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
                 errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None, 'topic_login': 'logged_in', 'topic_categories': True,
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None, 'topic_login': 'logged_in', 'topic_categories': True, 'comments_probe': 'not_logged_in',
                            'groups': [dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])]}
 
                 def route(request_route):
@@ -60,6 +61,10 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif path == 'comments/probe':
+                            data = dict(ok=True, probe=fixture['comments_probe'])
+                        elif path == 'desktop/ticket':
+                            data = dict(ticket=secrets.token_urlsafe(24))
                         elif path == 'topics/login/refresh':
                             data = dict(state='need_scan', qr_available=True)
                         elif path == 'topics/categories/refresh':
@@ -87,11 +92,18 @@ def run(output=None):
                     elif path == 'platforms': data = dict(platforms=PLATFORMS)
                     elif path == 'status':
                         status_reads.append(request.url)
-                        data = dict(browser='browser_ready',login_state=fixture['login'],login_mode='desktop',counts=dict(keywords=1,points=7),
+                        data = dict(browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',login_state=fixture['login'],login_mode=fixture.get('login_mode', 'desktop'),counts=dict(keywords=1,points=7),
                                     daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None)
+                    elif path == 'login/qr':
+                        data = dict(state=fixture['qr_state'],
+                                    browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',
+                                    session=dict(has_session=fixture['qr_state']=='succeeded'))
+                    elif path == 'login/sms': data = dict(state='idle', browser='browser_ready')
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
-                    elif path == 'jobs': data = dict(jobs=[])
+                    elif path == 'jobs': data = dict(jobs=fixture.get('jobs', []))
+                    elif path == 'jobs/synthetic-douyin-login-failure': data = dict(job=fixture['jobs'][0])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=False, paused=False)
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,
@@ -475,6 +487,7 @@ def run(output=None):
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
+                assert page.locator('#douyinQueryNote').is_hidden()
                 page.locator('#submitButton').click()
                 page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
                 assert len(writes)==7, writes
@@ -488,14 +501,52 @@ def run(output=None):
                 assert page.locator('#notice').is_visible()
                 assert '恢复采集' in page.locator('#notice').inner_text()
                 assert not page.locator('#browserBadge .info-button').count()
+                page.locator('#openQuery').click()
+                assert page.locator('#douyinQueryNote').is_visible()
+                page.locator('#douyinQueryNote [data-login-platform=douyin]').click()
+                assert page.locator('#queryDialog').is_hidden()
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.evaluate("document.activeElement === document.querySelector('#douyinLoginCard')")
+                failed_job = dict(id='synthetic-douyin-login-failure',
+                                  query=dict(platform='douyin', keywords=['杭州'], start_date=START, end_date=END),
+                                  status='failed', created_at=0,
+                                  error=dict(code='authentication_required', message='抖音未登录'))
+                fixture['jobs'] = [failed_job]
+                page.evaluate('''job => {
+                    jobs=[job];renderJobs();
+                    reportBatch={query:job.query,entries:[{body:job.query,label:'指数趋势',
+                        jobId:job.id,status:job.status,error:job.error.message,lastJob:job}]};
+                    renderReportProgress();
+                }''', failed_job)
+                page.locator('[data-tab=tasks]').click()
+                job_login = page.locator('#jobRows [data-login-platform=douyin]')
+                assert job_login.is_visible() and job_login.inner_text() == '去平台连接登录'
+                job_login.click()
+                assert page.locator('#douyinLoginCard').evaluate('(node)=>node===document.activeElement')
+                page.locator('[data-tab=overview]').click()
+                page.locator('#reportProgress').evaluate('(node)=>node.open=true')
+                progress_login = page.locator('#reportProgressRows [data-login-platform=douyin]')
+                assert progress_login.is_visible() and progress_login.inner_text() == '去平台连接登录'
+                progress_login.click()
+                assert page.locator('#douyinLoginCard').evaluate('(node)=>node===document.activeElement')
                 fixture.update(login='cookie_present', paused=None)
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    page.evaluate('refresh()')
+                page.locator('[data-tab=tasks]').click()
+                assert job_login.is_hidden()
+                page.locator('[data-tab=overview]').click()
+                assert progress_login.is_hidden()
+                page.locator('#openQuery').click()
+                assert page.locator('#douyinQueryNote').is_hidden()
+                page.locator('#closeQuery').click()
+                fixture['jobs'] = []
                 fixture['history']=False
                 page.evaluate('sessionStorage.clear()')
                 page.reload()
                 page.wait_for_function("document.querySelector('#historyRows').textContent.includes('暂无结果')")
                 assert page.locator('#queryStart').input_value()==''
                 assert page.locator('#queryEnd').input_value()==''
-                assert len(writes)==7, writes
+                assert len(writes)==8 and writes[-1] == ('comments/probe', {}), writes
                 fixture.update(topic_login='need_scan', topic_categories=False, topic_error=True)
                 page.locator('[data-source=topic]').click()
                 page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
@@ -553,9 +604,142 @@ def run(output=None):
                 page.wait_for_timeout(100)
                 assert page.locator('#topicCategory').input_value() == '旅行'
                 assert '参数' not in page.locator('#topicStatus').inner_text()
+                # The sidebar reaches the single existing comments card without collecting.
+                writes_before_navigation = len(writes)
+                comments_nav = page.locator('.nav [data-tab=comments]')
+                assert comments_nav.is_visible()
+                assert '评论采集' in comments_nav.inner_text()
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    comments_nav.click()
+                assert page.locator('[data-section=comments]').is_visible()
+                assert page.locator('[data-section=comments] #overviewComments').is_visible()
+                assert page.locator('#overviewComments').count() == 1
+                assert page.locator('#overviewComments #commentsProbeButton').count() == 0
+                assert page.locator('.top #desktopLogin').count() == 0
+                assert page.locator('#pageTitle').inner_text() == '抖音评论采集'
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.locator('#commentsVideoInput').fill('合成草稿，不提交')
+                for probe in ('not_logged_in', 'verification_required'):
+                    fixture['comments_probe'] = probe
+                    page.evaluate('loadComments()')
+                    login = page.locator('#commentsLoginButton')
+                    assert login.is_visible()
+                    assert login.inner_text() == '前往平台连接登录'
+                    login.click()
+                    assert page.locator('[data-section=connections]').is_visible()
+                    assert page.locator('#douyinLoginCard').is_visible()
+                    assert page.locator('#douyinLoginCard #commentsProbeButton').is_visible()
+                    assert page.evaluate("document.querySelector('#douyinLoginCard') === document.activeElement")
+                    assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                        comments_nav.click()
+                    assert page.locator('#commentsVideoInput').input_value() == '合成草稿，不提交'
+                page.locator('[data-tab=connections]').click()
+                fixture['comments_probe'] = 'logged_in'
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    comments_nav.click()
+                page.wait_for_function("document.querySelector('#commentsLoginButton').hidden")
+                assert page.locator('#commentsLoginButton').is_hidden()
+                assert not page.locator('#overviewComments button:visible').filter(has_text='登录').count()
+                page.locator('[data-tab=overview]').click()
+                assert page.locator('#overviewComments').is_hidden()
+                assert writes[writes_before_navigation:] == [('comments/probe', {})] * 4
+                # Login checks and the existing ticketed desktop action stay in platform connections.
+                page.locator('[data-tab=connections]').click()
+                assert page.locator('#commentsProbeButton').is_hidden()
+                assert page.locator('#desktopLogin').is_hidden()
+                fixture['comments_probe'] = 'verification_required'
+                page.evaluate('loadComments()')
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    page.locator('#douyinLoginCard #commentsProbeButton').click()
+                page.wait_for_function("!document.querySelector('#commentsProbeButton').disabled")
+                assert writes[-1] == ('comments/probe', {})
+                assert page.locator('#douyinLoginCard #commentsConnectionState').is_visible()
+                assert page.locator('#commentsConnectionState').inner_text() == '评论主站：需要验证'
+                fixture['login_mode'] = 'qr'
+                for qr_state in ('idle', 'succeeded'):
+                    fixture['qr_state'] = qr_state
+                    page.evaluate('refresh()')
+                    page.wait_for_function('!qrLoading')
+                    page.evaluate('loadQr()')
+                    assert page.locator('#qrLoginCard').is_visible()
+                    assert page.locator('#desktopLoginMode').is_hidden()
+                    assert page.locator('#qrDesktop').is_hidden()
+                    assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
+                fixture['comments_probe'] = 'logged_in'
+                page.evaluate('loadComments()')
+                for mode in ('desktop', 'sms', 'qr'):
+                    fixture.update(login_mode=mode, login='cookie_present', qr_state='succeeded')
+                    page.evaluate('refresh()')
+                    page.wait_for_function('!smsLoading && !qrLoading')
+                    if mode == 'qr':
+                        page.evaluate('loadQr()')
+                        assert page.locator('#qrLoginCard').is_visible()
+                        for selector in ('#qrStart', '#qrRefresh', '#qrCancel', '#qrDesktop'):
+                            assert page.locator(selector).is_hidden(), selector
+                    assert page.locator('#commentsProbeButton').is_hidden()
+                    assert page.locator('#desktopLogin').is_hidden()
+                    assert page.locator('#smsPhoneForm').is_hidden()
+                    assert page.locator('#smsDesktop').is_hidden()
+                # A later logout must restore QR actions even if the previous round succeeded.
+                before_qr_success = len(writes)
+                fixture['login'] = 'no_session_cookie'
+                page.evaluate('refresh()')
+                page.wait_for_function('!qrLoading')
+                assert page.locator('#qrStart').is_visible()
+                assert page.locator('#qrStart').evaluate('(node)=>typeof node.onclick === "function"')
+                assert page.locator('#qrDesktop').is_hidden()
+                assert page.locator('#desktopLogin').is_visible()
+                assert len(writes) == before_qr_success
+                page.evaluate("renderQr({state:'qr_ready',browser:'login_required',expires_in:180,session:{}})")
+                qr_success = dict(state='succeeded', browser='browser_ready', session=dict(has_session=True))
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    page.evaluate('renderQr', qr_success)
+                page.evaluate('renderQr', qr_success)
+                for selector in ('#qrStart', '#qrRefresh', '#qrCancel', '#qrDesktop', '#desktopLogin'):
+                    assert page.locator(selector).is_hidden(), selector
+                assert writes[before_qr_success:] == [('comments/probe', {})]
+                fixture['login'] = 'cookie_present'
+                page.evaluate('refresh()')
+                assert page.locator('#qrStart').is_hidden()
+                assert writes[before_qr_success:] == [('comments/probe', {})]
+                fixture.update(login='expired', qr_state='verification_required')
+                page.evaluate('refresh()')
+                page.evaluate('loadQr()')
+                assert page.locator('#qrDesktop').is_visible()
+                assert page.locator('#desktopLogin').is_hidden()
+                fixture.update(login_mode='sms')
+                page.evaluate('refresh()')
+                page.wait_for_function('!smsLoading')
+                assert page.locator('#smsPhoneForm').is_visible()
+                assert page.locator('#smsDesktop').is_visible()
+                assert page.locator('#desktopLogin').is_hidden()
+                fixture.update(login='cookie_present', comments_probe='not_logged_in')
+                page.evaluate('loadComments()')
+                fixture['login_mode'] = 'desktop'
+                page.evaluate('refresh()')
+                assert page.locator('#desktopLogin').count() == 1
+                assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
+                assert page.evaluate("document.querySelector('#desktopLogin').onclick === openDesktop")
+                page.evaluate("""() => {
+                    window.syntheticDesktop = {opened: false, navigated: false, closed: false};
+                    window.open = () => {
+                        window.syntheticDesktop.opened = true;
+                        return {opener: null,
+                            set location(value) { window.syntheticDesktop.navigated = Boolean(value); },
+                            close() { window.syntheticDesktop.closed = true; }};
+                    };
+                }""")
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/desktop/ticket'):
+                    page.locator('#desktopLogin').click()
+                page.wait_for_function('window.syntheticDesktop.navigated')
+                assert page.evaluate('window.syntheticDesktop.opened && !window.syntheticDesktop.closed')
+                assert writes[-1] == ('desktop/ticket', {})
+                assert writes[writes_before_navigation:] == [('comments/probe', {})] * 7 + [('desktop/ticket', {})]
                 assert not unexpected, unexpected
                 assert not errors, errors
-                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
+                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit, comments navigation/login')
                 context.close()
         finally:
             browser.close()
