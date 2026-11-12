@@ -4,13 +4,13 @@ const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
 new vm.Script(script);
 const start=script.indexOf('// Comments collection:'),end=script.indexOf('// End comments collection.');
 assert(start>=0&&end>start);
-for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
+for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsConnectionState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsProbeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
 assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
  const $=id=>nodes[id]??={hidden:false,value:'',textContent:'',scrollIntoView(){this.scrolled=true},setAttribute(){},focus(){this.focused=true}};
- const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null};
- const ctx=vm.createContext({$,tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}return path==='comments/status'?f.status:{ok:true}}});
+ const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null};
+ const ctx=vm.createContext({$,tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:{ok:true}}});
  vm.runInContext(script.slice(start,end),ctx);f.run=code=>vm.runInContext(code,ctx);return f;
 }
 (async()=>{
@@ -21,6 +21,14 @@ function fixture(){
  await f.$('#commentsPauseButton').onclick();await f.$('#commentsResumeButton').onclick();
  for(const path of ['comments/pause','comments/resume'])assert.deepStrictEqual(Object.keys(f.calls.find(c=>c.path===path).body),[]);
  assert(f.$('#commentsMessage').textContent.includes('再次点击开始'));
+ f.status={probe:'logged_in',running:false};
+ const probe=f.$('#commentsProbeButton').onclick();assert(f.$('#commentsProbeButton').disabled);await probe;
+ assert.deepStrictEqual(Object.keys(f.calls.find(c=>c.path==='comments/probe').body),[]);
+ assert.equal(f.$('#commentsConnectionState').textContent,'评论主站：已登录');assert(!f.$('#commentsProbeButton').disabled);
+ f.error=Error('合成探测失败');await f.$('#commentsProbeButton').onclick();
+ assert.equal(f.$('#commentsConnectionState').textContent,'合成探测失败');assert(!f.$('#commentsProbeButton').disabled);
+ f.readError=Error('合成状态读取失败');await f.run('loadComments()');
+ assert.equal(f.$('#commentsConnectionState').textContent,'评论登录状态读取失败');f.readError=null;
  f.status={probe:'not_logged_in',paused:true,pause_reason:'verification_required',waiting_for_index:false};await f.run('loadComments()');
  assert(!f.$('#commentsLoginButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('verification_required'));
  f.$('#commentsLoginButton').onclick();assert.equal(f.tab,'connections');assert(f.$('#smsLoginCard').focused);

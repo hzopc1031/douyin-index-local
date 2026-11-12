@@ -5,6 +5,7 @@ No gateway, account, browser profile or live platform endpoint is used.
 """
 import argparse
 import json
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -41,7 +42,7 @@ def run(output=None):
                 page.clock.install(time=datetime(2026, 11, 2, tzinfo=timezone.utc))
                 errors, unexpected, writes, status_reads, held = [], [], [], [], []
                 page.on('pageerror', lambda error: (errors.append(str(error)), print('UI error:', error, flush=True)))
-                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None, 'topic_login': 'logged_in', 'topic_categories': True,
+                fixture = {'history': True, 'related': 'available', 'audience': 'available', 'missing_latest': False, 'all_missing': False, 'login': 'cookie_present', 'paused': None, 'topic_login': 'logged_in', 'topic_categories': True, 'comments_probe': 'not_logged_in',
                            'groups': [dict(id='a'*32, name='合成组', keywords=['杭州', '西湖'])]}
 
                 def route(request_route):
@@ -60,6 +61,10 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif path == 'comments/probe':
+                            data = dict(ok=True, probe=fixture['comments_probe'])
+                        elif path == 'desktop/ticket':
+                            data = dict(ticket=secrets.token_urlsafe(24))
                         elif path == 'topics/login/refresh':
                             data = dict(state='need_scan', qr_available=True)
                         elif path == 'topics/categories/refresh':
@@ -92,7 +97,7 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
-                    elif path == 'comments/status': data = dict(probe='not_logged_in', running=False, paused=False)
+                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=False, paused=False)
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,
@@ -476,6 +481,7 @@ def run(output=None):
                 page.locator('[data-tab=overview]').click()
                 # A real click submits only the mocked routes and preserves existing request shape.
                 page.locator('#openQuery').click()
+                assert page.locator('#douyinQueryNote').is_hidden()
                 page.locator('#submitButton').click()
                 page.wait_for_function("reportBatch?.entries.every(e=>e.jobId)")
                 assert len(writes)==7, writes
@@ -489,6 +495,12 @@ def run(output=None):
                 assert page.locator('#notice').is_visible()
                 assert '恢复采集' in page.locator('#notice').inner_text()
                 assert not page.locator('#browserBadge .info-button').count()
+                page.locator('#openQuery').click()
+                assert page.locator('#douyinQueryNote').is_visible()
+                page.locator('#douyinQueryNote [data-login-platform=douyin]').click()
+                assert page.locator('#queryDialog').is_hidden()
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.evaluate("document.activeElement === document.querySelector('#douyinLoginCard')")
                 fixture.update(login='cookie_present', paused=None)
                 fixture['history']=False
                 page.evaluate('sessionStorage.clear()')
@@ -554,9 +566,71 @@ def run(output=None):
                 page.wait_for_timeout(100)
                 assert page.locator('#topicCategory').input_value() == '旅行'
                 assert '参数' not in page.locator('#topicStatus').inner_text()
+                # The sidebar reaches the single existing comments card without collecting.
+                writes_before_navigation = len(writes)
+                comments_nav = page.locator('.nav [data-tab=comments]')
+                assert comments_nav.is_visible()
+                assert '评论采集' in comments_nav.inner_text()
+                comments_nav.click()
+                assert page.locator('[data-section=comments]').is_visible()
+                assert page.locator('[data-section=comments] #overviewComments').is_visible()
+                assert page.locator('#overviewComments').count() == 1
+                assert page.locator('#overviewComments #commentsProbeButton').count() == 0
+                assert page.locator('.top #desktopLogin').count() == 0
+                assert page.locator('#pageTitle').inner_text() == '抖音评论采集'
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                page.locator('#commentsVideoInput').fill('合成草稿，不提交')
+                for probe in ('not_logged_in', 'verification_required'):
+                    fixture['comments_probe'] = probe
+                    page.evaluate('loadComments()')
+                    login = page.locator('#commentsLoginButton')
+                    assert login.is_visible()
+                    assert login.inner_text() == '前往平台连接登录'
+                    login.click()
+                    assert page.locator('[data-section=connections]').is_visible()
+                    assert page.locator('#douyinLoginCard').is_visible()
+                    assert page.locator('#douyinLoginCard #commentsProbeButton').is_visible()
+                    assert page.evaluate("document.querySelector('#douyinLoginCard').contains(document.activeElement)")
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                    comments_nav.click()
+                    assert page.locator('#commentsVideoInput').input_value() == '合成草稿，不提交'
+                fixture['comments_probe'] = 'logged_in'
+                page.evaluate('loadComments()')
+                assert page.locator('#commentsLoginButton').is_hidden()
+                assert not page.locator('#overviewComments button:visible').filter(has_text='登录').count()
+                page.locator('[data-tab=overview]').click()
+                assert page.locator('#overviewComments').is_hidden()
+                assert len(writes) == writes_before_navigation
+                # Login checks and the existing ticketed desktop action stay in platform connections.
+                page.locator('[data-tab=connections]').click()
+                fixture['comments_probe'] = 'verification_required'
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
+                    page.locator('#douyinLoginCard #commentsProbeButton').click()
+                page.wait_for_function("!document.querySelector('#commentsProbeButton').disabled")
+                assert writes[-1] == ('comments/probe', {})
+                assert page.locator('#douyinLoginCard #commentsConnectionState').is_visible()
+                assert page.locator('#commentsConnectionState').inner_text() == '评论主站：需要验证'
+                assert page.locator('#desktopLogin').count() == 1
+                assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
+                assert page.evaluate("document.querySelector('#desktopLogin').onclick === openDesktop")
+                page.evaluate("""() => {
+                    window.syntheticDesktop = {opened: false, navigated: false, closed: false};
+                    window.open = () => {
+                        window.syntheticDesktop.opened = true;
+                        return {opener: null,
+                            set location(value) { window.syntheticDesktop.navigated = Boolean(value); },
+                            close() { window.syntheticDesktop.closed = true; }};
+                    };
+                }""")
+                with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/desktop/ticket'):
+                    page.locator('#desktopLogin').click()
+                page.wait_for_function('window.syntheticDesktop.navigated')
+                assert page.evaluate('window.syntheticDesktop.opened && !window.syntheticDesktop.closed')
+                assert writes[-1] == ('desktop/ticket', {})
+                assert len(writes) == writes_before_navigation + 2
                 assert not unexpected, unexpected
                 assert not errors, errors
-                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit')
+                print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit, comments navigation/login')
                 context.close()
         finally:
             browser.close()

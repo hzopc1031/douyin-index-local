@@ -153,7 +153,7 @@ test('actual dashboard refresh preserves confirmed login when history, jobs or c
    return path==='history'?{datasets:[]}:path==='jobs'?{jobs:[]}:f.state;
   };
   f.run(`let refreshing=false,datasets=[],jobs=[],platforms=[],qrEnabled=false,qrInitialized=false,qrTimer=null,reportBatch=null;
-   const document={title:''},esc=String;function readingInfo(){return false};function infoTip(status){return status};function fmt(){};function initializeRanges(){};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};
+   const document={title:''},esc=String;function readingInfo(){return false};function infoTip(status){return status};function fmt(){};function initializeRanges(){};function browserLoginLabel(){return 'ready'};function renderHistory(){};function renderJobs(){};function renderBaiduLogin(){};
    async function refreshReportBatch(){};async function loadInsights(){};async function loadSeries(){${failure==='series'?"throw Error('synthetic series failure')":''}}`);
   f.run(html.slice(html.indexOf('async function refresh(){'),html.indexOf("$('#refreshButton').onclick")));
   await f.run('refresh()');assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);

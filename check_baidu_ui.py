@@ -18,11 +18,12 @@ def run(output=None):
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         try:
-            for width in (430, 1280):
+            for width in (360, 430, 1280):
                 page = browser.new_page(viewport={'width': width, 'height': 940})
-                writes, errors, unexpected = [], [], []
+                writes, errors, unexpected, login_opens = [], [], [], []
                 low_volume = [False]
                 baidu_state = ['login_in_progress']
+                baidu_paused = [None]
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def route(r):
                     url = urlsplit(r.request.url)
@@ -36,6 +37,10 @@ def run(output=None):
                         assert r.request.headers.get('x-hub-request') == '1'
                         return r.fulfill(content_type='image/png', body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1kAAAAASUVORK5CYII='))
                     if path == 'login/baidu/open':
+                        assert r.request.method == 'POST'
+                        assert r.request.headers.get('x-hub-request') == '1'
+                        assert r.request.post_data_json == {}
+                        login_opens.append(path)
                         return r.fulfill(content_type='application/json', body=json.dumps({'ok': True, 'state': 'login_required'}))
                     if r.request.method == 'POST':
                         writes.append((path, r.request.post_data_json))
@@ -45,7 +50,7 @@ def run(output=None):
                         data = dict(login_mode='desktop', browser='login_required', login_state='no_session_cookie',
                                     counts=dict(keywords=1, points=0), daily_online_attempts=0,
                                     limits=dict(online_attempts_per_day=50), cooldown_remaining_seconds=0,
-                                    platform_status={'baidu': dict(browser=baidu_state[0], paused=None,
+                                    platform_status={'baidu': dict(browser=baidu_state[0], paused=baidu_paused[0],
                                         daily=dict(attempts=0, http_reserved=0),
                                         limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
@@ -64,6 +69,7 @@ def run(output=None):
                             data = {'status': 'available', 'result': {'data': {'value_unit': 'upstream_raw', 'dimensions': [{'dimension': 'gender', 'name': '性别', 'labels': [{'name': '合成分组', 'value': 12, 'tgi': None}]}]}, 'metadata': {**q, 'verification': 'pending', 'source': '离线合成样例', 'fetched_at': '离线合成样例', 'audience_period': {'start_date': '2026-10-01', 'end_date': '2026-10-07', 'days': 7}}}}
                         else: data = {'status': 'no_data'}
                     elif path == 'jobs': data = {'jobs': []}
+                    elif path == 'hot/latest': data = {'items': []}
                     elif path == 'groups': data = {'groups': [], 'live_request': False}
                     elif path.startswith('jobs/'): data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'export.csv':
@@ -84,6 +90,20 @@ def run(output=None):
                 page.goto('http://baidu-ui.invalid/')
                 page.wait_for_function('!refreshing && platforms.length===3')
                 assert '登录中' in page.locator('#baiduBudgetStatus').inner_text()
+                page.locator('[data-tab=connections]').click()
+                assert page.locator('[data-section=connections] #baiduLoginCard').is_visible()
+                assert page.locator('#baiduLoginCard #baiduLoginButton').is_visible()
+                assert page.locator('#baiduLoginButton').count() == 1
+                assert page.locator('#baiduQrPanel').count() == 1
+                assert page.locator('#baiduLoginCard #baiduQrPanel').count() == 1
+                assert page.locator('#queryDialog #baiduLoginButton, #queryDialog #baiduQrPanel').count() == 0
+                assert page.locator('#baiduQueryTip, #baiduQueryStatus').count() == 0
+                assert '登录中' in page.locator('#baiduLoginStatus').inner_text()
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                if output:
+                    page.screenshot(path=str(output/f'hub-connections-{width}.png'))
+                assert not login_opens and not writes
+                page.locator('[data-tab=overview]').click()
                 page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
                 page.locator('#insightEnd').fill(q['end_date'])
@@ -96,6 +116,33 @@ def run(output=None):
                     page.screenshot(path=str(output/'hub-douyin-tips-desktop.png'))
                     page.keyboard.press('Escape')
                 page.locator('#platformChips [data-platform=baidu]').click()
+                baidu_state[0] = 'login_required'
+                page.evaluate('refresh()')
+                result_login = page.locator('#baiduLoginNotice [data-login-platform=baidu]')
+                assert result_login.is_visible() and result_login.inner_text() == '去平台连接登录'
+                if output:
+                    page.screenshot(path=str(output/f'baidu-result-login-{width}.png'))
+                result_login.focus()
+                page.keyboard.press('Enter')
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                assert not login_opens and not writes
+                page.locator('[data-tab=overview]').click()
+                page.locator('#viewChips [data-source=hot_search]').click()
+                assert page.locator('#baiduLoginNotice').is_hidden()
+                page.locator('#viewChips [data-source=index]').click()
+                assert result_login.is_visible()
+                baidu_state[0] = 'browser_ready'
+                baidu_paused[0] = {'code': 'login_required'}
+                page.evaluate('refresh()')
+                assert result_login.is_visible()
+                page.locator('#openQuery').click()
+                page.locator('#queryPlatform').select_option('baidu')
+                assert page.locator('#baiduQueryNote').is_visible()
+                page.locator('#closeQuery').click()
+                baidu_state[0] = 'login_required'
+                baidu_paused[0] = None
+                page.evaluate('refresh()')
                 page.locator('#insightRange').evaluate('(node)=>node.open=true')
                 page.locator('#insightStart').fill(q['start_date'])
                 page.locator('#insightEnd').fill(q['end_date'])
@@ -152,16 +199,34 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
-                assert '中枢扫码登录' in page.locator('#baiduQueryNote').inner_text()
+                assert page.locator('#baiduQueryNote').inner_text() == '去平台连接登录'
+                assert page.locator('#baiduQueryNote button').count() == 1
+                query_login = page.locator('#baiduQueryNote [data-login-platform=baidu]')
+                assert query_login.is_visible() and query_login.inner_text() == '去平台连接登录'
+                if output:
+                    page.screenshot(path=str(output/f'baidu-query-login-{width}.png'))
+                query_login.click()
+                assert not page.locator('#queryDialog').evaluate('(node)=>node.open')
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
                 page.locator('#baiduLoginButton').click()
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
+                assert login_opens == ['login/baidu/open']
                 assert page.locator('#baiduQrImage').is_visible()
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 page.locator('#baiduQrRefresh').click()
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
                 baidu_state[0] = 'browser_ready'
                 page.evaluate('pollBaiduLogin()')
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('已登录')")
                 assert page.locator('#baiduQrImage').is_hidden()
+                assert '已登录' in page.locator('#baiduLoginStatus').inner_text()
+                page.locator('[data-tab=overview]').click()
+                assert page.locator('#baiduLoginNotice').is_hidden()
+                page.locator('#openQuery').click()
+                assert page.locator('#queryPlatform').input_value() == 'baidu'
+                assert page.locator('#baiduQueryNote').is_hidden()
+                assert query_login.is_hidden()
                 assert page.locator('#submitButton').inner_text() == '查询 →'
                 if output and width == 1280:
                     page.screenshot(path=str(output/'baidu-query-desktop.png'))
@@ -175,6 +240,33 @@ def run(output=None):
                 page.locator('#platformChips [data-platform=douyin]').click()
                 assert page.locator('#baiduWords').is_hidden() and page.locator('#keywordSelect').is_visible()
                 page.wait_for_function("!document.querySelector('#showComposite').parentElement.hidden")
+                page.locator('#platformChips [data-platform=baidu]').click()
+                baidu_state[0] = 'login_required'
+                page.evaluate('refresh()')
+                failed_job = dict(id='synthetic-login-failure', query=q, status='failed',
+                                  created_at=0, error=dict(code='login_required', message='百度未登录'))
+                page.evaluate('''job => {
+                    jobs=[job];renderJobs();
+                    reportBatch={query:job.query,entries:[{body:job.query,label:'指数趋势',
+                        jobId:job.id,status:job.status,error:job.error.message,lastJob:job}]};
+                    renderReportProgress();
+                }''', failed_job)
+                page.locator('[data-tab=tasks]').click()
+                job_login = page.locator('#jobRows [data-login-platform=baidu]')
+                assert job_login.is_visible() and job_login.inner_text() == '去平台连接登录'
+                job_login.click()
+                assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                page.locator('[data-tab=overview]').click()
+                page.locator('#reportProgress').evaluate('(node)=>node.open=true')
+                progress_login = page.locator('#reportProgressRows [data-login-platform=baidu]')
+                assert progress_login.is_visible() and progress_login.inner_text() == '去平台连接登录'
+                progress_login.click()
+                assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                page.evaluate("renderBaiduLogin({browser:'browser_ready'})")
+                page.locator('[data-tab=tasks]').click()
+                assert job_login.is_hidden()
+                page.locator('[data-tab=overview]').click()
+                assert progress_login.is_hidden()
                 assert not errors, errors
                 assert not unexpected, unexpected
                 print(f'PASS Baidu {width}px: selectable, pending login, null/low-volume, source, trend and related tasks')
