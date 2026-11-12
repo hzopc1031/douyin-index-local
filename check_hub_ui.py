@@ -92,8 +92,10 @@ def run(output=None):
                     elif path == 'platforms': data = dict(platforms=PLATFORMS)
                     elif path == 'status':
                         status_reads.append(request.url)
-                        data = dict(browser='browser_ready',login_state=fixture['login'],login_mode='desktop',counts=dict(keywords=1,points=7),
+                        data = dict(browser='browser_ready',login_state=fixture['login'],login_mode=fixture.get('login_mode', 'desktop'),counts=dict(keywords=1,points=7),
                                     daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None)
+                    elif path == 'login/qr':
+                        data = dict(state=fixture['qr_state'], browser='browser_ready' if fixture['qr_state'] == 'succeeded' else 'login_required', session={})
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
@@ -610,6 +612,18 @@ def run(output=None):
                 assert writes[-1] == ('comments/probe', {})
                 assert page.locator('#douyinLoginCard #commentsConnectionState').is_visible()
                 assert page.locator('#commentsConnectionState').inner_text() == '评论主站：需要验证'
+                fixture['login_mode'] = 'qr'
+                for qr_state in ('idle', 'succeeded'):
+                    fixture['qr_state'] = qr_state
+                    page.evaluate('refresh()')
+                    page.wait_for_function('!qrLoading')
+                    page.evaluate('loadQr()')
+                    assert page.locator('#qrLoginCard').is_visible()
+                    assert page.locator('#desktopLoginMode').is_hidden()
+                    assert page.locator('#qrDesktop').is_hidden()
+                    assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
+                fixture['login_mode'] = 'desktop'
+                page.evaluate('refresh()')
                 assert page.locator('#desktopLogin').count() == 1
                 assert page.locator('#douyinLoginCard #desktopLogin').is_visible()
                 assert page.evaluate("document.querySelector('#desktopLogin').onclick === openDesktop")
