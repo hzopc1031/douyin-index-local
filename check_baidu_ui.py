@@ -25,6 +25,8 @@ def run(output=None):
                 baidu_state = ['login_in_progress']
                 baidu_paused = [None]
                 qr_failed, history_failed = [False], [False]
+                held_opens, open_failed = [], [False]
+                history_error = ['合成历史读取失败']
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def route(r):
                     url = urlsplit(r.request.url)
@@ -44,6 +46,9 @@ def run(output=None):
                         assert r.request.headers.get('x-hub-request') == '1'
                         assert r.request.post_data_json == {}
                         login_opens.append(path)
+                        if open_failed[0]:
+                            held_opens.append(r)
+                            return
                         return r.fulfill(content_type='application/json', body=json.dumps({'ok': True, 'state': 'login_required'}))
                     if r.request.method == 'POST':
                         writes.append((path, r.request.post_data_json))
@@ -58,7 +63,7 @@ def run(output=None):
                                         limits=dict(logical_daily=120, http_daily=400))})
                     elif path == 'history':
                         if history_failed[0]:
-                            return r.fulfill(status=503, content_type='application/json', body='{"error":{"message":"合成历史读取失败"}}')
+                            return r.fulfill(status=503, content_type='application/json', body=json.dumps({'error': {'message': history_error[0]}}))
                         metadata = {**raw['metadata'], 'verification': 'pending'}
                         data = {'datasets': [
                             {'metadata': {**metadata, 'platform': 'douyin', 'keywords': ['grok', 'ai']}, 'fetched': 4},
@@ -185,6 +190,11 @@ def run(output=None):
                 assert page.locator('#chart svg polyline').count() >= 2
                 assert '合成词甲' in page.locator('#chart').inner_text()
                 assert '合成词乙' in page.locator('#chart').inner_text()
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                if output:
+                    page.locator('#insightRange').evaluate('(node)=>node.open=false')
+                    page.evaluate('window.scrollTo(0, 0)')
+                    page.screenshot(path=str(output/f'hubfollow-baidu-{width}.png'), full_page=True)
                 with page.expect_download() as download_info:
                     page.locator('#exportLink').click()
                 download = download_info.value
@@ -244,9 +254,35 @@ def run(output=None):
                 assert not page.locator('#queryDialog').evaluate('(node)=>node.open')
                 assert page.locator('[data-section=connections]').is_visible()
                 assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                open_failed[0] = True
+                page.locator('#baiduLoginButton').click()
+                page.wait_for_function("document.querySelector('#baiduLoginButton').disabled")
+                assert page.locator('#baiduLoginButton').inner_text() == '正在打开…'
+                assert page.locator('#baiduQrState').inner_text() == '正在打开百度登录窗口，最长约 35 秒…'
+                assert page.locator('#baiduQrState').is_visible()
+                page.evaluate('refresh()')
+                assert page.locator('#baiduLoginButton').is_disabled()
+                page.evaluate("document.querySelector('#baiduLoginButton').onclick()")
+                assert login_opens == ['login/baidu/open']
+                held_opens.pop().fulfill(status=503, content_type='application/json', body=json.dumps({
+                    'error': {'message': '百度浏览器未就绪，请检查远程桌面。'}}))
+                page.wait_for_function("!document.querySelector('#baiduLoginButton').disabled")
+                assert page.locator('#baiduLoginButton').inner_text() == '打开百度登录窗口'
+                assert page.locator('#baiduQrState').inner_text() == '百度浏览器未就绪，请检查远程桌面。'
+                assert page.locator('#toast').inner_text() == '百度浏览器未就绪，请检查远程桌面。'
+                assert page.locator('#baiduDesktop').is_visible()
+                assert page.locator('#baiduQrImage').is_hidden()
+                page.evaluate('refresh()')
+                assert page.locator('#baiduQrState').inner_text() == '百度浏览器未就绪，请检查远程桌面。'
+                assert page.locator('#baiduDesktop').is_visible()
+                if output:
+                    page.screenshot(path=str(output/f'hubfollow-baidu-login-error-{width}.png'))
+                open_failed[0] = False
                 page.locator('#baiduLoginButton').click()
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
-                assert login_opens == ['login/baidu/open']
+                assert login_opens == ['login/baidu/open', 'login/baidu/open']
+                assert page.locator('#baiduLoginButton').is_enabled()
+                assert page.locator('#baiduLoginButton').inner_text() == '打开百度登录窗口'
                 assert page.locator('#baiduQrImage').is_visible()
                 assert page.locator('#baiduDesktop').is_hidden()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -273,7 +309,14 @@ def run(output=None):
                 page.evaluate('refresh()')
                 assert page.locator('#baiduLoginButton').is_hidden()
                 assert '已登录' in page.locator('#baiduLoginStatus').inner_text()
+                assert page.locator('#notice').inner_text() == '工作台连接异常（合成历史读取失败），当前无法确认会话状态。'
+                history_error[0] = '<b>合成错误</b>' + '长' * 100
+                page.evaluate('refresh()')
+                assert page.locator('#notice').inner_text() == f'工作台连接异常（{history_error[0][:80]}），当前无法确认会话状态。'
+                assert page.locator('#notice b').count() == 0
                 history_failed[0] = False
+                page.evaluate('refresh()')
+                assert '工作台连接异常' not in page.locator('#notice').inner_text()
                 page.locator('[data-tab=overview]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 page.locator('#openQuery').click()

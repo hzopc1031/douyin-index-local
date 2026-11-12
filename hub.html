@@ -593,11 +593,11 @@ async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h
  detail.innerHTML=infoTip(last?(last.ok?'最近采集成功':'最近采集失败 · '+(names[last.code]||'请查看采集任务')):'尚无采集验证','状态检查：'+new Date().toLocaleTimeString('zh-CN')+'（页面打开时每 15 秒更新） · '+(last?'最近在线取数：'+fmt(last.at)+'，'+(last.ok?'成功':names[last.code]||'失败'):'尚无在线取数验证记录')+'。页面预检不会请求抖音指数，不能提前判断服务端限频。');
  document.title=(paused||!ready?'⚠ '+label+' | ':'')+'指数工作台';
 
- initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#douyinLoginStatus').textContent='抖音登录状态待检查';$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';if(!readingInfo()){$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}}finally{refreshing=false}}
+ initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#douyinLoginStatus').textContent='抖音登录状态待检查';$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常（'+String(e.message||'请求失败').slice(0,80)+'），当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';if(!readingInfo()){$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}}finally{refreshing=false}}
 $('#refreshButton').onclick=refresh;
 $('#globalRefresh').onclick=async()=>{const b=$('#globalRefresh');b.disabled=true;b.textContent='刷新中…';try{platforms=(await api('platforms')).platforms;drawPlatforms();await refresh();if(!document.querySelector('[data-section=api]').hidden)await loadKeys()}catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='刷新'}};
 $('#resumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{}});toast('已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};
-let baiduLoginState=null,douyinNeedsLogin=false;
+let baiduLoginState=null,douyinNeedsLogin=false,baiduLoginOpening=false;
 const baiduLoginErrors=['login_required','authentication_required','verification_required','not_logged_in'];
 function baiduLoggedIn(){return ['browser_ready','signature_unavailable'].includes(baiduLoginState?.browser)}
 function baiduNeedsLogin(){return !baiduLoggedIn()&&(['login_required','login_in_progress'].includes(baiduLoginState?.browser)||baiduLoginErrors.includes(baiduLoginState?.paused?.code))}
@@ -606,7 +606,7 @@ function renderBaiduLogin(state=baiduLoginState){
  baiduLoginState=state;
  const needsLogin=baiduNeedsLogin(),label=needsLogin&&baiduLoginErrors.includes(state?.paused?.code)?'百度需要登录或验证':({browser_ready:'百度已登录',login_required:'百度未登录',login_in_progress:'百度登录中',browser_idle:'百度浏览器空闲已关闭',signature_unavailable:'百度登录后签名暂不可用',browser_unavailable:'百度浏览器不可用'})[state?.browser]||'百度登录状态待检查';
  $('#baiduLoginStatus').textContent=label+(state?.paused?' · 采集已暂停':'');
- $('#baiduLoginButton').disabled=!platformInfo('baidu').available;$('#baiduLoginButton').hidden=baiduLoggedIn();
+ $('#baiduLoginButton').disabled=baiduLoginOpening||!platformInfo('baidu').available;$('#baiduLoginButton').hidden=baiduLoggedIn();
  if(baiduLoggedIn()){baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=true;$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent}
  document.querySelectorAll('[data-login-platform="baidu"]').forEach(button=>button.hidden=!needsLogin);
  $('#baiduQueryNote').hidden=$('#queryPlatform').value!=='baidu'||!needsLogin;
@@ -623,7 +623,13 @@ async function loadBaiduQr(){
 }
 async function pollBaiduLogin(){if(!baiduQrActive)return;try{const state=await loadHubStatus();if(!baiduQrActive)return;const browser=state.platform_status?.baidu?.browser;if(['browser_ready','browser_idle','signature_unavailable'].includes(browser)){baiduQrActive=false;clearBaiduQr();$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent;$('#baiduQrPanel').hidden=true;return}}catch(e){}if(baiduQrActive)baiduQrTimer=setTimeout(pollBaiduLogin,3000)}
 $('#baiduQrRefresh').onclick=loadBaiduQr;$('#baiduDesktop').onclick=openDesktop;
-$('#baiduLoginButton').onclick=async()=>{try{const result=await api('login/baidu/open',{method:'POST',body:{}});renderBaiduLogin({browser:result.state});$('#baiduQrPanel').hidden=false;clearBaiduQr();if(result.state==='browser_ready'){$('#baiduQrState').textContent='百度已登录';$('#baiduQrPanel').hidden=true;baiduQrActive=false;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}catch(e){toast(e.message)}};
+$('#baiduLoginButton').onclick=async()=>{
+ const button=$('#baiduLoginButton');if(button.disabled||baiduLoginOpening)return;
+ baiduLoginOpening=true;button.disabled=true;button.textContent='正在打开…';baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=false;$('#baiduDesktop').hidden=true;$('#baiduQrState').textContent='正在打开百度登录窗口，最长约 35 秒…';
+ try{const result=await api('login/baidu/open',{method:'POST',body:{}});renderBaiduLogin({browser:result.state});$('#baiduQrPanel').hidden=false;if(result.state==='browser_ready'){$('#baiduQrState').textContent='百度已登录';$('#baiduQrPanel').hidden=true;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}
+ catch(e){$('#baiduQrPanel').hidden=false;$('#baiduQrState').textContent=e.message;$('#baiduDesktop').hidden=false;toast(e.message)}
+ finally{baiduLoginOpening=false;button.disabled=!platformInfo('baidu').available;button.textContent='打开百度登录窗口'}
+};
 $('#baiduResumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{platform:'baidu'}});toast('百度已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};
 async function loadKeys(){const data=await api('keys');$('#keyRows').innerHTML=data.keys.length?data.keys.map(k=>'<tr><td><strong>'+esc(k.name)+'</strong><br><small>'+esc(k.prefix)+'…</small></td><td>'+esc(k.scopes.join(' + '))+'</td><td>'+esc(fmt(k.expires))+'</td><td>'+esc(k.revoked?'已撤销':k.expires*1000<Date.now()?'已过期':'有效')+'</td><td>'+(k.revoked?'—':'<button class="btn danger" data-revoke="'+esc(k.id)+'">撤销</button>')+'</td></tr>').join(''):'<tr><td colspan="5">尚无 API Key。建议为每个调用方单独创建。</td></tr>';document.querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{if(!confirm('撤销后，该密钥将立即无法调用接口。继续？'))return;try{await api('keys/'+b.dataset.revoke,{method:'DELETE'});await loadKeys();toast('密钥已撤销')}catch(e){toast(e.message)}})}
 $('#keyForm').onsubmit=async e=>{e.preventDefault();try{const result=await api('keys',{method:'POST',body:{name:$('#keyName').value,scopes:$('#keyScope').value==='read'?['read']:['read','query'],days:Number($('#keyDays').value)}});$('#newKey').textContent=result.token;$('#keyDialog').showModal();await loadKeys()}catch(e){toast(e.message)}};

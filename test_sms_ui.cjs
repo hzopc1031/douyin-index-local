@@ -169,6 +169,7 @@ test('actual dashboard refresh preserves confirmed login when history, jobs or c
    async function refreshReportBatch(){};async function loadInsights(){};async function loadSeries(){${failure==='series'?"throw Error('synthetic series failure')":''}}`);
   f.run(html.slice(html.indexOf('async function refresh(){'),html.indexOf("$('#refreshButton').onclick")));
   await f.run('refresh()');assert(f.$('#smsPhoneForm').hidden);assert(f.$('#smsCodeForm').hidden);
+  assert.equal(f.$('#notice').textContent,'工作台连接异常（synthetic '+failure+' failure），当前无法确认会话状态。');
   assert(f.$('#smsState').textContent.startsWith('已登录'));assert(f.notices.length);
   assert(!f.calls.some(c=>c.body));
  }
