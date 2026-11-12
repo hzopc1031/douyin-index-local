@@ -286,8 +286,7 @@ class Api:
         """Inject the request guard at document start when the Qt view exists."""
         view = getattr(getattr(window, 'native', None), 'webview', None)
         if view is None:
-            window.evaluate_js(source)
-            return
+            raise RuntimeError('Comments document-start injection unavailable')
         from login_driver import QtDispatcher
         from PySide6.QtWebEngineCore import QWebEngineScript
 
