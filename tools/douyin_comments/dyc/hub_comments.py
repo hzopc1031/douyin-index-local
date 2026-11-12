@@ -46,6 +46,8 @@ PROBE_JS = """JSON.stringify((() => {
     https: location.protocol === 'https:',
     host: location.hostname,
     path: location.pathname,
+    modal_id: new URL(location.href).searchParams.getAll('modal_id').length === 1
+      ? new URL(location.href).searchParams.get('modal_id') : null,
     account: visible('[data-e2e="user-avatar"]') || visible('[data-dyc-login="yes"]'),
     login: visible('#login-panel-new, #douyin_login_comp_flat_panel, [data-e2e="login-button"], [data-dyc-login="no"]'),
     verification: visible('[id*="captcha"], [class*="captcha-verify"], [data-e2e="verify-dialog"], iframe[src*="captcha"], iframe[src*="verify"], [data-dyc-risk="yes"]')
@@ -53,105 +55,178 @@ PROBE_JS = """JSON.stringify((() => {
   };
 })())"""
 
-# One page request is admitted per scheduler slice; responses stay in page memory.
-GUARD_JS = """(function(){
+# One page request is admitted per scheduler slice; only its non-secret ticket survives navigation.
+GUARD_JS = r"""(function(){
   if (window.__dycHubGuard) return;
-  window.__dycArm = sessionStorage.getItem('__dycNavigate') === '1';
-  sessionStorage.removeItem('__dycNavigate');
-  window.__dycVideo = sessionStorage.getItem('__dycVideo');
-  sessionStorage.removeItem('__dycVideo');
-  window.__dycRoot = sessionStorage.getItem('__dycRoot');
-  sessionStorage.removeItem('__dycRoot');
-  window.__dycResult = null;
-  window.__dycSent = false;
-  const templates = {};
-  let replaying = false;
-  function remember(url) {
-    if (replaying) return;
-    const target = new URL(url, location.href);
-    templates[target.pathname.endsWith('/reply/') ? 'reply' : 'list'] ||= target.href;
+  let hub = window;
+  try { if (window.top.location.origin === location.origin) hub = window.top; } catch (e) {}
+  const storageKey = '__dycPending';
+  const ticket = () => {
+    try { return JSON.parse(hub.sessionStorage.getItem(storageKey)) || {}; } catch (e) { return {}; }
+  };
+  if (!hub.__dycCapture) {
+    const pending = ticket();
+    hub.__dycCapture = {...pending, result:null, templates:{}};
   }
-  window.__dycReplay = function(cfg) {
-    if (!window.__dycArm) return false;
-    const source = templates[cfg.root ? 'reply' : 'list'] || (cfg.root && templates.list);
-    if (!source) return false;
-    const target = new URL(source);
-    target.pathname = cfg.root ? '/aweme/v1/web/comment/list/reply/' : '/aweme/v1/web/comment/list/';
-    const videoKey = cfg.root && target.searchParams.has('item_id') ? 'item_id' : 'aweme_id';
-    target.searchParams.set(videoKey, cfg.video);
-    target.searchParams.set('cursor', cfg.cursor);
-    if (cfg.root) target.searchParams.set('comment_id', cfg.root);
-    for (const key of [...target.searchParams.keys()]) {
-      if (['a_bogus', 'x-bogus', '_signature'].includes(key.toLowerCase())) target.searchParams.delete(key);
-      else if (key.toLowerCase() === 'mstoken') {
-        let value = null;
-        try { value = localStorage.getItem('xmst'); } catch (e) {}
-        if (value) target.searchParams.set(key, value);
-      }
-    }
-    replaying = true;
-    try { const xhr = new XMLHttpRequest(); xhr.open('GET', target.href); xhr.send(); }
-    finally { replaying = false; }
+  const state = hub.__dycCapture;
+  const read = () => {
+    const pending = ticket();
+    if (pending.epoch === state.epoch && pending.sent) state.sent = true;
+    return {sent:!!state.sent, result:state.result};
+  };
+  const active = () => {
+    read();
+    const pending = ticket();
+    return !!state.epoch && pending.epoch === state.epoch && pending.expires > Date.now() && !state.sent && !state.result;
+  };
+  const onTarget = () => {
+    const page = new URL(hub.location.href);
+    return hub === window.top && page.protocol === 'https:' && ['www.douyin.com', 'douyin.com'].includes(page.hostname) && !page.port &&
+      (page.pathname === '/video/' + state.video ||
+       (page.searchParams.getAll('modal_id').length === 1 && page.searchParams.get('modal_id') === state.video));
+  };
+  hub.__dycRead = read;
+  hub.__dycBegin = cfg => {
+    if (!/^\d{1,80}$/.test(cfg.video) || !/^\d*$/.test(cfg.root) || !/^\d+$/.test(cfg.cursor)) return false;
+    const pending = {epoch:Date.now() + ':' + Math.random(), video:cfg.video, root:cfg.root,
+                     cursor:cfg.cursor, expires:Date.now() + 28000, sent:false};
+    try { hub.sessionStorage.setItem(storageKey, JSON.stringify(pending)); } catch (e) { return false; }
+    if (state.video !== cfg.video) state.templates = {};
+    Object.assign(state, pending, {result:null, replay:null});
     return true;
   };
-  function consume(url){
+  hub.__dycClose = () => {
+    const snapshot = read();
+    if (ticket().epoch === state.epoch) hub.sessionStorage.removeItem(storageKey);
+    state.epoch = null;
+    state.replay = null;
+    return snapshot;
+  };
+  hub.__dycReenter = () => {
+    if (!active() || !onTarget()) return false;
+    // shortcut: modal_id must trigger the site's client loader; recalibrate if a live page still serves only SSR comments.
+    hub.location.assign('/jingxuan?modal_id=' + state.video);
+    return true;
+  };
+  hub.__dycReplay = cfg => {
+    if (!active() || !onTarget() || cfg.video !== state.video || cfg.root !== state.root || cfg.cursor !== state.cursor) return false;
+    const source = state.templates[cfg.root ? 'reply' : 'list'];
     try {
-      const target = new URL(url, location.href);
-      const path = target.pathname;
-      if (path !== '/aweme/v1/web/comment/list/' && path !== '/aweme/v1/web/comment/list/reply/') return null;
-      if (target.origin !== new URL(location.href).origin) return false;
-      if (!window.__dycArm) return false;
-      if (window.__dycVideo && (target.searchParams.get('aweme_id') || target.searchParams.get('item_id')) !== window.__dycVideo) return false;
-      const root = window.__dycRoot || null;
-      if (root ? path !== '/aweme/v1/web/comment/list/reply/' || target.searchParams.get('comment_id') !== root
-               : path !== '/aweme/v1/web/comment/list/') return false;
-      window.__dycArm = false;
-      return true;
-    } catch (e) { return null; }
+      if (!source || source.frame.closed || source.frame.document !== source.document || !source.wrapped()) return false;
+    } catch (e) { return false; }
+    const target = new URL(source.url);
+    const edits = new Map([[source.videoKey, cfg.video], ['cursor', cfg.cursor]]);
+    if (cfg.root) edits.set('comment_id', cfg.root);
+    // Drop stale signatures so the page SDK can resign; refresh msToken from xmst when present.
+    const query = target.search.slice(1).split('&').map(part => {
+      const key = new URLSearchParams(part).keys().next().value;
+      if (['a_bogus', 'x-bogus', '_signature'].includes((key || '').toLowerCase())) return null;
+      if ((key || '').toLowerCase() === 'mstoken') {
+        let token = null;
+        try { token = localStorage.getItem('xmst'); } catch (e) {}
+        if (token) { edits.delete(key); return part.split('=')[0] + '=' + encodeURIComponent(token); }
+      }
+      if (!edits.has(key)) return part;
+      const value = edits.get(key); edits.delete(key);
+      return part.split('=')[0] + '=' + encodeURIComponent(value);
+    }).filter(part => part != null);
+    for (const [key, value] of edits) query.push(key + '=' + encodeURIComponent(value));
+    target.search = query.join('&');
+    const xhr = new source.frame.XMLHttpRequest();
+    xhr.open('GET', target.href);
+    if (!active()) return false;
+    // Reserve before dispatch so an SDK replacement cannot send uncounted replays.
+    const pending = ticket();
+    pending.sent = true;
+    hub.sessionStorage.setItem(storageKey, JSON.stringify(pending));
+    state.sent = true;
+    state.replay = xhr;
+    xhr.__dycReplayEpoch = state.epoch;
+    try { xhr.send(); }
+    catch (e) { finish(state.epoch, {kind:'network'}); }
+    return true;
+  };
+  function consume(method, url, body, xhr){
+    let target;
+    try { target = new URL(url, location.href); } catch (e) { return null; }
+    const match = /^\/aweme\/v\d+\/web\/comment\/list(\/reply)?\/?$/.exec(target.pathname);
+    if (!match) return null;
+    if (xhr && xhr.__dycReplayEpoch && xhr.__dycReplayEpoch !== state.epoch) return false;
+    const reserved = xhr && state.replay === xhr && ticket().epoch === state.epoch && ticket().expires > Date.now();
+    if (target.origin !== new URL(hub.location.href).origin || (!reserved && !active()) || !onTarget()) return false;
+    const params = target.searchParams;
+    if (['aweme_id', 'item_id', 'comment_id', 'cursor'].some(key => params.getAll(key).length > 1)) return false;
+    const videoKeys = ['aweme_id', 'item_id'].filter(key => params.has(key));
+    if (videoKeys.length !== 1 || params.get(videoKeys[0]) !== state.video) return false;
+    if (state.root ? !match[1] || params.get('comment_id') !== state.root : match[1] || params.has('comment_id')) return false;
+    // shortcut: only URL-parameter GET templates are replayable; add body handling after an official request is observed.
+    if (String(method).toUpperCase() !== 'GET' || (body != null && body !== '')) {
+      state.result = JSON.stringify({kind:'unsupported_request'});
+      return false;
+    }
+    const kind = match[1] ? 'reply' : 'list';
+    const previous = state.templates[kind];
+    try {
+      if (previous && (previous.frame.closed || previous.frame.document !== previous.document)) delete state.templates[kind];
+    } catch (e) { delete state.templates[kind]; }
+    state.templates[kind] ||= {url:target.href, videoKey:videoKeys[0], frame:window, document,
+      wrapped:() => window.XMLHttpRequest !== xhrType || window.XMLHttpRequest.prototype.open !== guardedOpen ||
+                    window.XMLHttpRequest.prototype.send !== guardedSend};
+    if ((params.get('cursor') || '0') !== state.cursor) return false;
+    const pending = ticket();
+    pending.sent = true;
+    try { hub.sessionStorage.setItem(storageKey, JSON.stringify(pending)); } catch (e) { return false; }
+    state.sent = true;
+    state.replay = null;
+    return state.epoch;
   }
+  const finish = (epoch, result) => {
+    if (state.epoch === epoch && ticket().epoch === epoch) state.result = JSON.stringify(result);
+  };
   const rawFetch = window.fetch;
   window.fetch = function(input, init){
-    const allowed = consume(typeof input === 'string' ? input : input && (input.url || input.href));
-    if (allowed === false) return Promise.reject(new TypeError('blocked'));
-    const promise = rawFetch.apply(this, arguments);
     const signal = (init && init.signal) || (input && input.signal);
-    if (allowed && !(signal && signal.aborted)) { window.__dycSent = true; remember(typeof input === 'string' ? input : input && (input.url || input.href)); }
-    if (allowed) promise.then(r => {
-      if (r.redirected || r.type === 'opaqueredirect') window.__dycResult = JSON.stringify({kind:'opaqueredirect', status:r.status});
-      else r.clone().text().then(text => { window.__dycResult = JSON.stringify({status:r.status, text}); },
-        () => { window.__dycResult = JSON.stringify({kind:'network'}); });
-    }, () => { window.__dycResult = JSON.stringify({kind:'network'}); });
+    if (signal && signal.aborted) return rawFetch.apply(this, arguments);
+    const url = typeof input === 'string' ? input : input && (input.url || input.href);
+    const epoch = consume((init && init.method) || (input && input.method) || 'GET', url,
+                          init && init.body != null ? init.body : input && input.body);
+    if (epoch === false) return Promise.reject(new TypeError('blocked'));
+    let promise;
+    try { promise = rawFetch.apply(this, arguments); }
+    catch (e) { if (epoch) finish(epoch, {kind:'network'}); throw e; }
+    if (epoch) promise.then(r => {
+      if (r.redirected || r.type === 'opaqueredirect') finish(epoch, {kind:'opaqueredirect', status:r.status});
+      else r.clone().text().then(text => finish(epoch, {status:r.status, text}), () => finish(epoch, {kind:'network'}));
+    }, () => finish(epoch, {kind:'network'}));
     return promise;
   };
+  const xhrType = XMLHttpRequest;
   const open = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url){
+  const guardedOpen = XMLHttpRequest.prototype.open = function(method, url){
+    this.__dycMethod = method;
     this.__dycUrl = url;
     return open.apply(this, arguments);
   };
   const send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send = function(){
-    const allowed = consume(this.__dycUrl);
-    if (allowed === false) { this.abort(); return; }
-    if (allowed) this.addEventListener('loadend', () => {
-      try { window.__dycResult = JSON.stringify(this.responseURL && new URL(this.responseURL).pathname !== new URL(this.__dycUrl, location.href).pathname ? {kind:'opaqueredirect', status:this.status} : {status:this.status, text:this.responseText}); }
-      catch (e) { window.__dycResult = JSON.stringify({kind:'network'}); }
+  const guardedSend = XMLHttpRequest.prototype.send = function(body){
+    const epoch = consume(this.__dycMethod, this.__dycUrl, body, this);
+    if (epoch === false) { this.abort(); return; }
+    if (epoch) this.addEventListener('loadend', () => {
+      try { finish(epoch, this.responseURL && new URL(this.responseURL).href !== new URL(this.__dycUrl, location.href).href
+        ? {kind:'opaqueredirect', status:this.status} : {status:this.status, text:this.responseText}); }
+      catch (e) { finish(epoch, {kind:'network'}); }
     }, {once:true});
-    const result = send.apply(this, arguments);
-    if (allowed) { window.__dycSent = true; remember(this.__dycUrl); }
-    return result;
+    try { return send.apply(this, arguments); }
+    catch (e) { if (epoch) finish(epoch, {kind:'network'}); throw e; }
   };
   window.__dycHubGuard = true;
 })();"""
 
-ARM_JS = """(cfg => {
-  if (!window.__dycHubGuard) return false;
-  sessionStorage.setItem('__dycNavigate', '1');
-  sessionStorage.setItem('__dycVideo', cfg.video);
-  sessionStorage.setItem('__dycRoot', cfg.root);
-  window.__dycVideo = cfg.video; window.__dycRoot = cfg.root;
-  window.__dycSent = false; window.__dycResult = null; window.__dycArm = true;
-  return true;
-})"""
+ARM_JS = """(cfg => !!(window.__dycHubGuard && window.__dycBegin && window.__dycBegin(cfg)))"""
+READ_JS = "JSON.stringify(window.__dycRead ? window.__dycRead() : {})"
+CLOSE_JS = "JSON.stringify(window.__dycClose ? window.__dycClose() : {})"
+REPLAY_JS = "(cfg => !!(window.__dycReplay && window.__dycReplay(cfg)))"
+REENTER_JS = "!!(window.__dycReenter && window.__dycReenter())"
 
 # shortcut: reply matching requires unique visible comment text and nickname; upgrade when stable comment IDs are observed in the DOM.
 SCROLL_JS = r"""(cfg => {
@@ -180,13 +255,12 @@ SCROLL_JS = r"""(cfg => {
   });
   const button = rows.length === 1 ? rows[0].children[1] : null;
   if (document.readyState !== 'complete' && !box && !button) return false;
-  if (window.__dycSent || window.__dycResult) return true;
-  window.__dycRoot = cfg.root;
-  window.__dycArm = true;
+  const state = window.__dycRead ? window.__dycRead() : {};
+  if (state.sent || state.result) return true;
   if (!box) {
     if (!button || cfg.opened) return false;
     button.click();
-    return cfg.root ? "opened" : true;
+    return "opened";
   }
   if (cfg.root) {
     const items = [...box.querySelectorAll('[data-e2e="comment-item"]')].filter(e =>
@@ -265,21 +339,23 @@ class QtCommentTransport:
             raise Stop(2, "video_page_budget")
         self.budget.counter.check_start()
         sent = False
+        outcome = {}
         try:
+            self._evaluate(GUARD_JS)
+            cfg = {"video": video_id, "root": root or "", "cursor": cursor}
+            if self._evaluate(ARM_JS, cfg) is not True:
+                raise RuntimeError("Comment guard could not be armed")
             if self.video_id != video_id:
-                self._evaluate(GUARD_JS)
-                armed = self._evaluate(ARM_JS, {"video": video_id, "root": root or ""})
-                if armed is not True:
-                    raise RuntimeError("Comment guard could not be armed")
                 self.window.load_url(self.video_url)
                 self.video_id = video_id
-            else:
-                self._evaluate("window.__dycSent = false; window.__dycResult = null")
             acted = False
             opened = False
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                state = _coerce_fetch(self._evaluate("JSON.stringify({sent:window.__dycSent, result:window.__dycResult})"))
+            reentered = False
+            ready_at = None
+            deadline = time.monotonic() + 28
+            listen_deadline = deadline
+            while (now := time.monotonic()) < min(deadline, listen_deadline):
+                state = _coerce_fetch(self._evaluate(READ_JS))
                 if state.get("sent") and not sent:
                     sent = True
                     self.budget.reserve()
@@ -293,27 +369,45 @@ class QtCommentTransport:
                     result["kind"] = "login"
                 if result:
                     result["request_sent"] = sent
-                    return result
-                if not acted and not sent and on_site and page.get("ready") == "complete" and page.get("path") == f"/video/{video_id}":
-                    if self._evaluate("(cfg => { window.__dycRoot = cfg.root; window.__dycArm = true; const sent = window.__dycReplay && window.__dycReplay(cfg); if (!sent) window.__dycArm = false; return !!sent; })", {"video": video_id, "root": root or "", "cursor": cursor}) is True:
-                        acted = True
-                        continue
-                    comment = getattr(self, "video", None)
-                    comment = comment.comments.get(root) if comment and root else None
-                    action = self._evaluate(SCROLL_JS, {"root": root or "", "text": comment.text if comment else "",
-                                                        "nickname": comment.nickname if comment else "", "opened": opened})
-                    opened = opened or action == "opened"
-                    acted = action is True
+                    outcome = result
+                    return outcome
+                target_ready = on_site and page.get("ready") == "complete" and (
+                    page.get("path") == f"/video/{video_id}" or page.get("modal_id") == video_id)
+                if target_ready:
+                    if ready_at is None:
+                        ready_at = now
+                        listen_deadline = min(deadline, now + 20)
+                    if not sent:
+                        if self._evaluate(REPLAY_JS, cfg) is True:
+                            acted = True
+                            continue
+                    if not acted and not sent:
+                        comment = getattr(self, "video", None)
+                        comment = comment.comments.get(root) if comment and root else None
+                        action = self._evaluate(SCROLL_JS, {"root": root or "", "text": comment.text if comment else "",
+                                                          "nickname": comment.nickname if comment else "", "opened": opened})
+                        opened = opened or action == "opened"
+                        acted = action is True
+                    if not sent and not reentered and root is None and cursor == "0" and now - ready_at >= 5:
+                        reentered = True
+                        if self._evaluate(REENTER_JS) is True:
+                            acted = opened = False
+                            ready_at = None
+                            listen_deadline = deadline
                 await asyncio.sleep(0.1)
-            return {"kind": "timeout" if sent else "no_request", "request_sent": sent}
+            outcome = {"kind": "timeout" if sent else "no_request", "request_sent": sent}
+            return outcome
         finally:
-            if not sent:
-                state = _coerce_fetch(self._evaluate("JSON.stringify({sent:window.__dycSent})"))
-                if state.get("sent"):
-                    self.budget.reserve()
-                    self.calls += 1
-                    sent = True
-            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate'); sessionStorage.removeItem('__dycVideo'); sessionStorage.removeItem('__dycRoot')")
+            state = _coerce_fetch(self._evaluate(CLOSE_JS))
+            if not sent and state.get("sent"):
+                self.budget.reserve()
+                self.calls += 1
+                sent = True
+                outcome["request_sent"] = True
+                if outcome.get("kind") == "no_request":
+                    outcome.clear()
+                    outcome.update(_coerce_fetch(state["result"]) if state.get("result") else {"kind": "timeout"})
+                    outcome["request_sent"] = True
             if sent:
                 self.pacer.completed()
 
@@ -450,8 +544,8 @@ class CollectJob:
             self.metadata = {"stop_reason": None, "http_status": result.get("status") if type(result.get("status")) is int else None,
                              "response_fields": keys, "request_sent": sent}
             try:
-                if result.get("kind") == "no_request":
-                    raise Stop(2, "no_request")
+                if result.get("kind") in ("no_request", "unsupported_request"):
+                    raise Stop(2, result["kind"])
                 return site.decode_page(result)
             except Stop as error:
                 self.metadata["stop_reason"] = error.reason
