@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+import time
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -265,7 +266,7 @@ class Api:
             return window
         import webview
         from dyc.hub_comments import LOGIN_URL, GUARD_JS
-        window = webview.create_window('抖音评论', LOGIN_URL,
+        window = webview.create_window('抖音评论', hidden=True,
                                        width=1000, height=800, x=60, y=60, text_select=True)
         def closed():
             if getattr(self, '_dyc_window', None) is window:
@@ -273,6 +274,8 @@ class Api:
         window.events.closed += closed
         try:
             self._install_comments_guard(window, GUARD_JS)
+            window.load_url(LOGIN_URL)
+            window.show()
         except Exception:
             try:
                 window.destroy()
@@ -284,13 +287,13 @@ class Api:
 
     def _install_comments_guard(self, window, source):
         """Inject the request guard at document start when the Qt view exists."""
-        view = getattr(getattr(window, 'native', None), 'webview', None)
-        if view is None:
-            raise RuntimeError('Comments document-start injection unavailable')
         from login_driver import QtDispatcher
         from PySide6.QtWebEngineCore import QWebEngineScript
 
         def install():
+            view = getattr(getattr(window, 'native', None), 'webview', None)
+            if view is None:
+                return False
             script = QWebEngineScript()
             script.setName('dyc-comments-guard')
             script.setSourceCode(source)
@@ -298,7 +301,14 @@ class Api:
             script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
             script.setRunsOnSubFrames(True)
             view.page().scripts().insert(script)
-        QtDispatcher().call(install)
+            return True
+
+        dispatcher = QtDispatcher()
+        deadline = time.monotonic() + 5
+        while not dispatcher.call(install):
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Comments document-start injection unavailable')
+            time.sleep(.05)
 
     def _comments_hub(self):
         from dyc.hub_comments import CommentsHub
