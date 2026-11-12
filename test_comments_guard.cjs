@@ -2,6 +2,7 @@ const assert = require('assert');
 const vm = require('vm');
 const {execFileSync} = require('child_process');
 const guard = execFileSync('python3', ['-c', 'from dyc.hub_comments import GUARD_JS; print(GUARD_JS)'], {env:{...process.env, PYTHONPATH:'tools/douyin_comments'}, encoding:'utf8'});
+const arm = execFileSync('python3', ['-c', 'from dyc.hub_comments import ARM_JS; print(ARM_JS)'], {env:{...process.env, PYTHONPATH:'tools/douyin_comments'}, encoding:'utf8'});
 let calls = 0, urls = [];
 class XHR {
   open(method, url) { this.url = url; }
@@ -15,6 +16,47 @@ context.fetch = () => { calls++; return Promise.resolve({status:200, clone:()=>(
 vm.runInNewContext(guard, context);
 (async () => {
   const base = '/aweme/v1/web/comment/list/';
+  const storage = new Map();
+  const sessionStorage = {getItem:k=>storage.get(k) ?? null, setItem:(k,v)=>storage.set(k,v), removeItem:k=>storage.delete(k)};
+  function documentContext() {
+    class PageXHR {
+      open(method, url) { this.url = url; PageXHR.lastUrl = url; }
+      addEventListener(event, callback) { this.callback = callback; }
+      send() { this.status = 200; this.responseText = '{}'; this.callback(); }
+      abort() { this.aborted = true; }
+    }
+    const ctx = {URL, location:{href:'https://www.douyin.com/jingxuan'}, sessionStorage, localStorage:{getItem:()=>null}, XMLHttpRequest:PageXHR, fetch:()=>Promise.resolve({status:200, clone:()=>({text:()=>Promise.resolve('{}')})})};
+    ctx.window = ctx;
+    return ctx;
+  }
+  const page = documentContext();
+  vm.runInNewContext(guard, page);
+  const armPage = vm.runInNewContext(arm, page);
+  assert(armPage({video:'100', root:''}));
+  page.location.href = 'https://www.douyin.com/video/100';
+  const wrong = new page.XMLHttpRequest(); wrong.open('GET', base + '?aweme_id=101'); wrong.send();
+  assert(wrong.aborted); assert.equal(page.__dycSent, false);
+  const first = new page.XMLHttpRequest(); first.open('GET', base + '?aweme_id=100'); first.send();
+  assert.equal(page.__dycSent, true); assert.equal(JSON.parse(page.__dycResult).status, 200);
+  assert(armPage({video:'100', root:'5'}));
+  const replyFirst = new page.XMLHttpRequest(); replyFirst.open('GET', base + 'reply/?item_id=100&comment_id=5&reply_marker=kept'); replyFirst.send();
+  assert.equal(page.__dycSent, true); assert.equal(JSON.parse(page.__dycResult).status, 200);
+  assert(armPage({video:'100', root:'5'}));
+  assert(page.__dycReplay({video:'100', root:'5', cursor:'1'}));
+  assert.equal(page.__dycSent, true);
+  assert.equal(new URL(page.XMLHttpRequest.lastUrl).searchParams.get('reply_marker'), 'kept');
+  assert(armPage({video:'200', root:''}));
+  const previous = new page.XMLHttpRequest(); previous.open('GET', base + '?aweme_id=100'); previous.send();
+  assert(previous.aborted); assert.equal(page.__dycSent, false);
+  const fresh = documentContext();
+  vm.runInNewContext(guard, fresh);
+  const freshWrong = new fresh.XMLHttpRequest(); freshWrong.open('GET', base + '?aweme_id=100'); freshWrong.send();
+  assert(freshWrong.aborted); assert.equal(fresh.__dycSent, false);
+  const freshFirst = new fresh.XMLHttpRequest(); freshFirst.open('GET', base + '?aweme_id=200'); freshFirst.send();
+  assert.equal(fresh.__dycSent, true); assert.equal(JSON.parse(fresh.__dycResult).status, 200);
+  assert(fresh.__dycReplay({video:'200', root:'', cursor:'1'}) === false);
+  fresh.__dycArm = true;
+  assert(fresh.__dycReplay({video:'200', root:'', cursor:'1'}));
   await assert.rejects(context.fetch(base));
   await assert.rejects(context.fetch(new URL(base, context.location.href)));
   assert.equal(calls, 0);

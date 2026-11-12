@@ -56,11 +56,12 @@ PROBE_JS = """JSON.stringify((() => {
 # One page request is admitted per scheduler slice; responses stay in page memory.
 GUARD_JS = """(function(){
   if (window.__dycHubGuard) return;
-  window.__dycHubGuard = true;
   window.__dycArm = sessionStorage.getItem('__dycNavigate') === '1';
   sessionStorage.removeItem('__dycNavigate');
-  const video = sessionStorage.getItem('__dycVideo');
+  window.__dycVideo = sessionStorage.getItem('__dycVideo');
   sessionStorage.removeItem('__dycVideo');
+  window.__dycRoot = sessionStorage.getItem('__dycRoot');
+  sessionStorage.removeItem('__dycRoot');
   window.__dycResult = null;
   window.__dycSent = false;
   const templates = {};
@@ -100,7 +101,7 @@ GUARD_JS = """(function(){
       if (path !== '/aweme/v1/web/comment/list/' && path !== '/aweme/v1/web/comment/list/reply/') return null;
       if (target.origin !== new URL(location.href).origin) return false;
       if (!window.__dycArm) return false;
-      if (video && (target.searchParams.get('aweme_id') || target.searchParams.get('item_id')) !== video) return false;
+      if (window.__dycVideo && (target.searchParams.get('aweme_id') || target.searchParams.get('item_id')) !== window.__dycVideo) return false;
       const root = window.__dycRoot || null;
       if (root ? path !== '/aweme/v1/web/comment/list/reply/' || target.searchParams.get('comment_id') !== root
                : path !== '/aweme/v1/web/comment/list/') return false;
@@ -139,7 +140,18 @@ GUARD_JS = """(function(){
     if (allowed) { window.__dycSent = true; remember(this.__dycUrl); }
     return result;
   };
+  window.__dycHubGuard = true;
 })();"""
+
+ARM_JS = """(cfg => {
+  if (!window.__dycHubGuard) return false;
+  sessionStorage.setItem('__dycNavigate', '1');
+  sessionStorage.setItem('__dycVideo', cfg.video);
+  sessionStorage.setItem('__dycRoot', cfg.root);
+  window.__dycVideo = cfg.video; window.__dycRoot = cfg.root;
+  window.__dycSent = false; window.__dycResult = null; window.__dycArm = true;
+  return true;
+})"""
 
 # shortcut: reply matching requires unique visible comment text and nickname; upgrade when stable comment IDs are observed in the DOM.
 SCROLL_JS = r"""(cfg => {
@@ -255,7 +267,10 @@ class QtCommentTransport:
         sent = False
         try:
             if self.video_id != video_id:
-                self._evaluate("window.__dycSent = false; window.__dycResult = null; sessionStorage.setItem('__dycNavigate', '1'); sessionStorage.setItem('__dycVideo', " + json.dumps(video_id) + ")")
+                self._evaluate(GUARD_JS)
+                armed = self._evaluate(ARM_JS, {"video": video_id, "root": root or ""})
+                if armed is not True:
+                    raise RuntimeError("Comment guard could not be armed")
                 self.window.load_url(self.video_url)
                 self.video_id = video_id
             else:
@@ -298,7 +313,7 @@ class QtCommentTransport:
                     self.budget.reserve()
                     self.calls += 1
                     sent = True
-            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate'); sessionStorage.removeItem('__dycVideo')")
+            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate'); sessionStorage.removeItem('__dycVideo'); sessionStorage.removeItem('__dycRoot')")
             if sent:
                 self.pacer.completed()
 
