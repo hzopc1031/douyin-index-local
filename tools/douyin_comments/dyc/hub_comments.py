@@ -59,14 +59,48 @@ GUARD_JS = """(function(){
   window.__dycHubGuard = true;
   window.__dycArm = sessionStorage.getItem('__dycNavigate') === '1';
   sessionStorage.removeItem('__dycNavigate');
+  const video = sessionStorage.getItem('__dycVideo');
+  sessionStorage.removeItem('__dycVideo');
   window.__dycResult = null;
   window.__dycSent = false;
+  const templates = {};
+  let replaying = false;
+  function remember(url) {
+    if (replaying) return;
+    const target = new URL(url, location.href);
+    templates[target.pathname.endsWith('/reply/') ? 'reply' : 'list'] ||= target.href;
+  }
+  window.__dycReplay = function(cfg) {
+    if (!window.__dycArm) return false;
+    const source = templates[cfg.root ? 'reply' : 'list'] || (cfg.root && templates.list);
+    if (!source) return false;
+    const target = new URL(source);
+    target.pathname = cfg.root ? '/aweme/v1/web/comment/list/reply/' : '/aweme/v1/web/comment/list/';
+    const videoKey = cfg.root && target.searchParams.has('item_id') ? 'item_id' : 'aweme_id';
+    target.searchParams.set(videoKey, cfg.video);
+    target.searchParams.set('cursor', cfg.cursor);
+    if (cfg.root) target.searchParams.set('comment_id', cfg.root);
+    for (const key of [...target.searchParams.keys()]) {
+      if (['a_bogus', 'x-bogus', '_signature'].includes(key.toLowerCase())) target.searchParams.delete(key);
+      else if (key.toLowerCase() === 'mstoken') {
+        let value = null;
+        try { value = localStorage.getItem('xmst'); } catch (e) {}
+        if (value) target.searchParams.set(key, value);
+      }
+    }
+    replaying = true;
+    try { const xhr = new XMLHttpRequest(); xhr.open('GET', target.href); xhr.send(); }
+    finally { replaying = false; }
+    return true;
+  };
   function consume(url){
     try {
       const target = new URL(url, location.href);
       const path = target.pathname;
       if (path !== '/aweme/v1/web/comment/list/' && path !== '/aweme/v1/web/comment/list/reply/') return null;
+      if (target.origin !== new URL(location.href).origin) return false;
       if (!window.__dycArm) return false;
+      if (video && (target.searchParams.get('aweme_id') || target.searchParams.get('item_id')) !== video) return false;
       const root = window.__dycRoot || null;
       if (root ? path !== '/aweme/v1/web/comment/list/reply/' || target.searchParams.get('comment_id') !== root
                : path !== '/aweme/v1/web/comment/list/') return false;
@@ -80,7 +114,7 @@ GUARD_JS = """(function(){
     if (allowed === false) return Promise.reject(new TypeError('blocked'));
     const promise = rawFetch.apply(this, arguments);
     const signal = (init && init.signal) || (input && input.signal);
-    if (allowed && !(signal && signal.aborted)) window.__dycSent = true;
+    if (allowed && !(signal && signal.aborted)) { window.__dycSent = true; remember(typeof input === 'string' ? input : input && (input.url || input.href)); }
     if (allowed) promise.then(r => {
       if (r.redirected || r.type === 'opaqueredirect') window.__dycResult = JSON.stringify({kind:'opaqueredirect', status:r.status});
       else r.clone().text().then(text => { window.__dycResult = JSON.stringify({status:r.status, text}); },
@@ -102,7 +136,7 @@ GUARD_JS = """(function(){
       catch (e) { window.__dycResult = JSON.stringify({kind:'network'}); }
     }, {once:true});
     const result = send.apply(this, arguments);
-    if (allowed) window.__dycSent = true;
+    if (allowed) { window.__dycSent = true; remember(this.__dycUrl); }
     return result;
   };
 })();"""
@@ -119,7 +153,20 @@ SCROLL_JS = r"""(cfg => {
   const text = document.body ? (document.body.innerText || '') : '';
   if (find(risk) || ['安全验证', '身份验证', '使用原设备'].some(t => text.includes(t))) return false;
   const box = find('[data-e2e="comment-list"]');
-  const button = find('[data-e2e="feed-comment-icon"], [data-e2e="comment-icon"], [data-e2e="comment-count"]');
+  let button = find('[data-e2e*="comment"][data-e2e*="icon"], [data-e2e="comment-count"]');
+  if (!button) {
+    // shortcut: the action row has four icon items below the video; upgrade when stable control identifiers are available.
+    const player = find('video');
+    const playerRect = player && player.getBoundingClientRect();
+    const rows = [...document.querySelectorAll('div, nav')].filter(e => {
+      const items = [...e.children], rect = e.getBoundingClientRect();
+      return playerRect && rect.top >= playerRect.bottom && rect.top - playerRect.bottom < 300 &&
+        rect.left >= playerRect.left && rect.right <= playerRect.right && visible(e) && items.length === 4 && items.every(visible) &&
+        items.slice(0, 3).every(x => /^\s*\d+\s*$/.test(x.innerText || '') && x.querySelector('svg, img')) &&
+        /分享/.test(items[3].innerText || '') && items[3].querySelector('svg, img');
+    });
+    if (rows.length === 1) button = rows[0].children[1];
+  }
   if (document.readyState !== 'complete' && !box && !button) return false;
   if (window.__dycSent || window.__dycResult) return true;
   window.__dycRoot = cfg.root;
@@ -208,7 +255,7 @@ class QtCommentTransport:
         sent = False
         try:
             if self.video_id != video_id:
-                self._evaluate("window.__dycSent = false; window.__dycResult = null; sessionStorage.setItem('__dycNavigate', '1')")
+                self._evaluate("window.__dycSent = false; window.__dycResult = null; sessionStorage.setItem('__dycNavigate', '1'); sessionStorage.setItem('__dycVideo', " + json.dumps(video_id) + ")")
                 self.window.load_url(self.video_url)
                 self.video_id = video_id
             else:
@@ -232,7 +279,10 @@ class QtCommentTransport:
                 if result:
                     result["request_sent"] = sent
                     return result
-                if not acted and not sent and on_site and page.get("path") == f"/video/{video_id}":
+                if not acted and not sent and on_site and page.get("ready") == "complete" and page.get("path") == f"/video/{video_id}":
+                    if self._evaluate("(cfg => { window.__dycRoot = cfg.root; window.__dycArm = true; const sent = window.__dycReplay && window.__dycReplay(cfg); if (!sent) window.__dycArm = false; return !!sent; })", {"video": video_id, "root": root or "", "cursor": cursor}) is True:
+                        acted = True
+                        continue
                     comment = getattr(self, "video", None)
                     comment = comment.comments.get(root) if comment and root else None
                     action = self._evaluate(SCROLL_JS, {"root": root or "", "text": comment.text if comment else "",
@@ -248,7 +298,7 @@ class QtCommentTransport:
                     self.budget.reserve()
                     self.calls += 1
                     sent = True
-            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate')")
+            self._evaluate("window.__dycArm = false; sessionStorage.removeItem('__dycNavigate'); sessionStorage.removeItem('__dycVideo')")
             if sent:
                 self.pacer.completed()
 
