@@ -82,8 +82,7 @@ GUARD_JS = r"""(function(){
   const onTarget = () => {
     const page = new URL(hub.location.href);
     return hub === window.top && page.protocol === 'https:' && ['www.douyin.com', 'douyin.com'].includes(page.hostname) && !page.port &&
-      (page.pathname === '/video/' + state.video ||
-       (page.searchParams.getAll('modal_id').length === 1 && page.searchParams.get('modal_id') === state.video));
+      page.pathname === '/video/' + state.video;
   };
   hub.__dycRead = read;
   hub.__dycBegin = cfg => {
@@ -101,12 +100,6 @@ GUARD_JS = r"""(function(){
     state.epoch = null;
     state.replay = null;
     return snapshot;
-  };
-  hub.__dycReenter = () => {
-    if (!active() || !onTarget()) return false;
-    // shortcut: modal_id must trigger the site's client loader; recalibrate if a live page still serves only SSR comments.
-    hub.location.assign('/jingxuan?modal_id=' + state.video);
-    return true;
   };
   hub.__dycReplay = cfg => {
     if (!active() || !onTarget() || cfg.video !== state.video || cfg.root !== state.root || cfg.cursor !== state.cursor) return false;
@@ -149,8 +142,9 @@ GUARD_JS = r"""(function(){
   function consume(method, url, body, xhr){
     let target;
     try { target = new URL(url, location.href); } catch (e) { return null; }
-    const match = /^\/aweme\/v\d+\/web\/comment\/list(\/reply)?\/?$/.exec(target.pathname);
-    if (!match) return null;
+    const path = target.pathname;
+    if (!path.includes('/comment/list/')) return null;
+    const reply = path.slice(path.indexOf('/comment/list/') + '/comment/list/'.length).split('/').includes('reply');
     if (xhr && xhr.__dycReplayEpoch && xhr.__dycReplayEpoch !== state.epoch) return false;
     const reserved = xhr && state.replay === xhr && ticket().epoch === state.epoch && ticket().expires > Date.now();
     if (target.origin !== new URL(hub.location.href).origin || (!reserved && !active()) || !onTarget()) return false;
@@ -158,13 +152,13 @@ GUARD_JS = r"""(function(){
     if (['aweme_id', 'item_id', 'comment_id', 'cursor'].some(key => params.getAll(key).length > 1)) return false;
     const videoKeys = ['aweme_id', 'item_id'].filter(key => params.has(key));
     if (videoKeys.length !== 1 || params.get(videoKeys[0]) !== state.video) return false;
-    if (state.root ? !match[1] || params.get('comment_id') !== state.root : match[1] || params.has('comment_id')) return false;
+    if (state.root ? !reply || params.get('comment_id') !== state.root : reply || params.has('comment_id')) return false;
     // shortcut: only URL-parameter GET templates are replayable; add body handling after an official request is observed.
     if (String(method).toUpperCase() !== 'GET' || (body != null && body !== '')) {
       state.result = JSON.stringify({kind:'unsupported_request'});
       return false;
     }
-    const kind = match[1] ? 'reply' : 'list';
+    const kind = reply ? 'reply' : 'list';
     const previous = state.templates[kind];
     try {
       if (previous && (previous.frame.closed || previous.frame.document !== previous.document)) delete state.templates[kind];
@@ -190,7 +184,6 @@ GUARD_JS = r"""(function(){
     const url = typeof input === 'string' ? input : input && (input.url || input.href);
     const epoch = consume((init && init.method) || (input && input.method) || 'GET', url,
                           init && init.body != null ? init.body : input && input.body);
-    if (epoch === false) return Promise.reject(new TypeError('blocked'));
     let promise;
     try { promise = rawFetch.apply(this, arguments); }
     catch (e) { if (epoch) finish(epoch, {kind:'network'}); throw e; }
@@ -210,7 +203,6 @@ GUARD_JS = r"""(function(){
   const send = XMLHttpRequest.prototype.send;
   const guardedSend = XMLHttpRequest.prototype.send = function(body){
     const epoch = consume(this.__dycMethod, this.__dycUrl, body, this);
-    if (epoch === false) { this.abort(); return; }
     if (epoch) this.addEventListener('loadend', () => {
       try { finish(epoch, this.responseURL && new URL(this.responseURL).href !== new URL(this.__dycUrl, location.href).href
         ? {kind:'opaqueredirect', status:this.status} : {status:this.status, text:this.responseText}); }
@@ -226,7 +218,7 @@ ARM_JS = """(cfg => !!(window.__dycHubGuard && window.__dycBegin && window.__dyc
 READ_JS = "JSON.stringify(window.__dycRead ? window.__dycRead() : {})"
 CLOSE_JS = "JSON.stringify(window.__dycClose ? window.__dycClose() : {})"
 REPLAY_JS = "(cfg => !!(window.__dycReplay && window.__dycReplay(cfg)))"
-REENTER_JS = "!!(window.__dycReenter && window.__dycReenter())"
+REENTER_JS = "(location.reload(), true)"
 
 # shortcut: reply matching requires unique visible comment text and nickname; upgrade when stable comment IDs are observed in the DOM.
 SCROLL_JS = r"""(cfg => {
@@ -255,6 +247,7 @@ SCROLL_JS = r"""(cfg => {
   });
   const button = rows.length === 1 ? rows[0].children[1] : null;
   if (document.readyState !== 'complete' && !box && !button) return false;
+  if (cfg.afterReload) { if (!box && button) button.click(); return true; }
   const state = window.__dycRead ? window.__dycRead() : {};
   if (state.sent || state.result) return true;
   if (!box) {
@@ -340,13 +333,12 @@ class QtCommentTransport:
         self.budget.counter.check_start()
         sent = False
         outcome = {}
+        armed = False
         try:
-            self._evaluate(GUARD_JS)
             cfg = {"video": video_id, "root": root or "", "cursor": cursor}
-            if self._evaluate(ARM_JS, cfg) is not True:
-                raise RuntimeError("Comment guard could not be armed")
-            if self.video_id != video_id:
-                self.window.load_url(self.video_url)
+            navigated = self.video_id != video_id
+            if navigated:
+                self.window.load_url(f"https://www.douyin.com/video/{video_id}")
                 self.video_id = video_id
             acted = False
             opened = False
@@ -355,7 +347,7 @@ class QtCommentTransport:
             deadline = time.monotonic() + 28
             listen_deadline = deadline
             while (now := time.monotonic()) < min(deadline, listen_deadline):
-                state = _coerce_fetch(self._evaluate(READ_JS))
+                state = _coerce_fetch(self._evaluate(READ_JS)) if armed else {}
                 if state.get("sent") and not sent:
                     sent = True
                     self.budget.reserve()
@@ -368,12 +360,30 @@ class QtCommentTransport:
                 elif on_site and page.get("ready") == "complete" and page.get("login") and not page.get("account"):
                     result["kind"] = "login"
                 if result:
+                    if reentered and sent and not result.get("kind"):
+                        try:
+                            site.decode_page(result)
+                        except Stop:
+                            pass
+                        else:
+                            if not (on_site and page.get("ready") == "complete" and page.get("path") == f"/video/{video_id}"):
+                                await asyncio.sleep(0.1)
+                                continue
+                            self._evaluate(SCROLL_JS, {"root": "", "text": "", "nickname": "", "opened": False,
+                                                       "afterReload": True})
                     result["request_sent"] = sent
                     outcome = result
                     return outcome
-                target_ready = on_site and page.get("ready") == "complete" and (
-                    page.get("path") == f"/video/{video_id}" or page.get("modal_id") == video_id)
+                target_ready = on_site and page.get("ready") == "complete" and page.get("path") == f"/video/{video_id}"
+                if on_site and page.get("ready") == "complete" and not target_ready and not navigated:
+                    self.window.load_url(f"https://www.douyin.com/video/{video_id}")
+                    navigated = True
                 if target_ready:
+                    if not armed:
+                        self._evaluate(GUARD_JS)
+                        if self._evaluate(ARM_JS, cfg) is not True:
+                            raise RuntimeError("Comment guard could not be armed")
+                        armed = True
                     if ready_at is None:
                         ready_at = now
                         listen_deadline = min(deadline, now + 20)
@@ -399,6 +409,8 @@ class QtCommentTransport:
             return outcome
         finally:
             state = _coerce_fetch(self._evaluate(CLOSE_JS))
+            if not armed:
+                state = {}
             if not sent and state.get("sent"):
                 self.budget.reserve()
                 self.calls += 1

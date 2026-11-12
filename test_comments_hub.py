@@ -492,6 +492,8 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             window = FakeWindow()
             states = iter([json.dumps({'sent': True, 'result': json.dumps(_page())})])
             def evaluate(js, arg=None):
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com', 'path':'/video/100'})
                 if js == app_module_comments.ARM_JS:
                     return True
                 if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
@@ -515,6 +517,8 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder:
             budget = Budget(DailyCounter(Path(folder)))
             def evaluate(js, arg=None):
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com', 'path':'/video/100'})
                 if js == app_module_comments.ARM_JS:
                     return True
                 if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
@@ -547,85 +551,65 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((budget.used, budget.counter.usage(), video.pages), (0, 0, 0))
             self.assertFalse(job.metadata['request_sent'])
 
-    async def test_first_navigation_opens_panel_without_request_or_quota(self):
+    async def test_direct_video_then_one_reload_with_persistent_listener(self):
         with tempfile.TemporaryDirectory() as folder:
             budget = Budget(DailyCounter(Path(folder)))
-            window = FakeWindow()
             events = []
+            state = {'sent': False, 'result': None}
+            class Window(FakeWindow):
+                def load_url(self, url):
+                    events.append(('navigate', url))
+                    super().load_url(url)
+            window = Window()
             def evaluate(js, arg=None):
-                if js == app_module_comments.GUARD_JS:
-                    self.assertEqual(window.loaded, [])
-                    events.append("install_guard")
-                if js == app_module_comments.ARM_JS:
-                    self.assertEqual(window.loaded, [])
-                    self.assertEqual(events, ["install_guard"])
-                    self.assertEqual(arg, {"video": "100", "root": "", "cursor": "0"})
-                    events.append("arm_navigation")
-                    return True
                 if js == app_module_comments.PROBE_JS:
-                    return json.dumps({"ready": "complete", "https": True, "host": "www.douyin.com",
-                                       "path": "/video/100", "account": True})
-                if js == app_module_comments.SCROLL_JS:
-                    self.assertEqual(window.loaded, [transport.video_url])
-                    events.append("open")
+                    events.append(('ready',))
+                    return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com',
+                                       'path':'/video/100', 'account':True})
+                if js == app_module_comments.GUARD_JS:
+                    events.append(('install',))
+                if js == app_module_comments.ARM_JS:
+                    events.append(('arm',))
                     return True
-                return json.dumps({"sent": False, "result": None})
+                if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
+                    return json.dumps(state)
+                if js == app_module_comments.REPLAY_JS:
+                    return False
+                if js == app_module_comments.SCROLL_JS:
+                    events.append(('click',))
+                    return True
+                if js == app_module_comments.REENTER_JS:
+                    self.assertEqual(events[:4], [('navigate', 'https://www.douyin.com/video/100'),
+                                                 ('ready',), ('install',), ('arm',)])
+                    events.append(('reload',))
+                    return True
             transport = QtCommentTransport(window, budget, InstantPacer(), evaluate=evaluate)
-            transport.video_url = 'https://www.douyin.com/video/100'
-            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 21]), \
+            transport.video_url = 'https://www.douyin.com/jingxuan?modal_id=100'
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 5, 6, 27, 29]), \
                  patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
                 result = await transport.fetch('100', None, '0')
-            self.assertEqual(events, ["install_guard", "arm_navigation", "open"])
-            self.assertEqual(result, {"kind": "no_request", "request_sent": False})
-            self.assertEqual((budget.used, budget.counter.usage()), (0, 0))
+            self.assertEqual(events.count(('reload',)), 1)
+            self.assertEqual(events.count(('click',)), 2)
+            self.assertEqual(result, {'kind':'no_request', 'request_sent':False})
+            self.assertEqual(budget.used, 0)
 
-    async def test_navigation_refused_when_guard_not_armed(self):
+    async def test_existing_video_session_reopens_video_from_feed(self):
         with tempfile.TemporaryDirectory() as folder:
             window = FakeWindow()
-            transport = QtCommentTransport(window, Budget(DailyCounter(Path(folder))), InstantPacer(),
-                                           evaluate=lambda js, arg=None: False)
-            transport.video_url = 'https://www.douyin.com/video/100'
-            with self.assertRaisesRegex(RuntimeError, 'guard could not be armed'):
+            def evaluate(js, arg=None):
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com',
+                                       'path':'/jingxuan', 'account':True})
+                return None
+            transport = QtCommentTransport(window, Budget(DailyCounter(Path(folder))), InstantPacer(), evaluate=evaluate)
+            transport.video_id = '100'
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 29]), \
+                 patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
                 await transport.fetch('100', None, '0')
-            self.assertEqual(window.loaded, [])
-
-    async def test_open_scroll_and_single_reentry_without_request(self):
-        for root, cursor in ((None, '0'), ('1', '0'), (None, '10')):
-            with self.subTest(root=root, cursor=cursor), tempfile.TemporaryDirectory() as folder:
-                budget = Budget(DailyCounter(Path(folder)))
-                actions = []
-                page = {'ready': 'complete', 'https': True, 'host': 'www.douyin.com',
-                        'path': '/video/100', 'account': True}
-                def evaluate(js, arg=None):
-                    if js == app_module_comments.ARM_JS:
-                        return True
-                    if js == app_module_comments.PROBE_JS:
-                        return json.dumps(page)
-                    if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
-                        return json.dumps({'sent': False, 'result': None})
-                    if js == app_module_comments.REPLAY_JS:
-                        return False
-                    if js == app_module_comments.SCROLL_JS:
-                        actions.append('scroll' if arg['opened'] else 'open')
-                        return True if arg['opened'] else 'opened'
-                    if js == app_module_comments.REENTER_JS:
-                        actions.append('reenter')
-                        page.update(path='/jingxuan', modal_id='100')
-                        return True
-                transport = QtCommentTransport(FakeWindow(), budget, InstantPacer(), evaluate=evaluate)
-                transport.video_url = 'https://www.douyin.com/video/100'
-                with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 1, 5, 6, 7, 11, 27, 29]), \
-                     patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
-                    result = await transport.fetch('100', root, cursor)
-                expected = ['open', 'scroll']
-                if root is None and cursor == '0':
-                    expected += ['reenter', 'open', 'scroll']
-                self.assertEqual(actions, expected)
-                self.assertEqual(result, {'kind': 'no_request', 'request_sent': False})
-                self.assertEqual((budget.used, budget.counter.usage(), transport.pacer.count), (0, 0, 0))
+            self.assertEqual(window.loaded, ['https://www.douyin.com/video/100'])
 
     async def test_sent_at_each_discovery_stage_prevents_further_actions(self):
-        for stage in ('navigation', 'open', 'scroll', 'reenter'):
+        for stage in ('open', 'scroll', 'reenter'):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as folder:
                 budget = Budget(DailyCounter(Path(folder)))
                 state = {'sent': stage == 'navigation', 'result': json.dumps(_page()) if stage == 'navigation' else None}
@@ -652,9 +636,36 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
                      patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
                     result = await transport.fetch('100', None, '0')
                 self.assertEqual(actions, {'navigation': [], 'open': ['open'], 'scroll': ['open', 'scroll'],
-                                           'reenter': ['open', 'scroll', 'reenter']}[stage])
+                                           'reenter': ['open', 'scroll', 'reenter', 'open']}[stage])
                 self.assertEqual(result, {**_page(), 'request_sent': True})
                 self.assertEqual((budget.used, budget.counter.usage(), transport.pacer.count), (1, 1, 1))
+
+    async def test_reloaded_verification_response_does_not_click(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = {'sent': False, 'result': None}
+            actions = []
+            def evaluate(js, arg=None):
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com',
+                                       'path':'/video/100', 'account':True})
+                if js == app_module_comments.ARM_JS:
+                    return True
+                if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
+                    return json.dumps(state)
+                if js == app_module_comments.SCROLL_JS:
+                    actions.append('click')
+                    return True
+                if js == app_module_comments.REENTER_JS:
+                    actions.append('reload')
+                    state.update(sent=True, result=json.dumps({'status':429, 'text':''}))
+                    return True
+                return False
+            transport = QtCommentTransport(FakeWindow(), Budget(DailyCounter(Path(folder))), InstantPacer(), evaluate=evaluate)
+            with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 5, 6]), \
+                 patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
+                result = await transport.fetch('100', None, '0')
+            self.assertEqual(actions, ['click', 'reload'])
+            self.assertEqual(result['status'], 429)
 
     async def test_scroll_template_replays_first_page_without_repeating_ui(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -733,13 +744,16 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(late=late), tempfile.TemporaryDirectory() as folder:
                 budget = Budget(DailyCounter(Path(folder)))
                 def evaluate(js, arg=None):
+                    if js == app_module_comments.PROBE_JS:
+                        return json.dumps({'ready':'complete', 'https':True, 'host':'www.douyin.com', 'path':'/video/100'})
                     if js == app_module_comments.ARM_JS:
                         return True
                     if js == app_module_comments.CLOSE_JS:
                         return json.dumps({'sent': True, 'result': json.dumps(late) if late else None})
                 transport = QtCommentTransport(FakeWindow(), budget, InstantPacer(), evaluate=evaluate)
                 transport.video_url = 'https://www.douyin.com/video/100'
-                with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 29]):
+                with patch('dyc.hub_comments.time.monotonic', side_effect=[0, 0, 29]), \
+                     patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
                     result = await transport.fetch('100', None, '0')
                 self.assertEqual(result, {**(late or {'kind': 'timeout'}), 'request_sent': True})
                 self.assertEqual((budget.used, budget.counter.usage(), transport.calls, transport.pacer.count), (1, 1, 1, 1))
@@ -751,9 +765,9 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             pages = iter([
                 {'path': '/video/100', 'ready': 'complete'},
                 {'path': '/video/100', 'ready': 'complete'},
-                {'path': '/jingxuan', 'ready': 'loading'},
-                {'path': '/jingxuan', 'modal_id': '100', 'ready': 'complete'},
-                {'path': '/jingxuan', 'modal_id': '100', 'ready': 'complete'},
+                {'path': '/video/100', 'ready': 'loading'},
+                {'path': '/video/100', 'ready': 'complete'},
+                {'path': '/video/100', 'ready': 'complete'},
             ])
             reentered = [False]
             def evaluate(js, arg=None):

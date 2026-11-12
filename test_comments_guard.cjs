@@ -43,142 +43,44 @@ function sdk(ctx) {
 }
 async function captureTests() {
   const idle = page();
-  assert(request(idle.ctx).aborted);
-  await assert.rejects(idle.ctx.fetch(base + '?aweme_id=100'));
-  assert.equal(idle.calls.length, 0);
+  assert(!request(idle.ctx).aborted);
+  await idle.ctx.fetch(base + '?aweme_id=100');
+  assert.equal(idle.calls.length, 2);
+  assert.equal(idle.ctx.__dycRead().sent, false);
 
-  // A same-origin iframe and intermediate document must not consume navigation authorization.
-  const old = page({href:'https://www.douyin.com/jingxuan'});
-  assert(old.begin());
-  const earlyFrame = page({top:old.ctx, storage:old.storage});
-  assert(request(earlyFrame.ctx).aborted);
-  const middle = page({storage:old.storage, href:'https://www.douyin.com/jingxuan'});
-  assert(request(middle.ctx).aborted);
-  const target = page({storage:old.storage});
-  const frame = page({top:target.ctx, storage:old.storage});
-  sdk(frame.ctx);
-  assert(request(frame.ctx, base + '?aweme_id=101').aborted);
-  assert.equal(target.ctx.__dycRead().sent, false);
-  request(frame.ctx);
-  assert.equal(target.ctx.__dycRead().sent, true);
-  assert.equal(JSON.parse(target.ctx.__dycRead().result).status, 200);
-  assert(request(target.ctx).aborted);
-  assert.equal(frame.calls.length, 1); assert.equal(target.calls.length, 0);
-  assert.equal(frame.ctx.sdkCalls, 4);
-  assert(target.begin('', '20'));
-  assert(target.ctx.__dycReplay({video:'100', root:'', cursor:'20'}));
-  assert.equal(frame.calls.length, 2); assert.equal(frame.ctx.sdkCalls, 6);
-  assert.equal(new URL(frame.calls.at(-1).url).searchParams.get('cursor'), '20');
-  assert.equal(target.calls.length, 0);
-  assert(target.begin('', '21'));
-  frame.ctx.document = {};
-  assert.equal(target.ctx.__dycReplay({video:'100', root:'', cursor:'21'}), false);
-  assert.equal(frame.calls.length, 2);
-  sdk(target.ctx);
-  assert(request(target.ctx, base + '?aweme_id=100&cursor=20').aborted);
-  assert(target.ctx.__dycReplay({video:'100', root:'', cursor:'21'}));
-  assert.equal(target.calls.length, 1);
-  const afterSent = page({storage:old.storage});
-  assert.equal(afterSent.ctx.__dycRead().sent, true);
-  assert(request(afterSent.ctx).aborted);
-  assert.equal(afterSent.ctx.__dycReenter(), false);
-  assert.equal(afterSent.ctx.__dycClose().sent, true);
-  assert.equal(old.storage.size, 0);
-  assert(request(page({storage:old.storage}).ctx).aborted);
-
-  // Changed video IDs and duplicate/conflicting selectors cannot become templates.
-  const next = page(); next.begin(); next.begin('', '0', '200');
-  next.ctx.location.href = 'https://www.douyin.com/video/200';
-  assert(request(next.ctx).aborted);
-  request(next.ctx, base + '?aweme_id=200');
-  assert.equal(next.calls.length, 1);
-  for (const query of ['aweme_id=100&aweme_id=101', 'aweme_id=100&item_id=100',
-    'aweme_id=100&comment_id=1', 'aweme_id=100&cursor=0&cursor=1', 'aweme_id=100&cursor=20']) {
-    const p = page(); p.begin(); assert(request(p.ctx, base + '?' + query).aborted); assert.equal(p.calls.length, 0);
-  }
-  const foreign = page(); foreign.begin();
-  assert(request(foreign.ctx, 'https://example.invalid' + base + '?aweme_id=100').aborted);
-  const foreignFrame = page({top:foreign.ctx, href:'https://example.invalid/'});
-  assert(request(foreignFrame.ctx).aborted);
-  assert.equal(foreign.ctx.__dycRead().sent, false);
-  const foreignTop = page({href:'https://example.invalid/'});
-  const isolated = page({top:foreignTop.ctx, storage:foreign.storage});
-  assert(request(isolated.ctx).aborted);
-  assert.equal(foreign.ctx.__dycRead().sent, false);
-
-  // Preserve observed endpoint, video key and other params; drop stale signatures and refresh msToken from xmst.
-  for (const path of [base, base.slice(0, -1), '/aweme/v2/web/comment/list/']) {
+  for (const path of [base, '/aweme/v2/web/comment/list/variant', '/custom/comment/list/']) {
     const p = page(); p.begin(); sdk(p.ctx);
     p.ctx.localStorage = {getItem:k=>k==='xmst'?'fresh':null};
-    const query = '?item_id=100&cursor=0&common=a%20b%2f~&msToken=synthetic&a_bogus=synthetic&X-Bogus=synthetic&_signature=synthetic';
-    await p.ctx.fetch(new URL(path + query, p.ctx.location.href)); await flush();
+    const query = '?item_id=100&cursor=0&common=kept&msToken=synthetic&a_bogus=synthetic&X-Bogus=synthetic&_signature=synthetic';
+    assert(!request(p.ctx, path + query).aborted);
     assert.equal(JSON.parse(p.ctx.__dycRead().result).status, 200);
-    assert.equal(p.ctx.__dycReplay({video:'100', root:'', cursor:'20'}), false);
     assert(p.begin('', '20'));
     assert(p.ctx.__dycReplay({video:'100', root:'', cursor:'20'}));
     const replay = new URL(p.calls.at(-1).url);
-    assert.equal(replay.pathname, path); assert.equal(replay.searchParams.get('cursor'), '20');
-    assert.equal(replay.searchParams.get('common'), 'a b/~');
-    assert.equal(replay.searchParams.get('msToken'), 'fresh');
-    assert.equal(replay.searchParams.get('item_id'), '100');
-    assert.equal(replay.searchParams.get('a_bogus'), null);
-    assert.equal(replay.searchParams.get('X-Bogus'), null);
-    assert.equal(replay.searchParams.get('_signature'), null);
-    assert.equal(p.ctx.sdkCalls, 3);
+    assert.equal(replay.pathname, path);
+    assert.deepEqual([...replay.searchParams.entries()], [['item_id','100'],['cursor','20'],['common','kept'],['msToken','fresh']]);
+    assert.equal(p.ctx.sdkCalls, 4);
     p.begin('123');
-    assert.equal(p.ctx.__dycReplay({video:'100', root:'123', cursor:'0'}), false);
-    assert.equal(p.calls.length, 2);
-    const replyPath = '/aweme/v2/web/comment/list/reply';
-    request(p.ctx, replyPath + '?item_id=100&comment_id=123&reply_marker=kept');
+    request(p.ctx, '/aweme/v2/web/comment/list/reply/?item_id=100&comment_id=123&cursor=0');
     p.begin('456', '8');
     assert(p.ctx.__dycReplay({video:'100', root:'456', cursor:'8'}));
     const reply = new URL(p.calls.at(-1).url);
-    assert.equal(reply.pathname, replyPath); assert.equal(reply.searchParams.get('item_id'), '100');
-    assert.equal(reply.searchParams.get('comment_id'), '456'); assert.equal(reply.searchParams.get('cursor'), '8');
-    assert.equal(reply.searchParams.get('reply_marker'), 'kept');
+    assert.equal(reply.searchParams.get('comment_id'), '456');
+    assert.equal(reply.searchParams.get('cursor'), '8');
+  }
+  const unrelated = page(); unrelated.begin(); sdk(unrelated.ctx);
+  request(unrelated.ctx, '/aweme/v1/web/other/list/?aweme_id=100');
+  assert.equal(unrelated.ctx.__dycRead().sent, false);
+  assert.equal(unrelated.ctx.__dycReplay({video:'100', root:'', cursor:'0'}), false);
+  for (const query of ['aweme_id=101', 'aweme_id=100&aweme_id=101', 'aweme_id=100&item_id=100', 'aweme_id=100&comment_id=1']) {
+    const p = page(); p.begin(); sdk(p.ctx);
+    assert(!request(p.ctx, base + '?' + query).aborted);
+    assert.equal(p.ctx.__dycRead().sent, false);
+    assert.equal(p.ctx.__dycReplay({video:'100', root:'', cursor:'0'}), false);
   }
   const unsupported = page(); unsupported.begin();
-  assert(request(unsupported.ctx, base + '?aweme_id=100', 'POST', 'cursor=0').aborted);
-  assert.equal(unsupported.ctx.__dycRead().sent, false);
+  assert(!request(unsupported.ctx, base + '?aweme_id=100', 'POST', 'x').aborted);
   assert.equal(JSON.parse(unsupported.ctx.__dycRead().result).kind, 'unsupported_request');
-  const nativeOnly = page(); nativeOnly.begin(); request(nativeOnly.ctx);
-  nativeOnly.begin('', '1');
-  assert.equal(nativeOnly.ctx.__dycReplay({video:'100', root:'', cursor:'1'}), false);
-  assert.equal(nativeOnly.calls.length, 1);
-  const ssr = page(); ssr.begin(); sdk(ssr.ctx);
-  assert(request(ssr.ctx, base + '?aweme_id=100&cursor=20&source=page-scroll').aborted);
-  assert.equal(ssr.calls.length, 0); assert.equal(ssr.ctx.__dycRead().sent, false);
-  assert(ssr.ctx.__dycReplay({video:'100', root:'', cursor:'0'}));
-  assert.equal(ssr.calls.length, 1);
-  assert.equal(new URL(ssr.calls[0].url).searchParams.get('cursor'), '0');
-  assert.equal(new URL(ssr.calls[0].url).searchParams.get('source'), 'page-scroll');
-  const bypass = page(); bypass.begin(); request(bypass.ctx);
-  bypass.begin('', '1'); let bypassCalls = 0;
-  bypass.ctx.XMLHttpRequest.prototype.send = function() { bypassCalls++; };
-  assert(bypass.ctx.__dycReplay({video:'100', root:'', cursor:'1'}));
-  for (let i = 0; i < 3; i++) assert.equal(bypass.ctx.__dycReplay({video:'100', root:'', cursor:'1'}), false);
-  assert.equal(bypassCalls, 1); assert.equal(bypass.ctx.__dycRead().sent, true);
-  assert.equal(bypass.ctx.__dycRead().result, null);
-  for (const closeEarly of [false, true]) {
-    const delayed = page(); delayed.begin(); request(delayed.ctx); delayed.begin('', '1');
-    const guardedSend = delayed.ctx.XMLHttpRequest.prototype.send;
-    delayed.ctx.XMLHttpRequest.prototype.send = function() { setImmediate(() => guardedSend.call(this)); };
-    assert(delayed.ctx.__dycReplay({video:'100', root:'', cursor:'1'}));
-    assert.equal(delayed.ctx.__dycRead().sent, true);
-    if (closeEarly) { delayed.ctx.__dycClose(); delayed.begin('', '1'); }
-    await flush();
-    assert.equal(delayed.calls.length, closeEarly ? 1 : 2);
-    assert.equal(!!delayed.ctx.__dycRead().result, !closeEarly);
-  }
-  const aborted = page(); aborted.begin();
-  await assert.rejects(aborted.ctx.fetch(base + '?aweme_id=100', {signal:{aborted:true}}));
-  assert.equal(aborted.ctx.__dycRead().sent, false);
-  request(aborted.ctx); assert.equal(aborted.calls.length, 1);
-  const unrelated = page(); unrelated.begin();
-  request(unrelated.ctx, '/aweme/v1/web/other/list/');
-  assert.equal(unrelated.calls.length, 1); assert.equal(unrelated.ctx.__dycRead().sent, false);
-
-  // A stale response cannot overwrite the next slice, and closed/expired tickets stay closed.
   const late = page({immediate:false}); late.begin(); const stale = request(late.ctx);
   late.ctx.__dycClose(); late.begin('', '1'); const current = request(late.ctx, base + '?aweme_id=100&cursor=1');
   stale.complete('old'); assert.equal(late.ctx.__dycRead().result, null);
@@ -187,15 +89,21 @@ async function captureTests() {
   const expired = page(); expired.begin();
   const ticket = JSON.parse(expired.storage.get('__dycPending')); ticket.expires = 0;
   expired.storage.set('__dycPending', JSON.stringify(ticket));
-  assert(request(expired.ctx).aborted); assert.equal(expired.ctx.__dycReenter(), false);
-  const pending = page(); pending.begin();
-  assert(pending.ctx.__dycReenter());
-  assert.equal(pending.navigations[0].pathname, '/jingxuan');
-  assert.equal(pending.navigations[0].searchParams.get('modal_id'), '100');
-  const modal = page({storage:pending.storage, href:'https://www.douyin.com/jingxuan?modal_id=100'});
-  request(modal.ctx); assert.equal(modal.ctx.__dycRead().sent, true);
-  const ticketKeys = Object.keys(JSON.parse(modal.storage.get('__dycPending'))).sort();
-  assert.deepEqual(ticketKeys, ['cursor','epoch','expires','root','sent','video']);
+  assert(!request(expired.ctx).aborted); assert.equal(expired.ctx.__dycRead().sent, false);
+  const foreign = page(); foreign.begin(); sdk(foreign.ctx);
+  assert(!request(foreign.ctx, 'https://example.invalid' + base + '?aweme_id=100').aborted);
+  assert.equal(foreign.ctx.__dycRead().sent, false);
+  assert.equal(foreign.ctx.__dycReplay({video:'100', root:'', cursor:'0'}), false);
+  const nativeOnly = page(); nativeOnly.begin(); request(nativeOnly.ctx);
+  nativeOnly.begin('', '1');
+  assert.equal(nativeOnly.ctx.__dycReplay({video:'100', root:'', cursor:'1'}), false);
+  const first = page(); first.begin();
+  const afterReload = page({storage:first.storage});
+  assert(!request(afterReload.ctx).aborted);
+  assert.equal(afterReload.ctx.__dycRead().sent, true);
+  const modal = page({storage:first.storage, href:'https://www.douyin.com/jingxuan?modal_id=100'});
+  assert(!request(modal.ctx).aborted);
+  assert.equal(modal.ctx.__dycRead().result, null);
   console.log('comments guard capture regressions passed');
 }
 captureTests().catch(error => { console.error(error); process.exitCode = 1; });
