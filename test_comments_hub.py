@@ -401,6 +401,61 @@ class CollectSliceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IndexBusyTests(unittest.TestCase):
+    def test_comments_window_waits_for_view_before_navigation(self):
+        from PySide6.QtWebEngineCore import QWebEngineScript
+
+        api = app_module.Api()
+        window = MagicMock()
+        view = Mock()
+        window.native.webview = None
+        events = []
+        dispatcher = Mock()
+
+        def call(function):
+            events.append('check')
+            result = function()
+            window.native.webview = view
+            return result
+
+        dispatcher.call.side_effect = call
+        view.page.return_value.scripts.return_value.insert.side_effect = lambda script: events.append('insert')
+        window.load_url.side_effect = lambda url: events.append('navigate')
+        window.show.side_effect = lambda: events.append('show')
+        create = Mock(return_value=window)
+        with patch.dict(sys.modules, {'webview': Mock(create_window=create)}), \
+             patch('login_driver.QtDispatcher', return_value=dispatcher), patch('app.time.sleep'):
+            self.assertIs(api._comments_window(), window)
+
+        self.assertEqual(events, ['check', 'check', 'insert', 'navigate', 'show'])
+        self.assertTrue(create.call_args.kwargs['hidden'])
+        self.assertEqual(len(create.call_args.args), 1)
+        script = view.page.return_value.scripts.return_value.insert.call_args.args[0]
+        self.assertEqual(script.name(), 'dyc-comments-guard')
+        self.assertEqual(script.injectionPoint(), QWebEngineScript.InjectionPoint.DocumentCreation)
+        self.assertEqual(script.worldId(), QWebEngineScript.ScriptWorldId.MainWorld.value)
+        self.assertTrue(script.runsOnSubFrames())
+        self.assertEqual(script.sourceCode(), app_module_comments.GUARD_JS)
+        window.destroy.assert_not_called()
+        window.evaluate_js.assert_not_called()
+
+    def test_comments_window_times_out_without_view(self):
+        api = app_module.Api()
+        window = MagicMock()
+        window.native.webview = None
+        dispatcher = Mock()
+        dispatcher.call.side_effect = lambda function: function()
+        with patch.dict(sys.modules, {'webview': Mock(create_window=Mock(return_value=window))}), \
+             patch('login_driver.QtDispatcher', return_value=dispatcher), \
+             patch('app.time.monotonic', side_effect=[0, 1, 5]), patch('app.time.sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'document-start injection unavailable'):
+                api._comments_window()
+        self.assertEqual(dispatcher.call.call_count, 2)
+        window.destroy.assert_called_once()
+        window.load_url.assert_not_called()
+        window.show.assert_not_called()
+        window.evaluate_js.assert_not_called()
+        self.assertIsNone(getattr(api, '_dyc_window', None))
+
     def test_index_returns_comments_busy_when_comments_hold_lock(self):
         with tempfile.TemporaryDirectory() as folder:
             api = app_module.Api()
