@@ -501,8 +501,15 @@ def run(output=None):
                 assert page.locator('#notice').is_visible()
                 assert '恢复采集' in page.locator('#notice').inner_text()
                 assert not page.locator('#browserBadge .info-button').count()
+                assert '抖音未登录' in page.locator('#indexLoginStatus').inner_text()
+                page.locator('#viewChips [data-source=hot_search]').click()
+                assert page.locator('#indexLoginStatus').is_hidden()
+                assert page.locator('[data-login-platform]:visible').count() == 0
+                page.locator('#viewChips [data-source=index]').click()
                 page.locator('#openQuery').click()
                 assert page.locator('#douyinQueryNote').is_visible()
+                assert page.locator('#douyinQueryNote span').inner_text() == '抖音未登录：只能返回已缓存的完整结果，新的在线查询需先登录。'
+                assert page.locator('#submitButton').is_enabled()
                 page.locator('#douyinQueryNote [data-login-platform=douyin]').click()
                 assert page.locator('#queryDialog').is_hidden()
                 assert page.locator('[data-section=connections]').is_visible()
@@ -536,6 +543,8 @@ def run(output=None):
                 assert job_login.is_hidden()
                 page.locator('[data-tab=overview]').click()
                 assert progress_login.is_hidden()
+                assert page.locator('#indexLoginStatus').inner_text() == '实时查询需登录 · 抖音已登录'
+                assert page.locator('[data-login-platform]:visible').count() == 0
                 page.locator('#openQuery').click()
                 assert page.locator('#douyinQueryNote').is_hidden()
                 page.locator('#closeQuery').click()

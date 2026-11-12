@@ -20,11 +20,14 @@ def run(output=None):
         try:
             for width in (360, 430, 1280):
                 page = browser.new_page(viewport={'width': width, 'height': 940})
+                page.clock.install()
+                page.clock.pause_at(dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1))
                 writes, errors, unexpected, login_opens = [], [], [], []
                 low_volume = [False]
                 baidu_state = ['login_in_progress']
                 baidu_paused = [None]
                 qr_failed, history_failed = [False], [False]
+                qr_failures, qr_requests = [0], []
                 held_opens, open_failed = [], [False]
                 history_error = ['合成历史读取失败']
                 page.on('pageerror', lambda error: errors.append(str(error)))
@@ -38,7 +41,9 @@ def run(output=None):
                         return r.fulfill(content_type='text/html', body=Path('hub.html').read_text())
                     if path == 'login/baidu/qr':
                         assert r.request.headers.get('x-hub-request') == '1'
-                        if qr_failed[0]:
+                        qr_requests.append(1)
+                        if qr_failed[0] or qr_failures[0] > 0:
+                            qr_failures[0] = max(0, qr_failures[0] - 1)
                             return r.fulfill(status=503, content_type='application/json', body='{"error":{"code":"qr_not_ready"}}')
                         return r.fulfill(content_type='image/png', body=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR1kAAAAASUVORK5CYII='))
                     if path == 'login/baidu/open':
@@ -170,11 +175,16 @@ def run(output=None):
                 assert not login_opens and not writes
                 page.locator('#viewChips [data-source=hot_search]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
+                assert page.locator('#indexLoginStatus').is_hidden()
+                assert page.locator('[data-login-platform]:visible').count() == 0
                 page.locator('#viewChips [data-source=index]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 baidu_state[0] = 'browser_ready'
                 baidu_paused[0] = {'code': 'login_required'}
                 page.evaluate('refresh()')
+                assert page.locator('#indexLoginStatus').is_visible()
+                assert page.locator('#indexLoginStatus').inner_text() == '实时查询需登录 · 百度已登录'
+                assert page.locator('[data-login-platform]:visible').count() == 0
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_hidden()
@@ -195,6 +205,7 @@ def run(output=None):
                     page.locator('#insightRange').evaluate('(node)=>node.open=false')
                     page.evaluate('window.scrollTo(0, 0)')
                     page.screenshot(path=str(output/f'hubfollow-baidu-{width}.png'), full_page=True)
+                    page.screenshot(path=f'/tmp/baiduqr-trend-{width}.png')
                 with page.expect_download() as download_info:
                     page.locator('#exportLink').click()
                 download = download_info.value
@@ -243,12 +254,14 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
-                assert page.locator('#baiduQueryNote').inner_text() == '去平台连接登录'
+                assert page.locator('#baiduQueryNote span').inner_text() == '百度未登录：只能返回已缓存的完整结果，新的在线查询需先登录。'
+                assert page.locator('#submitButton').is_enabled()
                 assert page.locator('#baiduQueryNote button').count() == 1
                 query_login = page.locator('#baiduQueryNote [data-login-platform=baidu]')
                 assert query_login.is_visible() and query_login.inner_text() == '去平台连接登录'
                 if output:
                     page.screenshot(path=str(output/f'baidu-query-login-{width}.png'))
+                    page.screenshot(path=f'/tmp/baiduqr-dialog-{width}.png')
                 query_login.focus()
                 page.keyboard.press('Enter')
                 assert not page.locator('#queryDialog').evaluate('(node)=>node.open')
@@ -278,17 +291,34 @@ def run(output=None):
                 if output:
                     page.screenshot(path=str(output/f'hubfollow-baidu-login-error-{width}.png'))
                 open_failed[0] = False
+                qr_failures[0] = 2
                 page.locator('#baiduLoginButton').click()
+                for attempt in (1, 2):
+                    page.wait_for_function('(n) => document.querySelector("#baiduQrState").textContent === "正在获取二维码…（第 "+n+"/3 次）"', arg=attempt)
+                    page.wait_for_timeout(50)
+                    assert len(qr_requests) == attempt
+                    assert page.locator('#baiduDesktop').is_hidden()
+                    page.clock.fast_forward(3000)
                 page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('使用百度')")
                 assert login_opens == ['login/baidu/open', 'login/baidu/open']
                 assert page.locator('#baiduLoginButton').is_enabled()
                 assert page.locator('#baiduLoginButton').inner_text() == '打开百度登录窗口'
                 assert page.locator('#baiduQrImage').is_visible()
+                assert len(qr_requests) == 3
+                assert page.locator('#baiduQrImage').evaluate('(img) => img.complete && img.naturalWidth > 0')
                 assert page.locator('#baiduDesktop').is_hidden()
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 qr_failed[0] = True
+                qr_requests.clear()
                 page.locator('#baiduQrRefresh').click()
+                for attempt in (1, 2):
+                    page.wait_for_function('(n) => document.querySelector("#baiduQrState").textContent.includes("第 "+n+"/3 次")', arg=attempt)
+                    page.wait_for_timeout(50)
+                    page.clock.fast_forward(3000)
                 page.wait_for_function("!document.querySelector('#baiduDesktop').hidden")
+                assert len(qr_requests) == 3
+                assert '二维码尚未就绪，请刷新或使用远程桌面。' in page.locator('#baiduQrState').inner_text()
+                assert '打开百度登录窗口' in page.locator('#baiduQrState').inner_text()
                 assert page.locator('#baiduLoginCard #baiduDesktop').is_visible()
                 assert page.locator('#baiduQrImage').is_hidden()
                 assert page.evaluate("document.querySelector('#baiduDesktop').onclick === openDesktop")
@@ -400,6 +430,23 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 assert query_login.is_visible()
                 page.locator('#closeQuery').click()
+                # Leaving the connection card cancels a delayed retry and hides its panel.
+                page.clock.fast_forward(7000)
+                page.wait_for_function('!refreshing')
+                page.locator('[data-tab=connections]').click()
+                qr_failed[0] = True
+                qr_requests.clear()
+                page.locator('#baiduLoginButton').click()
+                page.wait_for_function("document.querySelector('#baiduQrState').textContent.includes('第 1/3 次')")
+                page.wait_for_timeout(50)
+                assert len(qr_requests) == 1
+                page.locator('[data-tab=overview]').click()
+                page.clock.fast_forward(3000)
+                page.wait_for_function('!baiduLoginOpening && !refreshing')
+                assert len(qr_requests) == 1
+                assert page.locator('#baiduQrPanel').is_hidden()
+                assert page.locator('#baiduQrImage').is_hidden()
+                assert not page.evaluate('baiduQrActive')
                 page.evaluate('reportBatch=null;datasets=[];renderHistory();loadSeries()')
                 assert page.locator('#baiduWords').is_hidden()
                 assert '暂无趋势数据' in page.locator('#chart').inner_text()
