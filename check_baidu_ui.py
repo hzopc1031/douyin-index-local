@@ -26,6 +26,7 @@ def run(output=None):
                 low_volume = [False]
                 baidu_state = ['login_in_progress']
                 baidu_paused = [None]
+                query_rejected = [False]
                 qr_failed, history_failed = [False], [False]
                 qr_failures, qr_requests = [0], []
                 held_opens, open_failed = [], [False]
@@ -57,6 +58,14 @@ def run(output=None):
                         return r.fulfill(content_type='application/json', body=json.dumps({'ok': True, 'state': 'login_required'}))
                     if r.request.method == 'POST':
                         writes.append((path, r.request.post_data_json))
+                        if path == 'collection/resume':
+                            assert r.request.headers.get('x-hub-request') == '1'
+                            assert r.request.post_data_json == {'platform': 'baidu'}
+                            baidu_paused[0] = None
+                            return r.fulfill(content_type='application/json', body='{"ok":true}')
+                        if path == 'queries' and query_rejected[0]:
+                            return r.fulfill(status=409, content_type='application/json', body=json.dumps({
+                                'error': {'code': 'collection_paused', 'message': '采集已暂停，请在网页处理登录或平台验证后手动恢复。'}}))
                         data = {'job': dict(id='synthetic-job', status='queued', cache_hit=False)}
                     elif path == 'platforms': data = {'platforms': PLATFORMS}
                     elif path == 'status':
@@ -183,12 +192,35 @@ def run(output=None):
                 baidu_paused[0] = {'code': 'login_required'}
                 page.evaluate('refresh()')
                 assert page.locator('#indexLoginStatus').is_visible()
-                assert page.locator('#indexLoginStatus').inner_text() == '实时查询需登录 · 百度已登录'
+                assert '实时查询需登录 · 百度已登录 · 采集已暂停' in page.locator('#indexLoginStatus').inner_text()
+                assert page.locator('#indexLoginStatus [data-resume-platform=baidu]').inner_text() == '恢复'
                 assert page.locator('[data-login-platform]:visible').count() == 0
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
+                assert page.locator('#baiduQueryNote').is_visible()
+                assert page.locator('#baiduQueryNote span').inner_text() == '百度已登录，但采集仍暂停：请先恢复百度采集，否则新的在线查询会被拒绝（已缓存的完整结果仍可返回）。'
+                assert page.locator('#submitButton').is_enabled()
+                resume_query = page.locator('#baiduQueryNote [data-resume-platform=baidu]')
+                assert resume_query.inner_text() == '恢复百度采集'
+                assert not writes
+                page.screenshot(path=f'/tmp/baidupaused-dialog-{width}.png')
+                resume_query.click()
+                page.wait_for_function('!refreshing && !baiduLoginState.paused')
+                assert writes == [('collection/resume', {'platform': 'baidu'})]
+                assert page.locator('#toast').inner_text() == '百度已恢复；之前失败的任务不会自动重试。'
                 assert page.locator('#baiduQueryNote').is_hidden()
+                assert page.locator('#submitButton').is_enabled()
+                assert page.locator('#queryDialog').evaluate('(node)=>node.open')
+                assert page.locator('#indexLoginStatus').inner_text() == '实时查询需登录 · 百度已登录'
+                writes.clear()
                 page.locator('#closeQuery').click()
+                baidu_paused[0] = {'code': 'login_required'}
+                page.evaluate('refresh()')
+                page.screenshot(path=f'/tmp/baidupaused-trend-{width}.png')
+                page.locator('#indexLoginStatus [data-resume-platform=baidu]').click()
+                page.wait_for_function('!refreshing && !baiduLoginState.paused')
+                assert writes == [('collection/resume', {'platform': 'baidu'})]
+                writes.clear()
                 baidu_state[0] = 'login_required'
                 baidu_paused[0] = None
                 page.evaluate('refresh()')
@@ -351,11 +383,16 @@ def run(output=None):
                 assert page.locator('#baiduLoginNotice').count() == 0
                 page.locator('#openQuery').click()
                 assert page.locator('#queryPlatform').input_value() == 'baidu'
-                assert page.locator('#baiduQueryNote').is_hidden()
+                assert page.locator('#baiduQueryNote').is_visible()
+                assert '采集仍暂停' in page.locator('#baiduQueryNote').inner_text()
+                assert page.locator('#baiduQueryNote [data-resume-platform=baidu]').is_visible()
                 assert query_login.is_hidden()
                 assert page.locator('#submitButton').inner_text() == '查询 →'
                 if output and width == 1280:
                     page.screenshot(path=str(output/'baidu-query-desktop.png'))
+                baidu_paused[0] = None
+                page.evaluate('refresh()')
+                assert page.locator('#baiduQueryNote').is_hidden()
                 page.locator('#queryWords').fill(q['keywords'][0])
                 page.locator('#queryRange').evaluate('(node)=>node.open=true')
                 page.locator('#queryStart').fill(q['start_date'])
@@ -414,7 +451,11 @@ def run(output=None):
                         assert progress_login.is_hidden()
                         assert page.locator('#baiduLoginNotice').count() == 0
                         page.locator('#openQuery').click()
-                        assert page.locator('#baiduQueryNote').is_hidden()
+                        assert page.locator('#baiduQueryNote').is_visible()
+                        assert '采集仍暂停' in page.locator('#baiduQueryNote').inner_text()
+                        assert page.locator('#baiduQueryNote [data-resume-platform=baidu]').is_visible()
+                        assert page.locator('#submitButton').is_enabled()
+                        assert query_login.is_hidden()
                         page.locator('#closeQuery').click()
                         page.locator('[data-tab=connections]').click()
                 # Rendering history after login must not recreate login actions.
@@ -430,6 +471,70 @@ def run(output=None):
                 page.locator('#openQuery').click()
                 assert query_login.is_visible()
                 page.locator('#closeQuery').click()
+                # A rejected submission has no job and only an explicit resume may write again.
+                writes.clear()
+                query_rejected[0] = True
+                for logged_in in (False, True):
+                    baidu_state[0] = 'browser_ready' if logged_in else 'login_required'
+                    baidu_paused[0] = {'code': 'login_required'}
+                    page.evaluate('refresh()')
+                    page.evaluate('''q => {
+                        reportBatch={query:q,entries:[{path:'queries',body:q,label:'指数趋势',
+                            idem:'synthetic-paused',jobId:null,status:'not_submitted',error:null}]};
+                        renderReportProgress();
+                    }''', q)
+                    page.evaluate('submitReportBatch()')
+                    assert writes == [('queries', q)]
+                    assert page.evaluate('reportBatch.entries[0].code') == 'collection_paused'
+                    assert page.evaluate('reportBatch.entries[0].rejected && !reportBatch.entries[0].jobId')
+                    assert page.locator('#reportProgressRows .status').inner_text() == '未创建'
+                    assert '失败' not in page.locator('#reportProgressRows .status').inner_text()
+                    assert '1 / 1 项已结束' in page.locator('#reportProgressTitle').inner_text()
+                    assert page.locator('#retryBundle').is_hidden()
+                    assert page.locator('#toast').inner_text() == '百度采集已暂停，任务未创建：请先登录或恢复采集后重新提交。'
+                    page.evaluate('refresh()')
+                    assert writes == [('queries', q)]
+                    if logged_in:
+                        assert '恢复后请重新提交查询' in page.locator('#reportProgressRows').inner_text()
+                        progress_resume = page.locator('#reportProgressRows [data-resume-platform=baidu]')
+                        assert progress_resume.is_visible() and progress_resume.inner_text() == '恢复百度采集'
+                        progress_resume.scroll_into_view_if_needed()
+                        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                        page.screenshot(path=f'/tmp/baidupaused-rejected-{width}.png')
+                        progress_resume.click()
+                        page.wait_for_function('!refreshing && !baiduLoginState.paused')
+                        assert writes == [('queries', q), ('collection/resume', {'platform': 'baidu'})]
+                        assert page.locator('#reportProgressRows .status').inner_text() == '未创建'
+                        assert page.evaluate('reportBatch.entries[0].rejected && !reportBatch.entries[0].jobId')
+                        assert page.locator('#retryBundle').is_hidden()
+                    else:
+                        assert progress_login.is_visible()
+                        progress_login.click()
+                        assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
+                        page.locator('[data-tab=overview]').click()
+                    writes.clear()
+                query_rejected[0] = False
+                baidu_state[0] = 'login_required'
+                page.evaluate('refresh()')
+                # Opening login keeps the existing pause even before a status poll.
+                baidu_paused[0] = {'code': 'login_required'}
+                page.evaluate('refresh()')
+                page.locator('[data-tab=connections]').click()
+                held_opens.clear()
+                open_failed[0] = True
+                page.locator('#baiduLoginButton').click()
+                page.wait_for_function('baiduLoginOpening')
+                baidu_state[0] = 'browser_ready'
+                held_opens.pop().fulfill(content_type='application/json', body='{"ok":true,"state":"browser_ready"}')
+                page.wait_for_function('!baiduLoginOpening')
+                assert page.evaluate('baiduLoginState.paused.code') == 'login_required'
+                assert '采集已暂停' in page.locator('#baiduLoginStatus').inner_text()
+                assert page.locator('#baiduQrPanel').is_hidden()
+                open_failed[0] = False
+                baidu_state[0] = 'login_required'
+                baidu_paused[0] = None
+                page.evaluate('refresh()')
+                page.locator('[data-tab=overview]').click()
                 # Leaving the connection card cancels a delayed retry and hides its panel.
                 page.clock.fast_forward(7000)
                 page.wait_for_function('!refreshing')
