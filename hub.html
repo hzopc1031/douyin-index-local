@@ -147,8 +147,7 @@ function drawPlatforms(){
  $('#baiduDevices').hidden=chosenPlatform!=='baidu'||$('#baiduMetricSelect').value!=='search_index';
  $('#baiduMetric').hidden=chosenPlatform!=='baidu';
  if(chosenPlatform!=='baidu'){baiduViewRegion='';$('#viewRegionSearch').value=''}
- if(chosenPlatform!=='baidu')baiduWordList='';
- renderBaiduWords();
+ renderHistory();
  const compositeOption=$('#relatedSort option[value=composite_index]');compositeOption.hidden=chosenPlatform==='baidu';if(compositeOption.hidden&&$('#relatedSort').value==='composite_index')$('#relatedSort').value='relation_score';
  $('#queryPlatform').innerHTML=platforms.map(p=>'<option value="'+esc(p.id)+'" '+(p.available?'':'disabled')+'>'+esc(p.id==='douyin'?'抖音搜索指数':p.name)+(p.available?'':' · 待接入')+'</option>').join('');
  $('#queryPlatform').value=platforms.some(p=>p.id===selected&&p.available)?selected:(platformInfo().available?chosenPlatform:'douyin');renderRegions();
@@ -249,7 +248,7 @@ $('#topicCategoryList').addEventListener('click',event=>{const item=event.target
 $('#topicRankTotal').onclick=()=>{topicRank='total';paintTopicRank();loadTopics(true).catch(e=>toast(e.message))};
 $('#topicRankRising').onclick=()=>{topicRank='rising';paintTopicRank();loadTopics(true).catch(e=>toast(e.message))};
 function renderHistory(){
- const words=[...new Set([...(reportBatch?.query.keywords||[]),...datasets.flatMap(d=>d.metadata.keywords)])];const previous=$('#keywordSelect').value;
+ const words=[...new Set([...(reportBatch?.query.platform===chosenPlatform?reportBatch.query.keywords:[]),...datasets.filter(d=>(d.metadata.platform||'douyin')===chosenPlatform).flatMap(d=>d.metadata.keywords)])];const previous=$('#keywordSelect').value;
  $('#keywordSelect').innerHTML=words.length?words.map(w=>'<option>'+esc(w)+'</option>').join(''):'<option value="">暂无关键词</option>';
  if(words.includes(previous))$('#keywordSelect').value=previous;
  renderBaiduWords();
@@ -353,10 +352,14 @@ function renderJobs(){
 function renderBaiduWords(){
  const words=[...$('#keywordSelect').options].map(o=>o.value).filter(Boolean),key=JSON.stringify(words);
  const compare=chosenPlatform==='baidu'&&words.length>=2;
- if(compare&&key!==baiduWordList){baiduWords=words.slice(0,5);baiduWordList=key}
+ if(chosenPlatform==='baidu'){
+  if(key!==baiduWordList){const recent=(reportBatch?.query.platform==='baidu'?reportBatch.query.keywords:datasets.find(d=>d.metadata.platform==='baidu')?.metadata.keywords)||[];baiduWords=recent.filter(w=>words.includes(w)).slice(0,5);baiduWordList=key}
+  if(!baiduWords.length)baiduWords=words.slice(0,1);
+  if(baiduWords.length)$('#keywordSelect').value=baiduWords[0];
+ }
  $('#keywordSelect').hidden=compare;$('#baiduWords').hidden=!compare;
- $('#baiduWords').innerHTML=compare?words.slice(0,5).map((w,i)=>'<button type="button" class="chip '+(baiduWords.includes(w)?'active':'')+'" data-word-index="'+i+'" aria-pressed="'+baiduWords.includes(w)+'">'+esc(w)+'</button>').join(''):'';
- $('#baiduWords').querySelectorAll('[data-word-index]').forEach(b=>b.onclick=()=>{const word=words[Number(b.dataset.wordIndex)];if(baiduWords.includes(word)){if(baiduWords.length===1)return;baiduWords=baiduWords.filter(w=>w!==word)}else baiduWords.push(word);$('#keywordSelect').value=baiduWords[0];renderBaiduWords();Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message))});
+ $('#baiduWords').innerHTML=compare?words.slice(0,8).map((w,i)=>'<button type="button" class="chip '+(baiduWords.includes(w)?'active':'')+'" data-word-index="'+i+'" aria-pressed="'+baiduWords.includes(w)+'"'+(!baiduWords.includes(w)&&baiduWords.length>=5?' disabled':'')+'>'+esc(w)+'</button>').join(''):'';
+ $('#baiduWords').querySelectorAll('[data-word-index]').forEach(b=>b.onclick=()=>{const word=words[Number(b.dataset.wordIndex)];if(baiduWords.includes(word)){if(baiduWords.length===1)return;baiduWords=baiduWords.filter(w=>w!==word)}else{if(baiduWords.length>=5)return;baiduWords.push(word)}$('#keywordSelect').value=baiduWords[0];renderBaiduWords();Promise.all([loadSeries(),loadInsights()]).catch(e=>toast(e.message))});
 }
 function drawChart(data, comparisons=[data]){
  const platform=platformInfo(data.platform), isDouyin=(data.platform||chosenPlatform)==='douyin', metric=(data.platform||chosenPlatform)==='baidu'?(data.metric==='feed_index'?'资讯指数 · 待核对':data.metric==='news_index'?'媒体指数 · 待核对':({'all':'整体搜索指数','pc':'PC 搜索指数','wise':'移动搜索指数'}[data.device]||'搜索指数')):(platform.metric_name||data.metric_name||'指数');
@@ -591,11 +594,11 @@ async function refresh(){if(refreshing)return;refreshing=true;try{const [state,h
  detail.innerHTML=infoTip(last?(last.ok?'最近采集成功':'最近采集失败 · '+(names[last.code]||'请查看采集任务')):'尚无采集验证','状态检查：'+new Date().toLocaleTimeString('zh-CN')+'（页面打开时每 15 秒更新） · '+(last?'最近在线取数：'+fmt(last.at)+'，'+(last.ok?'成功':names[last.code]||'失败'):'尚无在线取数验证记录')+'。页面预检不会请求抖音指数，不能提前判断服务端限频。');
  document.title=(paused||!ready?'⚠ '+label+' | ':'')+'指数工作台';
 
- initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#douyinLoginStatus').textContent='抖音登录状态待检查';$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常，当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';if(!readingInfo()){$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}}finally{refreshing=false}}
+ initializeRanges(h);renderHistory();renderJobs();await refreshReportBatch();await Promise.all([loadSeries(),loadInsights()]);}catch(e){toast(e.message);$('#douyinLoginStatus').textContent='抖音登录状态待检查';$('#notice').classList.remove('hidden');$('#notice').textContent='工作台连接异常（'+String(e.message||'请求失败').slice(0,80)+'），当前无法确认会话状态。';document.title='⚠ 连接异常 | 指数工作台';if(!readingInfo()){$('#browserBadge').textContent='连接待检查';$('#browserBadge').className='badge warn'}}finally{refreshing=false}}
 $('#refreshButton').onclick=refresh;
 $('#globalRefresh').onclick=async()=>{const b=$('#globalRefresh');b.disabled=true;b.textContent='刷新中…';try{platforms=(await api('platforms')).platforms;drawPlatforms();await refresh();if(!document.querySelector('[data-section=api]').hidden)await loadKeys()}catch(e){toast(e.message)}finally{b.disabled=false;b.textContent='刷新'}};
 $('#resumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{}});toast('已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};
-let baiduLoginState=null,douyinNeedsLogin=false;
+let baiduLoginState=null,douyinNeedsLogin=false,baiduLoginOpening=false;
 const baiduLoginErrors=['login_required','authentication_required','verification_required','not_logged_in'];
 function baiduLoggedIn(){return ['browser_ready','signature_unavailable'].includes(baiduLoginState?.browser)}
 function baiduNeedsLogin(){return !baiduLoggedIn()&&(['login_required','login_in_progress'].includes(baiduLoginState?.browser)||baiduLoginErrors.includes(baiduLoginState?.paused?.code))}
@@ -604,7 +607,7 @@ function renderBaiduLogin(state=baiduLoginState){
  baiduLoginState=state;
  const needsLogin=baiduNeedsLogin(),label=needsLogin&&baiduLoginErrors.includes(state?.paused?.code)?'百度需要登录或验证':({browser_ready:'百度已登录',login_required:'百度未登录',login_in_progress:'百度登录中',browser_idle:'百度浏览器空闲已关闭',signature_unavailable:'百度登录后签名暂不可用',browser_unavailable:'百度浏览器不可用'})[state?.browser]||'百度登录状态待检查';
  $('#baiduLoginStatus').textContent=label+(state?.paused?' · 采集已暂停':'');
- $('#baiduLoginButton').disabled=!platformInfo('baidu').available;$('#baiduLoginButton').hidden=baiduLoggedIn();
+ $('#baiduLoginButton').disabled=baiduLoginOpening||!platformInfo('baidu').available;$('#baiduLoginButton').hidden=baiduLoggedIn();
  if(baiduLoggedIn()){baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=true;$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent}
  document.querySelectorAll('[data-login-platform="baidu"]').forEach(button=>button.hidden=!needsLogin);
  $('#baiduQueryNote').hidden=$('#queryPlatform').value!=='baidu'||!needsLogin;
@@ -621,7 +624,13 @@ async function loadBaiduQr(){
 }
 async function pollBaiduLogin(){if(!baiduQrActive)return;try{const state=await loadHubStatus();if(!baiduQrActive)return;const browser=state.platform_status?.baidu?.browser;if(['browser_ready','browser_idle','signature_unavailable'].includes(browser)){baiduQrActive=false;clearBaiduQr();$('#baiduQrState').textContent=$('#baiduLoginStatus').textContent;$('#baiduQrPanel').hidden=true;return}}catch(e){}if(baiduQrActive)baiduQrTimer=setTimeout(pollBaiduLogin,3000)}
 $('#baiduQrRefresh').onclick=loadBaiduQr;$('#baiduDesktop').onclick=openDesktop;
-$('#baiduLoginButton').onclick=async()=>{try{const result=await api('login/baidu/open',{method:'POST',body:{}});renderBaiduLogin({browser:result.state});$('#baiduQrPanel').hidden=false;clearBaiduQr();if(result.state==='browser_ready'){$('#baiduQrState').textContent='百度已登录';$('#baiduQrPanel').hidden=true;baiduQrActive=false;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}catch(e){toast(e.message)}};
+$('#baiduLoginButton').onclick=async()=>{
+ const button=$('#baiduLoginButton');if(button.disabled||baiduLoginOpening)return;
+ baiduLoginOpening=true;button.disabled=true;button.textContent='正在打开…';baiduQrActive=false;clearBaiduQr();$('#baiduQrPanel').hidden=false;$('#baiduDesktop').hidden=true;$('#baiduQrState').textContent='正在打开百度登录窗口，最长约 35 秒…';
+ try{const result=await api('login/baidu/open',{method:'POST',body:{}});renderBaiduLogin({browser:result.state});$('#baiduQrPanel').hidden=false;if(result.state==='browser_ready'){$('#baiduQrState').textContent='百度已登录';$('#baiduQrPanel').hidden=true;return}baiduQrActive=true;await loadBaiduQr();pollBaiduLogin()}
+ catch(e){$('#baiduQrPanel').hidden=false;$('#baiduQrState').textContent=e.message;$('#baiduDesktop').hidden=false;toast(e.message)}
+ finally{baiduLoginOpening=false;button.disabled=!platformInfo('baidu').available;button.textContent='打开百度登录窗口'}
+};
 $('#baiduResumeButton').onclick=async()=>{try{await api('collection/resume',{method:'POST',body:{platform:'baidu'}});toast('百度已恢复；之前失败的任务不会自动重试。');await refresh()}catch(e){toast(e.message)}};
 async function loadKeys(){const data=await api('keys');$('#keyRows').innerHTML=data.keys.length?data.keys.map(k=>'<tr><td><strong>'+esc(k.name)+'</strong><br><small>'+esc(k.prefix)+'…</small></td><td>'+esc(k.scopes.join(' + '))+'</td><td>'+esc(fmt(k.expires))+'</td><td>'+esc(k.revoked?'已撤销':k.expires*1000<Date.now()?'已过期':'有效')+'</td><td>'+(k.revoked?'—':'<button class="btn danger" data-revoke="'+esc(k.id)+'">撤销</button>')+'</td></tr>').join(''):'<tr><td colspan="5">尚无 API Key。建议为每个调用方单独创建。</td></tr>';document.querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{if(!confirm('撤销后，该密钥将立即无法调用接口。继续？'))return;try{await api('keys/'+b.dataset.revoke,{method:'DELETE'});await loadKeys();toast('密钥已撤销')}catch(e){toast(e.message)}})}
 $('#keyForm').onsubmit=async e=>{e.preventDefault();try{const result=await api('keys',{method:'POST',body:{name:$('#keyName').value,scopes:$('#keyScope').value==='read'?['read']:['read','query'],days:Number($('#keyDays').value)}});$('#newKey').textContent=result.token;$('#keyDialog').showModal();await loadKeys()}catch(e){toast(e.message)}};
@@ -823,7 +832,7 @@ $('#queryForm').onsubmit=async e=>{
   if(reportBatch?.entries.some(e=>!e.jobId&&!e.rejected)){
    if(JSON.stringify(reportBatch.query)!==JSON.stringify(query))throw Error('上一批存在提交未确认的任务，请先点击“继续提交未确认任务”核实，避免遗留重复请求。');
   }else reportBatch=makeReportBatch(query,crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(36).slice(2));
-  saveBatch();chosenPlatform=query.platform;drawPlatforms();renderHistory();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
+  saveBatch();chosenPlatform=query.platform;baiduWordList='';drawPlatforms();$('#keywordSelect').value=words[0];$('#insightStart').value=start;$('#insightEnd').value=end;
   $('#queryDialog').close();updateRange('insight');renderReportProgress();await submitReportBatch();await refresh();
  }catch(e){if($('#queryDialog').open){const error=$('#queryError');error.textContent=e.message;error.hidden=false;error.focus();error.scrollIntoView({block:'nearest'})}else toast(e.message)}finally{button.disabled=false}
 };

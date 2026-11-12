@@ -66,6 +66,15 @@ vm.runInContext(code,ctx);
  await assert.rejects(vm.runInContext('loadSeries()',ctx));
  assert.equal($('#exportLink').style.display,'none');assert.equal($('#chartMeta').textContent,'');
  assert.equal($('#chart').dataset.platform,'baidu');
+ // A recent Baidu batch may have no keywords among the current candidates.
+ $('#keywordSelect').options=[{value:'候选词甲'},{value:'候选词乙'}];
+ ctx.reportBatch={query:{platform:'baidu',keywords:['候选外词']}};ctx.baiduWordList='';
+ vm.runInContext(html.slice(html.indexOf('function renderBaiduWords()'),html.indexOf('function drawChart(')),ctx);
+ vm.runInContext('renderBaiduWords()',ctx);
+ assert.deepEqual(Array.from(ctx.baiduWords),['候选词甲']);assert.equal($('#keywordSelect').value,'候选词甲');assert.equal($('#baiduWords').hidden,false);
+ const fallbackRequests=[];ctx.api=async path=>{const keyword=new URLSearchParams(path.split('?')[1]).get('keyword');fallbackRequests.push(keyword);return {platform:'baidu',keyword}};
+ await vm.runInContext('loadSeries()',ctx);
+ assert.deepEqual(fallbackRequests,['候选词甲']);assert.equal(drawn.at(-1).keyword,'候选词甲');
  const posted=[];ctx.toast=()=>{};ctx.refresh=async()=>{};ctx.api=async(path,options)=>posted.push(options.body);ctx.document={addEventListener(){}};ctx.openDesktop=()=>{};
  vm.runInContext(html.slice(html.indexOf("$('#resumeButton').onclick"),html.indexOf('async function loadKeys(')),ctx);
  await $('#resumeButton').onclick();await $('#baiduResumeButton').onclick();
