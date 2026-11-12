@@ -153,20 +153,20 @@ SCROLL_JS = r"""(cfg => {
   const text = document.body ? (document.body.innerText || '') : '';
   if (find(risk) || ['安全验证', '身份验证', '使用原设备'].some(t => text.includes(t))) return false;
   const box = find('[data-e2e="comment-list"]');
-  let button = find('[data-e2e*="comment"][data-e2e*="icon"], [data-e2e="comment-count"]');
-  if (!button) {
-    // shortcut: the action row has four icon items below the video; upgrade when stable control identifiers are available.
-    const player = find('video');
-    const playerRect = player && player.getBoundingClientRect();
-    const rows = [...document.querySelectorAll('div, nav')].filter(e => {
-      const items = [...e.children], rect = e.getBoundingClientRect();
-      return playerRect && rect.top >= playerRect.bottom && rect.top - playerRect.bottom < 300 &&
-        rect.left >= playerRect.left && rect.right <= playerRect.right && visible(e) && items.length === 4 && items.every(visible) &&
-        items.slice(0, 3).every(x => /^\s*\d+\s*$/.test(x.innerText || '') && x.querySelector('svg, img')) &&
-        /分享/.test(items[3].innerText || '') && items[3].querySelector('svg, img');
-    });
-    if (rows.length === 1) button = rows[0].children[1];
-  }
+  // shortcut: the share-anchored row has four numeric/icon actions; upgrade if its structure changes.
+  const rows = [...document.querySelectorAll('[data-e2e="video-share-icon-container"]')].filter(visible).flatMap(share => {
+    const matches = [];
+    for (let row = share.parentElement; row; row = row.parentElement) {
+      const items = [...row.children];
+      if (visible(row) && items.length === 4 && items.every(visible) && items[3].contains(share) &&
+          items.slice(0, 3).every(x => /^\s*\d+\s*$/.test(x.innerText || '') && x.querySelector('svg, img')) &&
+          (items[3].innerText || '').trim() === '分享' && getComputedStyle(items[1]).cursor === 'pointer' &&
+          getComputedStyle(items[1]).pointerEvents !== 'none' &&
+          !items[1].matches(':disabled, [aria-disabled="true"]')) matches.push(row);
+    }
+    return matches;
+  });
+  const button = rows.length === 1 ? rows[0].children[1] : null;
   if (document.readyState !== 'complete' && !box && !button) return false;
   if (window.__dycSent || window.__dycResult) return true;
   window.__dycRoot = cfg.root;
