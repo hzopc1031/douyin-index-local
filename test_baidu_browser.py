@@ -891,6 +891,70 @@ class AudienceDiagnosticSyntheticTests(unittest.TestCase):
         self.assertNotIn('2027-10-02', output)
 
 class LoginQrTests(unittest.TestCase):
+    def test_password_panel_switches_to_tangram_qr(self):
+        from unittest.mock import Mock
+        import base64
+        import baidu_browser
+        png = b'\x89PNG\r\n\x1a\nsynthetic'
+        element = Mock()
+        element.bounding_box.return_value = {'width': 120, 'height': 120}
+        element.is_visible.side_effect = [False, True]
+        element.screenshot.return_value = png
+        images = Mock()
+        images.count.return_value = 1
+        images.nth.return_value = element
+        toggle = Mock()
+        toggle.bounding_box.return_value = {'width': 72, 'height': 72}
+        toggle.is_visible.return_value = True
+        frame = Mock(url='https://index.baidu.com/')
+        frame.locator.side_effect = lambda selector: Mock(first=toggle) if selector == '.tang-pass-footerBarQrcode:visible' else images
+        page = Mock(frames=[frame])
+        with patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}):
+            result = baidu_browser.login_qr(Mock(pages=[page]))
+        self.assertEqual(base64.b64decode(result['png_base64']), png)
+        self.assertEqual(images.count.call_count, 2)
+        self.assertIn('img.tang-pass-qrcode-img', frame.locator.call_args.args[0])
+        toggle.click.assert_called_once_with(position={'x': 60, 'y': 12}, timeout=3000)
+        position = toggle.click.call_args.kwargs['position']
+        self.assertGreater(position['x'], 72 / 2)
+        self.assertLess(position['y'], 72 / 2)
+        page.wait_for_timeout.assert_called_once_with(1000)
+        element.screenshot.assert_called_once_with(type='png', timeout=3000)
+
+    def test_missing_or_obstructed_switch_is_not_ready(self):
+        from unittest.mock import Mock
+        import baidu_browser
+        for failure in ('missing', 'hidden', 'click_error'):
+            with self.subTest(failure=failure):
+                images = Mock()
+                images.count.return_value = 0
+                toggle = Mock()
+                toggle.bounding_box.return_value = None if failure == 'missing' else {'width': 72, 'height': 72}
+                toggle.is_visible.return_value = failure != 'hidden'
+                toggle.click.side_effect = RuntimeError('synthetic')
+                frame = Mock(url='https://passport.baidu.com/login')
+                frame.locator.side_effect = lambda selector: Mock(first=toggle) if selector == '.tang-pass-footerBarQrcode:visible' else images
+                page = Mock(frames=[frame])
+                with patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}):
+                    self.assertEqual(baidu_browser.login_qr(Mock(pages=[page])), {'ok': False, 'code': 'qr_not_ready'})
+                if failure != 'click_error':
+                    toggle.click.assert_not_called()
+                page.wait_for_timeout.assert_not_called()
+
+    def test_untrusted_origins_and_logged_in_state_never_click(self):
+        from unittest.mock import Mock
+        import baidu_browser
+        for origin in ('https://example.invalid/', 'http://index.baidu.com/', 'https://index.baidu.com:444/', 'https://index.baidu.com.example.invalid/'):
+            with self.subTest(origin=origin):
+                frame = Mock(url=origin)
+                context = Mock(pages=[Mock(frames=[frame])])
+                with patch.object(baidu_browser, 'status', return_value={'state': 'login_required'}):
+                    self.assertEqual(baidu_browser.login_qr(context)['code'], 'qr_not_ready')
+                frame.locator.assert_not_called()
+        with patch.object(baidu_browser, 'status', return_value={'state': 'browser_ready'}):
+            self.assertEqual(baidu_browser.login_qr(context)['code'], 'qr_not_ready')
+        frame.locator.assert_not_called()
+
     def test_only_visible_qr_element_is_captured(self):
         from unittest.mock import Mock
         import base64
