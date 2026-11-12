@@ -84,7 +84,7 @@ GUARD_JS = """(function(){
       if (['a_bogus', 'x-bogus', '_signature'].includes(key.toLowerCase())) target.searchParams.delete(key);
       else if (key.toLowerCase() === 'mstoken') {
         let value = null;
-        try { value = localStorage.getItem(key); } catch (e) {}
+        try { value = localStorage.getItem('xmst'); } catch (e) {}
         if (value) target.searchParams.set(key, value);
       }
     }

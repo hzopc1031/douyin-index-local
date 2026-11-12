@@ -9,7 +9,7 @@ class XHR {
   send() { calls++; urls.push(this.url); this.status = 200; this.responseText = '{"status_code":0}'; this.callback(); }
   abort() { this.aborted = true; }
 }
-const context = {URL, location:{href:'https://www.douyin.com/'}, sessionStorage:{getItem:()=>null, removeItem:()=>{}}, localStorage:{getItem:()=> 'fresh'}, XMLHttpRequest:XHR};
+const context = {URL, location:{href:'https://www.douyin.com/'}, sessionStorage:{getItem:()=>null, removeItem:()=>{}}, localStorage:{getItem:k=>k==='xmst'?'fresh':null}, XMLHttpRequest:XHR};
 context.window = context;
 context.fetch = () => { calls++; return Promise.resolve({status:200, clone:()=>({text:()=>Promise.resolve('{"status_code":0}')})}); };
 vm.runInNewContext(guard, context);
