@@ -92,6 +92,7 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata=META,fetched=1793498400)] if fixture['history'] else [], latest_available_date=END if fixture['history'] else None)
                     elif path == 'jobs': data = dict(jobs=[])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'comments/status': data = dict(probe='not_logged_in', running=False, paused=False)
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,

@@ -51,6 +51,7 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata={**META, 'keywords':['酵素','akg']}, fetched=1793498400)], latest_available_date=END)
                     elif path == 'jobs': data = dict(jobs=fixture['jobs'])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'comments/status': data = dict(probe='not_logged_in', running=False, paused=False)
                     elif path == 'groups': data = dict(groups=[], live_request=False)
                     elif path == 'series': data = dict(points=[])
                     elif path == 'insights/ranges':

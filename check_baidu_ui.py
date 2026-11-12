@@ -51,6 +51,7 @@ def run(output=None):
                     elif path == 'history':
                         data = {'datasets': [{'metadata': {**raw['metadata'], 'keywords': ['合成词甲', '合成词乙'], 'verification': 'pending'}, 'fetched': dt.datetime.now().timestamp()}], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
+                    elif path == 'comments/status': data = {'probe': 'not_logged_in', 'running': False, 'paused': False}
                     elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
                     elif path == 'insights':
                         params = parse_qs(url.query)
