@@ -354,6 +354,7 @@ function renderBaiduWords(){
  const compare=chosenPlatform==='baidu'&&words.length>=2;
  if(chosenPlatform==='baidu'){
   if(key!==baiduWordList){const recent=(reportBatch?.query.platform==='baidu'?reportBatch.query.keywords:datasets.find(d=>d.metadata.platform==='baidu')?.metadata.keywords)||[];baiduWords=recent.filter(w=>words.includes(w)).slice(0,5);baiduWordList=key}
+  if(!baiduWords.length)baiduWords=words.slice(0,1);
   if(baiduWords.length)$('#keywordSelect').value=baiduWords[0];
  }
  $('#keywordSelect').hidden=compare;$('#baiduWords').hidden=!compare;
