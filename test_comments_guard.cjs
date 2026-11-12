@@ -67,23 +67,27 @@ const scroll = execFileSync('python3', ['-c', 'from dyc.hub_comments import SCRO
 function scrollCase({rect = {left: 10, right: 300}, ancestor = false, root = '', risk = false, duplicate = false} = {}) {
   let clicks = 0, expanded = 0, ordinary = 0, windowScroll = 0;
   const element = (left = 10, right = 300) => ({getBoundingClientRect:()=>({left, right, top:10, bottom:100, width:100, height:90}), style:{visibility:'visible', display:'block', overflowY:'visible'}});
-  const button = {...element(), click:()=>clicks++};
+  const button = {...element(), innerText:'1', style:{...element().style, cursor:'pointer'}, querySelector:()=>({}), matches:()=>false, click:()=>clicks++};
+  const other = {...element(), innerText:'3', querySelector:()=>({})};
+  const share = {...element(), innerText:'分享', contains:e=>e === share};
+  const row = {...element(), children:[other, button, other, share], parentElement:null};
+  share.parentElement = row;
   const expand = {...element(), innerText:'展开 3 条回复', click:()=>expanded++};
   const reply = {...element(), innerText:'回复', click:()=>ordinary++};
   const item = {...element(), innerText:'小明 测试评论 展开 3 条回复', querySelectorAll:()=>[reply, expand]};
   const parent = {...element(), scrollHeight:900, clientHeight:100, style:{visibility:'visible', display:'block', overflowY:'auto'}};
-  const box = {...element(rect.left, rect.right), scrollHeight:500, clientHeight:ancestor ? 500 : 100,
+  const box = {...element(rect.left, rect.right), getBoundingClientRect:()=>({left:rect.left, right:rect.right, top:rect.top ?? 10, bottom:rect.bottom ?? 100, width:100, height:90}), scrollHeight:500, clientHeight:ancestor ? 500 : 100,
     style:{visibility:'visible', display:'block', overflowY:ancestor ? 'visible' : 'auto'}, parentElement:ancestor ? parent : null,
     querySelectorAll:()=>duplicate ? [item, item] : [item]};
   const doc = {readyState:'complete', body:{innerText:''}, documentElement:{scrollHeight:1000}, querySelectorAll:q=>
-    q.includes('captcha') ? (risk ? [element()] : []) : q === '[data-e2e="comment-list"]' ? [box] : q === 'div, nav' ? [] : [button]};
+    q.includes('captcha') ? (risk ? [element()] : []) : q === '[data-e2e="comment-list"]' ? [box] : q === '[data-e2e="video-share-icon-container"]' ? [share] : []};
   const ctx = {document:doc, innerWidth:1000, innerHeight:800, getComputedStyle:e=>e.style, scrollTo:()=>windowScroll++};
   ctx.window = ctx;
   const run = vm.runInNewContext(scroll, ctx);
   const action = run({root, text:'测试评论', nickname:'小明'});
   return {ctx, box, parent, clicks, expanded, ordinary, windowScroll, action};
 }
-for (const rect of [{left:1000, right:1100}, {left:1100, right:1200}]) {
+for (const rect of [{left:1000, right:1100}, {left:1100, right:1200}, {left:10, right:300, top:2268, bottom:2358}]) {
   const result = scrollCase({rect});
   assert.equal(result.clicks, 1); assert.equal(result.ctx.__dycArm, true);
 }
@@ -103,15 +107,23 @@ assert.equal(challenged.clicks, 0); assert.equal(challenged.ctx.__dycArm, undefi
 // The visible action row has four icon controls; only its second item is clicked.
 {
   const clicked = [];
-  const style = {visibility:'visible', display:'block'};
+  const style = {visibility:'visible', display:'block', cursor:'pointer'};
   const make = (label, text) => ({innerText:text, style, getBoundingClientRect:()=>({left:10,right:50,top:100,bottom:130,width:40,height:30}),
-    querySelector:()=>({}), click:()=>clicked.push(label)});
+    querySelector:()=>({}), matches:()=>false, click:()=>clicked.push(label)});
   const items = [make('like','3'), make('comment','1'), make('favorite','1'), make('share','分享')];
-  const row = {...make('row',''), children:items};
-  const player = {...make('player',''), getBoundingClientRect:()=>({left:0,right:500,top:0,bottom:90,width:500,height:90})};
+  const row = {...make('row',''), getBoundingClientRect:()=>({left:67,right:500,top:686,bottom:732,width:433,height:46}), children:items, parentElement:null};
+  const share = items[3]; share.parentElement = row; share.contains = e=>e === share;
+  const hidden = {...make('hidden','1'), getBoundingClientRect:()=>({left:0,right:0,top:0,bottom:0,width:0,height:0})};
+  const player = {...make('player',''), getBoundingClientRect:()=>({left:72,right:960,top:72,bottom:632,width:888,height:560})};
   const ctx = {innerWidth:1000, innerHeight:800, getComputedStyle:e=>e.style,
-    document:{readyState:'complete', body:{innerText:'继续播放 使用客户端免弹窗'}, querySelectorAll:q=>q === 'div, nav' ? [row] : q === 'video' ? [player] : []}};
+    document:{readyState:'complete', body:{innerText:'继续播放 使用客户端免弹窗'}, querySelectorAll:q=>q === '[data-e2e="video-share-icon-container"]' ? [share] : q === '[data-e2e="player-container"]' ? [player] : q === 'video' || q.includes('comment') || q.includes('captcha') ? [hidden] : []}};
   ctx.window = ctx;
   assert.equal(vm.runInNewContext(scroll, ctx)({root:'', opened:false}), true);
+  assert.equal(ctx.__dycArm, true);
+  assert.deepEqual(clicked, ['comment']);
+  items[1].style = {...style, cursor:'default'};
+  assert.equal(vm.runInNewContext(scroll, ctx)({root:'', opened:false}), false);
+  items[1].style = {...style, pointerEvents:'none'};
+  assert.equal(vm.runInNewContext(scroll, ctx)({root:'', opened:false}), false);
   assert.deepEqual(clicked, ['comment']);
 }
