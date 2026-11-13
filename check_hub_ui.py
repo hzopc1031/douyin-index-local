@@ -108,7 +108,7 @@ def run(output=None):
                     elif path == 'jobs/synthetic-douyin-login-failure': data = dict(job=fixture['jobs'][0])
                     elif path == 'keys': data = dict(keys=[])
                     elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=fixture.get('comments_running', False), paused=fixture.get('comments_paused', False), pause_reason='user' if fixture.get('comments_paused') else None, output=fixture.get('comments_output'))
-                    elif path == 'comments/runs': data = dict(runs=fixture.get('comments_runs', []), usage=dict(today_used=fixture.get('comments_used'), daily_limit=150, batch_limit=25))
+                    elif path == 'comments/runs': data = dict(runs=fixture.get('comments_runs', []), usage=dict(today_used=fixture.get('comments_used'), daily_limit=3000, batch_limit=1500))
                     elif path.startswith('comments/runs/'):
                         run_id = path.split('/')[2]
                         comments = fixture.get('comments_rows', []) if run_id == '20261113T101112' else []
@@ -925,7 +925,7 @@ def run(output=None):
                 page.evaluate("async () => {tab('comments');await loadCommentsRuns();await loadComments()}")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：空闲'
                 assert page.locator('#commentsRuns').inner_text() == '还没有评论运行记录。填写视频链接后点击开始采集。'
-                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 · 每批最多 25'
+                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 / 3000 · 每批最多 1500'
                 fixture['comments_used'] = 17
                 fixture['comments_output'] = dict(run_id='20261113T101112', requests=3, videos=[dict(
                     video_id='100', top_count=1, reply_count=2, status='complete', reason='exhausted')])
@@ -944,21 +944,24 @@ def run(output=None):
                 assert page.locator('#commentsMessage').inner_text() == '已开始采集…'
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中 · 已请求 3 次'
                 latest = page.locator('#commentsLatest').inner_text()
-                for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '评论已翻完'):
+                for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '已采完'):
                     assert expected in latest
                 fixture['comments_running'] = False
                 page.clock.fast_forward(5000)
                 page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：已完成'
                 assert page.locator('#toast').inner_text() == '采集完成'
-                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 150 · 每批最多 25'
+                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 3000 · 每批最多 1500'
                 assert page.locator('#commentsRuns [data-comments-run]').count() == 2
+                assert not page.locator('#commentsList .cm-replies').evaluate('(node)=>node.open')
+                page.locator('#commentsList .cm-replies>summary').click()
+                assert page.locator('#commentsList .cm-replies').evaluate('(node)=>node.open')
                 rows = page.locator('#commentsList .comment-row')
                 assert '示例评论一' in rows.nth(0).inner_text()
                 assert '示例回复二' in rows.nth(1).inner_text()
                 assert '示例独立回复三' in rows.nth(2).inner_text()
-                assert rows.nth(1).locator('.status').inner_text() == '回复 @测试用户甲'
-                assert rows.nth(2).locator('.status').inner_text() == '回复'
+                assert rows.locator('.status').count() == 0
+                assert '—' in rows.nth(2).locator('.tiny').inner_text()
                 assert rows.nth(1).evaluate('(node)=>getComputedStyle(node).marginLeft') == '24px'
                 assert '测试属地甲' in rows.nth(0).inner_text() and '点赞 5' in rows.nth(0).inner_text()
                 assert '<img' in rows.nth(0).inner_text() and '<script>' in rows.nth(0).inner_text()
@@ -974,6 +977,47 @@ def run(output=None):
                 assert '20261113T101112' in page.locator('#commentsLatest').inner_text()
                 page.locator('[data-comments-run="20261113T101112"]').click()
                 page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
+                # New comments controls use the same routed, fictional run data.
+                fixture['comments_rows'] += [
+                    dict(video_id='100', comment_id='4', level='1', text='虚构的长评论' * 30,
+                         nickname='虚构长文用户', like_count='2', created_at='2026-11-14T09:00:00+08:00', user_id='不可展示的虚构用户编号'),
+                    dict(video_id='7300000000000000002', comment_id='5', level='1', text='另一条虚构视频的评论',
+                         nickname='虚构另一用户', like_count='100', created_at='2026-11-12T09:00:00+08:00')]
+                fixture['comments_runs'][0]['videos'] += [dict(video_id='7300000000000000002', title='虚构视频标题',
+                    reported=1, top_count=1, reply_count=0, pages=1, status='complete', reason='exhausted')]
+                page.evaluate("async () => {await loadCommentsRuns();await loadCommentsRun('20261113T101112')}")
+                assert '另一条虚构视频' in page.locator('#commentsList .cm-thread').first.inner_text()
+                assert '虚构视频标题' in page.locator('#commentsVideoSummary').inner_text()
+                assert '不可展示的虚构用户编号' not in page.locator('#commentsList').inner_text()
+                assert page.locator('#commentsVideo option[value="100"]').inner_text() == '视频 …100'
+                assert page.locator('#commentsVideo option[value="7300000000000000002"]').inner_text() == '虚构视频标题'
+                page.locator('#commentsSort').select_option('time')
+                assert '虚构的长评论' in page.locator('#commentsList .cm-thread').first.inner_text()
+                long_text = page.locator('#commentsList .cm-text')
+                assert '2026-11-14 09:00' in page.locator('#commentsList .cm-thread').first.inner_text()
+                assert not long_text.locator('p').is_visible()
+                assert long_text.locator('summary').evaluate('(node)=>getComputedStyle(node).listStyleType') == 'none'
+                assert long_text.locator('.cm-expand').is_visible()
+                assert not long_text.locator('.cm-close').is_visible()
+                long_text.locator('summary').click()
+                assert long_text.locator('p').is_visible()
+                assert long_text.locator('.cm-close').is_visible()
+                assert not long_text.locator('.cm-expand').is_visible()
+                long_text.locator('summary').click()
+                assert not long_text.locator('p').is_visible()
+                assert long_text.locator('.cm-expand').is_visible()
+                page.locator('#commentsSearch').fill('示例回复二')
+                assert page.locator('#commentsList .cm-thread').count() == 1
+                assert '示例评论一' in page.locator('#commentsList .cm-thread').inner_text()
+                page.locator('#commentsSearch').fill('虚构长文用户')
+                assert page.locator('#commentsList .cm-thread').count() == 1
+                assert '虚构的长评论' in page.locator('#commentsList').inner_text()
+                page.locator('#commentsSearch').fill('')
+                page.locator('#commentsVideo').select_option('7300000000000000002')
+                assert page.locator('#commentsList .cm-thread').count() == 1
+                assert '另一条虚构视频' in page.locator('#commentsList').inner_text()
+                page.locator('#commentsVideo').select_option('')
+                page.locator('#commentsSort').select_option('likes')
                 page.evaluate("renderComments({probe:'verification_required',paused:true,pause_reason:'verification_required'})")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：已暂停'
                 assert page.locator('#commentsPauseReason').inner_text() == '暂停原因：需要验证'

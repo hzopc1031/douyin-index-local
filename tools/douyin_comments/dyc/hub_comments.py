@@ -19,7 +19,7 @@ from . import site
 from .errors import Stop
 from .models import Video
 from .paging import ingest_page
-from .runtime import Budget, DailyCounter, Pacer, atomic_text, private_open
+from .runtime import BATCH_LIMIT, DAILY_LIMIT, Budget, DailyCounter, HubPacer, atomic_text, private_open
 
 COMMENTS_BUSY = "正在采集评论，稍后重试"
 INDEX_BUSY = "取数或核对正在进行，请等待。"
@@ -28,8 +28,6 @@ LOGIN_ENTRY = {"login_entry": "index_sms", "login_path": "/api/v1/login/sms"}
 LOCK_TIMEOUT = 30
 PROBE_TIMEOUT = 10
 SHORT_LINK_TIMEOUT = 15
-BATCH_LIMIT = 25
-DAILY_LIMIT = 150
 PAUSE_STOPS = {
     "verification_widget": "verification_required",
     "verification_response": "verification_required",
@@ -119,6 +117,9 @@ GUARD_JS = r"""(function(){
     const query = target.search.slice(1).split('&').map(part => {
       const key = new URLSearchParams(part).keys().next().value;
       if (['a_bogus', 'x-bogus', '_signature'].includes((key || '').toLowerCase())) return null;
+      if (key === 'count' && !(cfg.root && Number(new URLSearchParams(part).get(key)) > 20)) {
+        return part.split('=')[0] + '=20';
+      }
       if ((key || '').toLowerCase() === 'mstoken') {
         let token = null;
         try { token = localStorage.getItem('xmst'); } catch (e) {}
@@ -357,6 +358,7 @@ class QtCommentTransport:
         raise Stop(2, "short_link_unresolved")
 
     async def fetch(self, video_id, root, cursor):
+        started = self.pacer.clock()
         if self.video_id != video_id:
             self.budget.new_video()
         if self.budget.used >= self.budget.limit:
@@ -454,7 +456,7 @@ class QtCommentTransport:
                     outcome.update(_coerce_fetch(state["result"]) if state.get("result") else {"kind": "timeout"})
                     outcome["request_sent"] = True
             if sent:
-                self.pacer.completed()
+                self.pacer.completed(started)
 
 
 def _eval(window, js, arg=None):
@@ -496,11 +498,12 @@ class CollectJob:
         started = 0
         while self.queue and started < max_pages:
             if self.used >= self.page_budget:
-                raise Stop(2, "batch_cap")
+                raise Stop(2, "video_page_budget")
             root, cursor = self.queue.pop(0)
             decoded = await self._page(root, cursor)
             started += 1
             comments, next_cursor, more, _ = decoded
+            self.video.record_page(root, decoded)
             ingest_page(self.video, root, decoded)
             bucket = self.seen.setdefault(root, set())
             fresh = 0
@@ -566,18 +569,18 @@ class CollectJob:
     async def _page(self, root, cursor):
         for attempt in range(2):
             if self.used >= self.page_budget:
-                raise Stop(2, "batch_cap")
+                raise Stop(2, "video_page_budget")
             take_seed = getattr(self.transport, "take_seed", None)
             seed = take_seed(self.video.video_id, root, cursor) if take_seed else None
             if seed is not None:
                 self.used += 1
-                self.video.pages += 1
+                self.video.record_request(root, retry=attempt > 0)
                 return seed
             result = await self.transport.fetch(self.video.video_id, root, cursor)
             sent = result.get("request_sent", True)
             if sent:
                 self.used += 1
-                self.video.pages += 1
+                self.video.record_request(root, retry=attempt > 0)
             keys = []
             try:
                 body = json.loads(result.get("text", ""))
@@ -727,8 +730,9 @@ class CommentsHub:
         except Stop as error:
             self._halt(False, pause_reason(error.reason))
             return {"ok": False, "code": error.reason, **self.status()}
-        used_budget = budget or Budget(counter, batch_limit=self._limit(payload, "batch_limit", BATCH_LIMIT))
-        used_pacer = pacer or Pacer()
+        used_budget = budget or Budget(counter, batch_limit=self._limit(payload, "batch_limit", BATCH_LIMIT),
+                                       video_limit=BATCH_LIMIT)
+        used_pacer = pacer or HubPacer()
         thread = threading.Thread(target=self._run, args=(videos, used_budget, used_pacer),
                                   name="hub-comments", daemon=True)
         self._worker = thread
@@ -773,6 +777,9 @@ class CommentsHub:
                         asyncio.run(pacer.between_videos())
                     except Exception:
                         pass
+                remaining = len(videos) - index
+                budget.video_limit = (budget.limit - budget.used + remaining - 1) // remaining
+                budget.new_video()
                 transport = self._make_transport(budget, pacer)
                 locked = self._locked_transport(transport, pacer)
                 if not video.video_id:
@@ -789,7 +796,7 @@ class CommentsHub:
                     known_ids.add(video.video_id)
                 transport.video_url = video.video_url
                 transport.video = video
-                job = CollectJob(video, locked, BATCH_LIMIT)
+                job = CollectJob(video, locked, budget.video_limit)
                 try:
                     while not job.done and not self._stop.is_set():
                         more = asyncio.run(job.run_slice(1))
@@ -857,7 +864,7 @@ class CommentsHub:
                     if acquired and hub._acquire is not None and hub._release is not None:
                         hub._release()
                     if acquired:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.05)
 
         return LockedTransport()
 

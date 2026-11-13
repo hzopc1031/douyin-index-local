@@ -129,11 +129,23 @@ def check_memory(minimum=2 * 1024**3, path="/proc/meminfo"):
     return available
 
 
+# Hub 显式启用新额度，CLI 保留原来的默认额度。
+BATCH_LIMIT = 1500
+DAILY_LIMIT = 3000
+HUB_GAP_MIN = 0.6
+HUB_GAP_MAX = 1.0
+HUB_REST_EVERY = 50
+HUB_REST_MIN = 1
+HUB_REST_MAX = 2
+HUB_VIDEO_GAP_MIN = 1
+HUB_VIDEO_GAP_MAX = 2
+
+
 class DailyCounter:
     def __init__(self, state, today=None, limit=150):
         self.state = private_dir(state)
         self.today = today or (lambda: datetime.now(SHANGHAI).date().isoformat())
-        self.limit = min(limit, 150)
+        self.limit = min(limit, DAILY_LIMIT)
 
     @contextmanager
     def locked(self):
@@ -188,8 +200,8 @@ class DailyCounter:
 class Budget:
     def __init__(self, counter, batch_limit=25, video_limit=25):
         self.counter = counter
-        self.limit = min(batch_limit, 25)
-        self.video_limit = min(video_limit, 25)
+        self.limit = min(batch_limit, BATCH_LIMIT)
+        self.video_limit = min(video_limit, BATCH_LIMIT)
         self.used = self.video_used = 0
 
     def new_video(self):
@@ -206,6 +218,11 @@ class Budget:
 
 
 class Pacer:
+    gap = (2, 4)
+    rest_every = 15
+    rest = (8, 15)
+    video_gap = (20, 40)
+
     def __init__(self, clock=time.monotonic, sleep=asyncio.sleep, rng=None):
         self.clock, self.sleep = clock, sleep
         self.rng = rng or random.SystemRandom()
@@ -217,16 +234,24 @@ class Pacer:
         if delay > 0:
             await self.sleep(delay)
 
-    def completed(self):
+    def completed(self, started=None):
         self.count += 1
-        delay = self.rng.uniform(2, 4)
-        if self.count % 15 == 0:
-            delay += self.rng.uniform(8, 15)
-        self.ready = self.clock() + delay
+        delay = self.rng.uniform(*self.gap)
+        if self.count % self.rest_every == 0:
+            delay += self.rng.uniform(*self.rest)
+        # Hub counts request time inside the gap; CLI keeps its post-response gap.
+        self.ready = (self.clock() if started is None else started) + delay
 
     async def between_videos(self):
         await self.before()
-        await self.sleep(self.rng.uniform(20, 40))
+        await self.sleep(self.rng.uniform(*self.video_gap))
+
+
+class HubPacer(Pacer):
+    gap = (HUB_GAP_MIN, HUB_GAP_MAX)
+    rest_every = HUB_REST_EVERY
+    rest = (HUB_REST_MIN, HUB_REST_MAX)
+    video_gap = (HUB_VIDEO_GAP_MIN, HUB_VIDEO_GAP_MAX)
 
 
 class Display:
