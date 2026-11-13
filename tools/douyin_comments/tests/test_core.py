@@ -260,11 +260,15 @@ class SchemaTests(unittest.TestCase):
         from dyc.browser import Browser
         browser = SimpleNamespace(page=SimpleNamespace(url=""), backend=None)
         for url in ("https://www.douyin.com/intermediate", "https://v.douyin.com/landing/error",
-                    "https://iesdouyin.com/intermediate"):
+                    "https://iesdouyin.com/intermediate", "https://www.iesdouyin.com/intermediate"):
             browser.page.url = url
             self.assertIsNone(Browser.resolved_target(browser))
         browser.page.url = "https://www.douyin.com/video/7300000000000000001?source=synthetic"
         self.assertEqual(Browser.resolved_target(browser).video_id, "7300000000000000001")
+        for host in ("iesdouyin.com", "www.iesdouyin.com"):
+            browser.page.url = f"https://{host}/share/video/7300000000000000001/"
+            self.assertEqual(Browser.resolved_target(browser).url,
+                             "https://www.douyin.com/video/7300000000000000001")
         browser.page.url = "https://v.douyin.com/AbCd123/"
         self.assertIsNone(Browser.resolved_target(browser).video_id)
         for url in ("https://evil.invalid/", "http://www.douyin.com/intermediate"):

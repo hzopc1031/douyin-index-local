@@ -25,6 +25,7 @@ bin/dyc fetch 'https://www.douyin.com/video/<id>' 'https://v.douyin.com/<short>/
 
 `urls.txt` 每行一个链接，空行和 `#` 注释忽略；也支持带 `modal_id` 的链接及 `iesdouyin.com` / `www.iesdouyin.com` 的 `/share/video/<id>/` 分享页。
 按视频 ID 去重；短链由浏览器导航解析。默认输出 `~/dyc-output/<run_id>/`。
+CLI 与中枢共用的落地页信任范围现包含 HTTPS 默认端口的 `iesdouyin.com` / `www.iesdouyin.com`：中间页继续等待，视频分享页解析为规范视频链接，不再报 `untrusted_video_redirect`。
 `--help` 在每个子命令可用；`--max-pages` 可降低单视频请求预算，不能提高硬上限。
 完成时 stdout **恰好一行 JSON**，包含目录、每个视频状态/数量和退出原因；人类日志在 stderr 和 `run.log`。
 

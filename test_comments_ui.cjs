@@ -18,6 +18,7 @@ function fixture(){
  const f=fixture();await new Promise(setImmediate);
  assert.equal(f.run("commentsName('short_link_unresolved')"),'短链未能解析');
  assert.equal(f.run("commentsName('untrusted_video_redirect')"),'短链跳转到非抖音页面');
+ assert.equal(f.run("commentsName('deduplicated')"),'重复视频，已跳过');
  f.$('#commentsVideoInput').value='  https://example.com/1  \n\nhttps://example.com/2\r\n';
  await f.$('#commentsStartButton').onclick();
  assert.deepStrictEqual(Array.from(f.calls.find(c=>c.path==='comments/start').body.videos),['https://example.com/1','https://example.com/2']);
