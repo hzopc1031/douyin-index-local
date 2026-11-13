@@ -10,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from http.cookies import SimpleCookie
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parent
@@ -68,6 +69,27 @@ class InstantPacer(Pacer):
 class _ZeroRng:
     def uniform(self, a, b):
         return 0
+
+
+class RedirectWindow(FakeWindow):
+    def __init__(self, redirects):
+        super().__init__()
+        self.redirects = redirects
+        self.locations = iter(())
+        self.probed_locations = []
+
+    def load_url(self, url):
+        super().load_url(url)
+        self.locations = iter(self.redirects.get(url, [url]))
+
+    def evaluate_js(self, js, arg=None):
+        if js == app_module_comments.PROBE_JS:
+            self.url = next(self.locations, self.url)
+            parsed = urlsplit(self.url)
+            self.page.update(https=parsed.scheme == "https", host=parsed.hostname,
+                             path=parsed.path, modal_id=parse_qs(parsed.query).get("modal_id", [None])[0])
+            self.probed_locations.append(self.url)
+        return super().evaluate_js(js, arg)
 
 
 def _page(comments=None, more=False, cursor=1, **extra):
@@ -307,13 +329,217 @@ class CommentsHubTests(unittest.TestCase):
         self.assertFalse(self.lock.locked())
         self.assertIn(app_module_comments.CLOSE_JS, scripts)
 
-    def test_invalid_and_short_urls_are_rejected(self):
-        for url in ("not-a-url", "https://v.douyin.com/AbCdeFg/"):
+    def test_invalid_urls_are_rejected(self):
+        for url in ("not-a-url", "7300000000000000001", "https://www.douyin.com/note/7300000000000000001",
+                    "https://example.invalid/video/7300000000000000001", "https://www.douyin.com/"):
             with self.subTest(url=url):
                 result = self.hub.start({"videos": [url]})
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "invalid_parameters")
+                self.assertEqual(result["invalid_lines"], [1])
                 self.assertIsNone(self.hub._worker)
+
+    def test_video_formats_normalize_without_navigation(self):
+        vid = "7300000000000000001"
+        canonical = "https://www.douyin.com/video/" + vid
+        for url in (canonical + "?source=synthetic", "https://douyin.com/?modal_id=" + vid,
+                    "https://www.douyin.com/user/synthetic?modal_id=" + vid,
+                    "合成分享文案 " + canonical + "，复制链接打开抖音",
+                    "https://iesdouyin.com/share/video/" + vid + "/",
+                    "https://www.iesdouyin.com/share/video/" + vid + "/?source=synthetic"):
+            with self.subTest(url=url):
+                videos = self.hub._videos({"videos": [url]})
+                self.assertEqual([(v.video_id, v.video_url) for v in videos], [(vid, canonical)])
+        self.assertEqual(self.window.loaded, [])
+        self.assertEqual(self.window.scripts, [])
+
+    def test_start_accepts_short_share_without_resolving_before_worker(self):
+        short = "https://v.douyin.com/AbCd123/"
+        with patch("dyc.hub_comments.threading.Thread") as worker:
+            started = self.hub.start({"videos": ["合成口令 " + short + "，复制打开抖音"]})
+        self.assertTrue(started["ok"])
+        worker.return_value.start.assert_called_once_with()
+        videos = worker.call_args.kwargs["args"][0]
+        self.assertEqual([(v.video_id, v.video_url) for v in videos], [("", short)])
+        self.assertEqual(self.window.loaded, [])
+        self.assertFalse(any(app_module_comments.ARM_JS in js for js in self.window.scripts))
+
+    def test_invalid_mixed_batch_reports_all_lines_without_starting_or_echoing(self):
+        inputs = ["https://v.douyin.com/AbCd123/", "synthetic-private-invalid-line",
+                  "https://iesdouyin.com/share/video/7300000000000000001/", "7300000000000000002"]
+        with patch.object(self.hub, "probe") as probe:
+            result = self.hub.start({"videos": inputs})
+        self.assertEqual(result["code"], "invalid_parameters")
+        self.assertEqual(result["invalid_lines"], [2, 4])
+        self.assertIn("第 2、4 行无法识别为抖音视频链接", result["message"])
+        self.assertNotIn(inputs[1], json.dumps(result))
+        self.assertNotIn(inputs[3], json.dumps(result))
+        probe.assert_not_called()
+        self.assertIsNone(self.hub._worker)
+        self.assertFalse(self.hub.status()["running"])
+
+    def run_redirect_batch(self, urls, redirects):
+        self.window = RedirectWindow(redirects)
+        budget = Budget(DailyCounter(Path(self.tmp.name)))
+        calls = []
+        real_sleep = asyncio.sleep
+
+        async def quick_sleep(delay):
+            if delay == 1:
+                self.assertFalse(self.lock.locked())
+            await real_sleep(0)
+
+        async def fetch(transport, video_id, root, cursor):
+            self.assertIs(transport.window, self.window)
+            self.assertTrue(self.lock.locked())
+            self.assertTrue(self.hub.status()["busy"])
+            calls.append(video_id)
+            budget.new_video()
+            budget.reserve()
+            return response(total=0)
+
+        original_load = self.window.load_url
+        def load(url):
+            self.assertTrue(self.lock.locked())
+            self.assertEqual(budget.used, len(calls))
+            original_load(url)
+        self.window.load_url = load
+        with patch.object(QtCommentTransport, "fetch", fetch), \
+                patch("dyc.hub_comments.asyncio.sleep", quick_sleep), \
+                patch("dyc.hub_comments.SHORT_LINK_TIMEOUT", 0.03):
+            result = self.hub.start({"videos": urls}, budget=budget, pacer=InstantPacer())
+            self.assertTrue(result["ok"])
+            self.hub._worker.join(3)
+            self.assertFalse(self.hub._worker.is_alive())
+        status = self.hub.status()
+        self.assertFalse(status["running"])
+        self.assertFalse(status["paused"])
+        self.assertFalse(self.lock.locked())
+        self.assertEqual(budget.used, len(calls))
+        self.assertEqual(DailyCounter(Path(self.tmp.name)).usage(), len(calls))
+        self.assertEqual(status["output"]["requests"], len(calls))
+        return status["output"]["videos"], calls
+
+    def test_short_redirect_success_and_official_intermediates(self):
+        short = "https://v.douyin.com/AbCd123/"
+        vid = "7300000000000000001"
+        canonical = "https://www.douyin.com/video/" + vid
+        locations = [short, "https://www.douyin.com/landing", "https://iesdouyin.com/landing",
+                     "https://www.iesdouyin.com/landing", canonical + "?source=synthetic"]
+        videos, calls = self.run_redirect_batch([short], {short: locations})
+        self.assertEqual(calls, [vid])
+        self.assertEqual((videos[0]["video_id"], videos[0]["video_url"], videos[0]["status"]),
+                         (vid, canonical, "complete"))
+        self.assertEqual(self.window.probed_locations[1:], locations)
+        self.assertEqual(self.window.loaded, [short])
+
+    def test_short_redirect_modal_and_share_page_success(self):
+        short = "https://v.douyin.com/AbCd123/"
+        vid = "7300000000000000001"
+        for landing in ("https://www.douyin.com/?modal_id=" + vid,
+                        "https://www.iesdouyin.com/share/video/" + vid + "/"):
+            with self.subTest(landing=landing):
+                video = Video("", short)
+                window = RedirectWindow({short: [short, landing]})
+                transport = QtCommentTransport(window, Mock(), InstantPacer())
+                asyncio.run(transport.resolve(video))
+                self.assertEqual((video.video_id, video.video_url),
+                                 (vid, "https://www.douyin.com/video/" + vid))
+
+    def test_short_timeout_only_marks_that_video_partial(self):
+        short = "https://v.douyin.com/AbCd123/"
+        vid = "7300000000000000002"
+        videos, calls = self.run_redirect_batch(
+            [short, "https://www.douyin.com/video/" + vid],
+            {short: [short, "https://www.iesdouyin.com/landing"]})
+        self.assertEqual(calls, [vid])
+        self.assertEqual((videos[0]["video_id"], videos[0]["status"], videos[0]["reason"], videos[0]["pages"]),
+                         ("", "partial", "short_link_unresolved", 0))
+        self.assertEqual(videos[1]["status"], "complete")
+
+    def test_short_untrusted_redirect_only_marks_that_video_partial(self):
+        short = "https://v.douyin.com/AbCd123/"
+        vid = "7300000000000000002"
+        videos, calls = self.run_redirect_batch(
+            [short, "https://www.douyin.com/video/" + vid],
+            {short: [short, "https://evil.invalid/video/7300000000000000001",
+                     "https://www.douyin.com/video/7300000000000000001"]})
+        self.assertEqual(calls, [vid])
+        self.assertEqual((videos[0]["status"], videos[0]["reason"], videos[0]["pages"]),
+                         ("partial", "untrusted_video_redirect", 0))
+        self.assertNotIn("https://www.douyin.com/video/7300000000000000001", self.window.probed_locations)
+        self.assertEqual(videos[1]["status"], "complete")
+
+    def test_short_duplicates_known_ids_before_and_after_resolution(self):
+        short = "https://v.douyin.com/AbCd123/"
+        other = "https://v.douyin.com/EfGh456/"
+        canonical = "https://www.douyin.com/video/7300000000000000001"
+        videos, calls = self.run_redirect_batch([short, canonical, other],
+                                                {short: [short, canonical], other: [other, canonical]})
+        self.assertEqual(calls, ["7300000000000000001"])
+        self.assertEqual([(v["status"], v["reason"]) for v in videos],
+                         [("duplicate", "deduplicated"), ("complete", "exhausted"),
+                          ("duplicate", "deduplicated")])
+
+    def test_two_shorts_resolving_to_same_id_are_collected_once(self):
+        short = "https://v.douyin.com/AbCd123/"
+        other = "https://v.douyin.com/EfGh456/"
+        canonical = "https://www.douyin.com/video/7300000000000000001"
+        videos, calls = self.run_redirect_batch([short, other],
+                                                {short: [short, canonical], other: [other, canonical]})
+        self.assertEqual(calls, ["7300000000000000001"])
+        self.assertEqual([(v["status"], v["reason"]) for v in videos],
+                         [("complete", "exhausted"), ("duplicate", "deduplicated")])
+
+    def test_only_failed_shorts_use_no_comment_budget(self):
+        short = "https://v.douyin.com/AbCd123/"
+        videos, calls = self.run_redirect_batch([short], {short: [short]})
+        self.assertEqual(calls, [])
+        self.assertEqual(videos[0]["reason"], "short_link_unresolved")
+        self.assertFalse((Path(self.tmp.name) / "usage.json").exists())
+
+    def test_all_valid_formats_can_share_one_batch(self):
+        short = "https://v.douyin.com/AbCd123/"
+        prefix = "https://www.douyin.com/video/"
+        ids = [str(7300000000000000001 + i) for i in range(5)]
+        urls = [prefix + ids[0] + "?source=synthetic", "https://douyin.com/?modal_id=" + ids[1],
+                "合成分享口令 " + short + "，复制打开抖音",
+                "https://iesdouyin.com/share/video/" + ids[3] + "/",
+                "https://www.iesdouyin.com/share/video/" + ids[4] + "/"]
+        videos, calls = self.run_redirect_batch(urls, {short: [short, prefix + ids[2]]})
+        self.assertEqual(calls, ids)
+        self.assertEqual([v["video_url"] for v in videos], [prefix + vid for vid in ids])
+        self.assertTrue(all(v["status"] == "complete" for v in videos))
+
+    def test_short_resolution_waits_for_index_window_lock(self):
+        short = "https://v.douyin.com/AbCd123/"
+        canonical = "https://www.douyin.com/video/7300000000000000001"
+        self.window = RedirectWindow({short: [short, canonical]})
+        budget = Budget(DailyCounter(Path(self.tmp.name)))
+        transport = QtCommentTransport(self.window, budget, InstantPacer())
+        video = Video("", short)
+        original_load = self.window.load_url
+        def load(url):
+            self.assertEqual(self.owner[0], "comments")
+            self.assertTrue(self.hub.status()["busy"])
+            original_load(url)
+        self.window.load_url = load
+        self.lock.acquire()
+        self.owner[0] = "index"
+
+        async def run():
+            task = asyncio.create_task(self.hub._locked_transport(transport, InstantPacer()).resolve(video))
+            await asyncio.sleep(0.05)
+            self.assertTrue(self.hub.status()["waiting_for_index"])
+            self.assertEqual(self.window.loaded, [])
+            self.owner[0] = None
+            self.lock.release()
+            await asyncio.wait_for(task, 3)
+        asyncio.run(run())
+        self.assertEqual(video.video_url, canonical)
+        self.assertFalse(self.hub.status()["waiting_for_index"])
+        self.assertFalse(self.lock.locked())
+        self.assertEqual(budget.used, 0)
 
     def test_evaluate_js_invokes_fetch_with_serialized_config(self):
         recorded = []
