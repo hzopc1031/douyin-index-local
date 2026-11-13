@@ -93,6 +93,11 @@ table,pre{font-size:13px}th,td{line-height:1.7}
 .result-tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--ink);background:var(--raised)}
 .range-picker>summary strong,.report-progress>summary,.info-button{color:var(--ink)}
 .dialog,.toast,.info-popover,.charttip{border-color:var(--line)}
+/* 宽屏铺满侧栏右侧，网格子项允许在可用宽度内收缩。 */
+.main{max-width:none;padding-inline:clamp(24px,2.5vw,64px)}
+.grid>*,.apigrid>*,.summary-grid>*,.insight-grid>*{min-width:0}
+.tablewrap{max-width:100%}table{table-layout:fixed}th,td{white-space:normal;overflow-wrap:anywhere}
+@media(max-width:850px){.main{padding-inline:16px}}
 </style></head><body>
 <div class="shell"><aside class="side"><div class="brand">指数工作台<small>INDEX ATLAS</small></div><nav class="nav"><button class="active" data-tab="overview"><span>◈</span>趋势总览</button><button data-tab="comments"><span>☰</span>评论采集</button><button data-tab="tasks"><span>☷</span>采集任务</button><button data-tab="connections"><span>⊞</span>平台连接</button></nav><div class="sidefoot"><b>多平台关键词洞察</b><br>每个平台，保留自己的口径。<br><br>PRIVATE WORKSPACE · V1.0</div></aside>
 <main class="main"><header class="top"><div><h1 id="pageTitle">趋势总览</h1></div><div class="topright"><button class="btn secondary" id="globalRefresh">刷新</button><span class="badge" id="browserBadge"><span class="dot"></span>正在连接</span></div></header>
