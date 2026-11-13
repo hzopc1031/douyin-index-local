@@ -17,6 +17,7 @@ VIDEO_URL = "https://www.douyin.com/video/{video_id}"
 FAKE_ORIGIN = "https://dyc.invalid"
 HOSTS = {"douyin.com", "www.douyin.com"}
 SHORT_HOST = "v.douyin.com"
+SHARE_HOSTS = {"iesdouyin.com", "www.iesdouyin.com"}
 VIDEO_PATH = r"/video/([0-9]+)/*"
 MODAL_PARAM = "modal_id"
 TOP_PATH = "/aweme/v1/web/comment/list/"
@@ -58,6 +59,21 @@ class Target:
     video_id: str | None
 
 
+def extract_share_url(value):
+    match = re.search(r"https?://[^\s\u0080-\uffff<>\"'()\[\]{},;!]+", value)
+    return match[0].rstrip(".?!:") if match else value.strip()
+
+
+def trusted_video_landing(url, *, fake=False):
+    try:
+        parsed = urlsplit(url)
+        hosts = {urlsplit(FAKE_ORIGIN).hostname} if fake else HOSTS | {SHORT_HOST} | SHARE_HOSTS
+        return (parsed.scheme == "https" and parsed.hostname in hosts
+                and parsed.port in (None, 443) and not parsed.username and not parsed.password)
+    except ValueError:
+        return False
+
+
 def parse_url(value, *, fake=False):
     try:
         parsed = urlsplit(value.strip())
@@ -72,7 +88,12 @@ def parse_url(value, *, fake=False):
             if not re.fullmatch(r"/[A-Za-z0-9_-]+/?", parsed.path):
                 raise ValueError
             return Target(f"https://{SHORT_HOST}{parsed.path}", None)
-        if parsed.hostname not in hosts:
+        if parsed.hostname in SHARE_HOSTS:
+            match = re.fullmatch(r"/share/video/([0-9]{1,40})/?", parsed.path)
+            if not match:
+                raise ValueError
+            return Target(VIDEO_URL.format(video_id=match[1]), match[1])
+        if parsed.hostname not in hosts or parsed.path.startswith("/note/"):
             raise ValueError
         match = re.fullmatch(VIDEO_PATH, parsed.path)
         values = parse_qs(parsed.query, keep_blank_values=True).get(MODAL_PARAM, [])

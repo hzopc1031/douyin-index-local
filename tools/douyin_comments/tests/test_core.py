@@ -10,7 +10,7 @@ from dyc.errors import Stop
 from dyc.models import Video, normalize
 from dyc.paging import collect
 from dyc.runtime import Budget, DailyCounter, Display, Pacer, Profile, check_memory, private_dir
-from dyc.site import decode_page, parse_url
+from dyc.site import decode_page, extract_share_url, parse_url, trusted_video_landing
 from tests.helpers import Transport, comment, response
 
 
@@ -207,6 +207,71 @@ class SchemaTests(unittest.TestCase):
                     "https://douyin.com/video/123?modal_id=124", "https://douyin.com/?modal_id=1&modal_id=2"):
             with self.subTest(url=url), self.assertRaises(Stop):
                 parse_url(url)
+
+    def test_share_video_urls(self):
+        vid = "7300000000000000001"
+        for host in ("iesdouyin.com", "www.iesdouyin.com"):
+            for suffix in ("", "/", "/?source=synthetic"):
+                with self.subTest(host=host, suffix=suffix):
+                    target = parse_url(f"https://{host}/share/video/{vid}{suffix}")
+                    self.assertEqual((target.video_id, target.url),
+                                     (vid, f"https://www.douyin.com/video/{vid}"))
+        for url in (vid, "https://www.douyin.com/note/" + vid,
+                    "https://www.douyin.com/note/123?modal_id=" + vid,
+                    "https://iesdouyin.com/share/video/", "https://iesdouyin.com/video/" + vid,
+                    "https://iesdouyin.com/share/note/" + vid,
+                    "https://iesdouyin.com.evil/share/video/" + vid,
+                    "https://v.douyin.com/", "https://www.douyin.com/"):
+            with self.subTest(url=url), self.assertRaises(Stop):
+                parse_url(url)
+
+    def test_extract_first_share_url(self):
+        short = "https://v.douyin.com/AbCd123/"
+        for suffix in (" 复制此链接", "中文后缀", "，打开抖音", "。", ",next", ");", "！", "\n结束"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(extract_share_url("合成分享口令 " + short + suffix), short)
+        long = "https://www.douyin.com/?modal_id=7300000000000000001&source=synthetic"
+        self.assertEqual(extract_share_url("分享 " + long + "。"), long)
+        self.assertEqual(extract_share_url(short + " https://www.douyin.com/video/123"), short)
+        self.assertEqual(extract_share_url("http://v.douyin.com/AbCd123/"), "http://v.douyin.com/AbCd123/")
+        self.assertEqual(extract_share_url(" 7300000000000000001 "), "7300000000000000001")
+        with self.assertRaises(Stop):
+            parse_url(extract_share_url("https://example.invalid/ https://www.douyin.com/video/123"))
+
+    def test_trusted_video_landings(self):
+        for host in ("douyin.com", "www.douyin.com", "v.douyin.com",
+                     "iesdouyin.com", "www.iesdouyin.com"):
+            with self.subTest(host=host):
+                self.assertTrue(trusted_video_landing(f"https://{host}/intermediate"))
+                self.assertTrue(trusted_video_landing(f"https://{host}:443/intermediate"))
+                self.assertFalse(trusted_video_landing(f"http://{host}/intermediate"))
+                self.assertFalse(trusted_video_landing(f"https://{host}:8443/intermediate"))
+                self.assertFalse(trusted_video_landing(f"https://user@{host}/intermediate"))
+        for url in ("https://douyin.com.evil/", "https://evil.invalid/", "about:blank",
+                    "https://www.douyin.com:bad/", "https://[broken/"):
+            with self.subTest(url=url):
+                self.assertFalse(trusted_video_landing(url))
+        self.assertTrue(trusted_video_landing("https://dyc.invalid/intermediate", fake=True))
+        self.assertFalse(trusted_video_landing("https://dyc.invalid/intermediate"))
+        self.assertFalse(trusted_video_landing("https://www.douyin.com/intermediate", fake=True))
+
+    def test_browser_resolved_target_without_launching_browser(self):
+        from types import SimpleNamespace
+        from dyc.browser import Browser
+        browser = SimpleNamespace(page=SimpleNamespace(url=""), backend=None)
+        for url in ("https://www.douyin.com/intermediate", "https://v.douyin.com/landing/error",
+                    "https://iesdouyin.com/intermediate"):
+            browser.page.url = url
+            self.assertIsNone(Browser.resolved_target(browser))
+        browser.page.url = "https://www.douyin.com/video/7300000000000000001?source=synthetic"
+        self.assertEqual(Browser.resolved_target(browser).video_id, "7300000000000000001")
+        browser.page.url = "https://v.douyin.com/AbCd123/"
+        self.assertIsNone(Browser.resolved_target(browser).video_id)
+        for url in ("https://evil.invalid/", "http://www.douyin.com/intermediate"):
+            browser.page.url = url
+            with self.subTest(url=url), self.assertRaises(Stop) as caught:
+                Browser.resolved_target(browser)
+            self.assertEqual((caught.exception.code, caught.exception.reason), (3, "untrusted_video_redirect"))
 
 
 class RuntimeTests(unittest.TestCase):
