@@ -12,8 +12,10 @@ import os
 import secrets
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
 from . import site
 from .errors import Stop
@@ -622,6 +624,7 @@ class CommentsHub:
         self._guard = threading.Lock()
         self._worker = None
         self._stop = threading.Event()
+        self._progress_source = None
         self._snapshot = {
             "probe": None,
             "running": False,
@@ -631,6 +634,7 @@ class CommentsHub:
             "waiting_for_index": False,
             "summary": None,
             "output": None,
+            "progress": None,
         }
 
         path = self.state_dir / "pause.json"
@@ -648,7 +652,17 @@ class CommentsHub:
         atomic_text(self.state_dir / "pause.json", json.dumps({
             "paused": self._snapshot["paused"], "pause_reason": self._snapshot["pause_reason"]}) + "\n")
 
+    def _update_progress(self):
+        with self._guard:
+            if self._progress_source is not None:
+                budget, videos = self._progress_source
+                self._snapshot["progress"] = dict(
+                    self._snapshot["progress"], requests=budget.used,
+                    top_items=sum(video.top_items for video in videos),
+                    reply_items=sum(video.reply_items for video in videos))
+
     def status(self):
+        self._update_progress()
         with self._guard:
             data = dict(self._snapshot)
         data.update(login_hint(data.get("probe")))
@@ -722,7 +736,7 @@ class CommentsHub:
         with self._guard:
             self._stop.clear()
             self._snapshot.update(running=True, paused=False, pause_reason=None, busy=False,
-                                  waiting_for_index=False, summary=None, output=None)
+                                  waiting_for_index=False, summary=None, output=None, progress=None)
             self._save_pause()
         counter = DailyCounter(self.state_dir, limit=DAILY_LIMIT)
         try:
@@ -767,11 +781,19 @@ class CommentsHub:
     def _run(self, videos, budget, pacer):
         summaries = []
         job = None
+        with self._guard:
+            self._progress_source = (budget, videos)
+            self._snapshot["progress"] = dict(
+                started_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                requests=budget.used, batch_limit=budget.limit, top_items=0, reply_items=0,
+                video_index=0, video_total=len(videos), finished_at=None)
         known_ids = {video.video_id for video in videos if video.video_id}
         try:
             for index, video in enumerate(videos):
                 if self._stop.is_set():
                     break
+                with self._guard:
+                    self._snapshot["progress"] = dict(self._snapshot["progress"], video_index=index + 1)
                 if index:
                     try:
                         asyncio.run(pacer.between_videos())
@@ -800,6 +822,7 @@ class CommentsHub:
                 try:
                     while not job.done and not self._stop.is_set():
                         more = asyncio.run(job.run_slice(1))
+                        self._update_progress()
                         if not more:
                             break
                 except Stop as error:
@@ -830,6 +853,13 @@ class CommentsHub:
             except Exception:
                 pass
             self._halt(True, "browser_unavailable")
+        finally:
+            self._update_progress()
+            with self._guard:
+                self._snapshot["progress"] = dict(
+                    self._snapshot["progress"],
+                    finished_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"))
+                self._progress_source = None
 
     def _locked_transport(self, transport, pacer):
         hub = self

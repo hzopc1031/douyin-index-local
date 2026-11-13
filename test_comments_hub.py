@@ -163,6 +163,7 @@ class CommentsHubTests(unittest.TestCase):
     def test_probe_logged_in_and_does_not_call_comment_api(self):
         result = self.hub.probe()
         self.assertEqual(result["probe"], "logged_in")
+
         self.assertTrue(result["ok"])
         self.assertNotIn("login_entry", result)
         probe_scripts = [script for script in self.window.scripts if "user-avatar" in script]
@@ -172,6 +173,44 @@ class CommentsHubTests(unittest.TestCase):
         self.assertNotIn("sessionid", joined)
         self.assertNotIn("sid_tt", joined)
         self.assertNotIn("sid_guard", joined)
+
+    def test_progress_reuses_live_budget_and_page_counts_until_next_run(self):
+        snapshots = []
+        hub = self.hub
+
+        class FakeTransport:
+            async def fetch(self, video_id, root, cursor):
+                budget.reserve()
+                snapshots.append(hub.status())
+                return response([comment(1, replies=1)] if root is None else [comment(2)])
+
+        hub._transport_factory = lambda *_: FakeTransport()
+        payload = {"videos": ["https://www.douyin.com/video/1234567890",
+                              "https://www.douyin.com/video/1234567891"]}
+        self.assertIsNone(hub.status()["progress"])
+        for _ in range(2):
+            snapshots.clear()
+            budget = Budget(DailyCounter(Path(self.tmp.name)), batch_limit=10)
+            with patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
+                self.assertTrue(hub.start(payload, budget=budget, pacer=InstantPacer())["ok"])
+                hub._worker.join(5)
+            self.assertFalse(hub._worker.is_alive())
+            progress = hub.status()["progress"]
+            self.assertEqual(set(progress), {"started_at", "finished_at", "requests", "batch_limit",
+                                             "top_items", "reply_items", "video_index", "video_total"})
+            self.assertEqual([s["progress"]["requests"] for s in snapshots], [1, 2, 3, 4])
+            self.assertEqual([s["progress"]["video_index"] for s in snapshots], [1, 1, 2, 2])
+            self.assertTrue(all(s["running"] and s["progress"]["finished_at"] is None for s in snapshots))
+            self.assertEqual(snapshots[0]["progress"]["top_items"], 0)
+            self.assertEqual(snapshots[0]["progress"]["reply_items"], 0)
+            self.assertEqual(snapshots[2]["progress"]["top_items"], 1)
+            self.assertEqual(snapshots[2]["progress"]["reply_items"], 1)
+            self.assertEqual((progress["requests"], progress["batch_limit"], progress["video_total"]), (4, 10, 2))
+            self.assertEqual((progress["top_items"], progress["reply_items"]), (2, 2))
+            self.assertLessEqual(progress["started_at"], progress["finished_at"])
+            self.assertTrue(progress["finished_at"].endswith("+08:00"))
+            self.assertFalse(hub.status()["running"])
+            self.assertEqual(hub.status()["progress"], progress)
 
     def test_probe_not_logged_in_points_at_index_login(self):
         self.window.page = {
@@ -271,6 +310,8 @@ class CommentsHubTests(unittest.TestCase):
         self.assertTrue(status["paused"])
         self.assertEqual(status["pause_reason"], "verification_required")
         self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(status["progress"]["finished_at"])
+        self.assertEqual(self.hub.status()["progress"], status["progress"])
 
     def test_pause_and_resume_reprobe(self):
         self.hub.pause()

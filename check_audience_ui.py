@@ -180,6 +180,8 @@ def run(output=None):
                     page.wait_for_timeout(50)
                     assert page.locator('#audienceSummary').inner_text().startswith('未采集')
 
+                # 避免上次点击位置在重排后落到说明按钮上，意外触发悬停。
+                page.mouse.move(0, 0)
                 # HTML-only upgrade on the old gateway: plain-text 404 falls back to recent jobs.
                 fixture.update(legacy=True, status='not_collected', jobs=[dict(id='synthetic', query=dict(platform='douyin', keywords=['akg'], kind='audience', start_date=START, end_date=END),
                                status='succeeded', result=dict(no_data=False), created_at=1793600000)])

@@ -943,6 +943,7 @@ def run(output=None):
                 assert page.locator('#toast').inner_text() == '已开始采集…'
                 assert page.locator('#commentsMessage').inner_text() == '已开始采集…'
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中 · 已请求 3 次'
+                page.locator('.cm-latest>summary').click()
                 latest = page.locator('#commentsLatest').inner_text()
                 for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '已采完'):
                     assert expected in latest
@@ -956,13 +957,14 @@ def run(output=None):
                 assert not page.locator('#commentsList .cm-replies').evaluate('(node)=>node.open')
                 page.locator('#commentsList .cm-replies>summary').click()
                 assert page.locator('#commentsList .cm-replies').evaluate('(node)=>node.open')
+                assert page.locator('#commentsList .cm-replies>summary').inner_text() == '收起回复'
                 rows = page.locator('#commentsList .comment-row')
                 assert '示例评论一' in rows.nth(0).inner_text()
                 assert '示例回复二' in rows.nth(1).inner_text()
                 assert '示例独立回复三' in rows.nth(2).inner_text()
                 assert rows.locator('.status').count() == 0
                 assert '—' in rows.nth(2).locator('.tiny').inner_text()
-                assert rows.nth(1).evaluate('(node)=>getComputedStyle(node).marginLeft') == '24px'
+                assert rows.nth(1).bounding_box()['x'] > rows.nth(0).bounding_box()['x']
                 assert '测试属地甲' in rows.nth(0).inner_text() and '点赞 5' in rows.nth(0).inner_text()
                 assert '<img' in rows.nth(0).inner_text() and '<script>' in rows.nth(0).inner_text()
                 assert page.locator('#commentsList img, #commentsList script').count() == 0
