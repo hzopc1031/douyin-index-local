@@ -129,11 +129,15 @@ def check_memory(minimum=2 * 1024**3, path="/proc/meminfo"):
     return available
 
 
+BATCH_LIMIT = 1500
+DAILY_LIMIT = 3000
+
+
 class DailyCounter:
     def __init__(self, state, today=None, limit=150):
         self.state = private_dir(state)
         self.today = today or (lambda: datetime.now(SHANGHAI).date().isoformat())
-        self.limit = min(limit, 150)
+        self.limit = min(limit, DAILY_LIMIT)
 
     @contextmanager
     def locked(self):
@@ -188,8 +192,8 @@ class DailyCounter:
 class Budget:
     def __init__(self, counter, batch_limit=25, video_limit=25):
         self.counter = counter
-        self.limit = min(batch_limit, 25)
-        self.video_limit = min(video_limit, 25)
+        self.limit = min(batch_limit, BATCH_LIMIT)
+        self.video_limit = min(video_limit, BATCH_LIMIT)
         self.used = self.video_used = 0
 
     def new_video(self):

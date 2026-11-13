@@ -51,14 +51,14 @@ async function captureTests() {
   for (const path of [base, '/aweme/v2/web/comment/list/variant', '/custom/comment/list/']) {
     const p = page(); p.begin(); sdk(p.ctx);
     p.ctx.localStorage = {getItem:k=>k==='xmst'?'fresh':null};
-    const query = '?item_id=100&cursor=0&common=kept&msToken=synthetic&a_bogus=synthetic&X-Bogus=synthetic&_signature=synthetic';
+    const query = '?item_id=100&cursor=0&count=5&common=kept&msToken=synthetic&a_bogus=synthetic&X-Bogus=synthetic&_signature=synthetic';
     assert(!request(p.ctx, path + query).aborted);
     assert.equal(JSON.parse(p.ctx.__dycRead().result).status, 200);
     assert(p.begin('', '20'));
     assert(p.ctx.__dycReplay({video:'100', root:'', cursor:'20'}));
     const replay = new URL(p.calls.at(-1).url);
     assert.equal(replay.pathname, path);
-    assert.deepEqual([...replay.searchParams.entries()], [['item_id','100'],['cursor','20'],['common','kept'],['msToken','fresh']]);
+    assert.deepEqual([...replay.searchParams.entries()], [['item_id','100'],['cursor','20'],['count','5'],['common','kept'],['msToken','fresh']]);
     assert.equal(p.ctx.sdkCalls, 4);
     p.begin('123');
     request(p.ctx, '/aweme/v2/web/comment/list/reply/?item_id=100&comment_id=123&cursor=0');

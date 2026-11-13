@@ -97,3 +97,5 @@ Commit source, tests, and documentation. Keep `.venv`, `dist`, `build`, real `re
 The 2026-10-27 live validation covered 5 words for 2026-10-19 through 2026-10-25, with 35/35 exact page matches and a cache hit. The original evidence is local to the validation machine and is not part of this repository. `银杏提取物` was unindexed on the official page; `益生菌` was used instead.
 
 2026-10-28 故障修复：关联词及画像请求体需包在 param 对象中，已与官方前端 post 调用核实。云端串行间隔由 60 秒调整为 15 秒试运行，指数任务优先；50 次每日上限及异常暂停保持。平台 HTTP/业务错误码单独展示，空指数任务标记 no_data。
+
+2026-11-13 用户授权评论 Hub 每批 1500 次、上海自然日 3000 次；按剩余视频平分请求预算，提前结束额度向后重分。复用 Budget，Pacer、Qt 重放参数及 PAUSE 逻辑不变；独立 CLI 默认 25/150 保留。run.json 增加仅计数的一级/回复请求与条目、重试、空页统计；网页不下发用户 ID，CSV 原样。离线测试不能推断某次真实网页的 count。

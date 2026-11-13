@@ -15,6 +15,7 @@ import stat
 import time
 from pathlib import Path
 from hub_paths import state_dir
+from tools.douyin_comments.dyc.runtime import BATCH_LIMIT as COMMENTS_BATCH_LIMIT, DAILY_LIMIT as COMMENTS_DAILY_LIMIT
 
 from aiohttp import web
 import hub_bridge
@@ -710,7 +711,9 @@ def reply(value, status=200):
 
 
 COMMENTS_FILE_LIMIT = 20 * 1024 * 1024
-COMMENTS_VIDEO_FIELDS = ('video_id', 'status', 'reason', 'top_count', 'reply_count')
+COMMENTS_VIDEO_FIELDS = ('video_id', 'status', 'reason', 'top_count', 'reply_count',
+                         'title', 'reported', 'displayed', 'pages', 'top_requests', 'top_items',
+                         'reply_requests', 'reply_items', 'retries', 'empty_pages')
 COMMENTS_FIELDS = ('video_id', 'comment_id', 'level', 'root_comment_id', 'parent_comment_id',
                    'text', 'created_at', 'like_count', 'reply_count_reported', 'nickname',
                    'reply_to_nickname', 'ip_label', 'thread_status')
@@ -1449,7 +1452,7 @@ def mount(app, hub):
             raise HubError('not_found', '评论运行文件不存在或不可读取。', 404) from None
         except Exception:
             raise HubError('invalid_comments_run', '评论运行文件格式无效。', 422) from None
-        return {'runs': runs, 'usage': {'today_used': used, 'daily_limit': 150, 'batch_limit': 25}}
+        return {'runs': runs, 'usage': {'today_used': used, 'daily_limit': COMMENTS_DAILY_LIMIT, 'batch_limit': COMMENTS_BATCH_LIMIT}}
 
     async def comments_runs(request):
         require(request, admin=True)
