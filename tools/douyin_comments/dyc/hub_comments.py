@@ -19,7 +19,7 @@ from . import site
 from .errors import Stop
 from .models import Video
 from .paging import ingest_page
-from .runtime import BATCH_LIMIT, DAILY_LIMIT, Budget, DailyCounter, Pacer, atomic_text, private_open
+from .runtime import BATCH_LIMIT, DAILY_LIMIT, Budget, DailyCounter, HubPacer, atomic_text, private_open
 
 COMMENTS_BUSY = "正在采集评论，稍后重试"
 INDEX_BUSY = "取数或核对正在进行，请等待。"
@@ -117,6 +117,9 @@ GUARD_JS = r"""(function(){
     const query = target.search.slice(1).split('&').map(part => {
       const key = new URLSearchParams(part).keys().next().value;
       if (['a_bogus', 'x-bogus', '_signature'].includes((key || '').toLowerCase())) return null;
+      if (key === 'count' && !(cfg.root && Number(new URLSearchParams(part).get(key)) > 20)) {
+        return part.split('=')[0] + '=20';
+      }
       if ((key || '').toLowerCase() === 'mstoken') {
         let token = null;
         try { token = localStorage.getItem('xmst'); } catch (e) {}
@@ -355,6 +358,7 @@ class QtCommentTransport:
         raise Stop(2, "short_link_unresolved")
 
     async def fetch(self, video_id, root, cursor):
+        started = self.pacer.clock()
         if self.video_id != video_id:
             self.budget.new_video()
         if self.budget.used >= self.budget.limit:
@@ -452,7 +456,7 @@ class QtCommentTransport:
                     outcome.update(_coerce_fetch(state["result"]) if state.get("result") else {"kind": "timeout"})
                     outcome["request_sent"] = True
             if sent:
-                self.pacer.completed()
+                self.pacer.completed(started)
 
 
 def _eval(window, js, arg=None):
@@ -728,7 +732,7 @@ class CommentsHub:
             return {"ok": False, "code": error.reason, **self.status()}
         used_budget = budget or Budget(counter, batch_limit=self._limit(payload, "batch_limit", BATCH_LIMIT),
                                        video_limit=BATCH_LIMIT)
-        used_pacer = pacer or Pacer()
+        used_pacer = pacer or HubPacer()
         thread = threading.Thread(target=self._run, args=(videos, used_budget, used_pacer),
                                   name="hub-comments", daemon=True)
         self._worker = thread
@@ -860,7 +864,7 @@ class CommentsHub:
                     if acquired and hub._acquire is not None and hub._release is not None:
                         hub._release()
                     if acquired:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.05)
 
         return LockedTransport()
 

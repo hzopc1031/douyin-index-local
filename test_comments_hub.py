@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import random
 import sys
 import tempfile
 import threading
@@ -25,7 +26,7 @@ from dyc.hub_comments import (
     classify_probe, lock_busy,
 )
 from dyc.models import Video, normalize
-from dyc.runtime import Budget, DailyCounter, Pacer
+from dyc.runtime import Budget, DailyCounter, HubPacer, Pacer
 from tests.helpers import Transport, comment, response
 
 
@@ -309,17 +310,19 @@ class CommentsHubTests(unittest.TestCase):
         self.assertFalse(hub._worker.is_alive())
         self.assertFalse(self.lock.locked())
 
-    def test_post_request_yield_is_one_second_outside_lock(self):
+    def test_post_request_yield_allows_index_outside_lock(self):
         delays = []
         async def sleep(delay):
             self.assertFalse(self.lock.locked())
+            self.assertTrue(self.hub._acquire('index'))
+            self.hub._release()
             delays.append(delay)
         class Transport:
             async def fetch(self, *_):
                 return {}
         with patch("dyc.hub_comments.asyncio.sleep", sleep):
             asyncio.run(self.hub._locked_transport(Transport(), InstantPacer()).fetch("1", None, "0"))
-        self.assertEqual(delays, [1])
+        self.assertEqual(delays, [0.05])
 
     def test_guard_injection_failure_is_reported(self):
         self.window.evaluate_js = lambda script: (_ for _ in ()).throw(RuntimeError())
@@ -793,10 +796,11 @@ class HubAllocationTests(unittest.TestCase):
                     return response([comment(1)])
             def factory(budget, pacer):
                 observed.append((budget.limit, budget.counter.limit, budget.video_limit))
+                self.assertIsInstance(pacer, HubPacer)
                 return FakeTransport()
             hub = CommentsHub(window_factory=FakeWindow, state_dir=folder, transport_factory=factory)
             with patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
-                self.assertTrue(hub.start({"videos": ["https://www.douyin.com/video/7300000000000000001"]}, pacer=InstantPacer())["ok"])
+                self.assertTrue(hub.start({"videos": ["https://www.douyin.com/video/7300000000000000001"]})["ok"])
                 hub._worker.join(5)
             self.assertEqual(observed, [(1500, 3000, 1500)])
 
@@ -815,7 +819,90 @@ class HubAllocationTests(unittest.TestCase):
                 self.assertEqual(self.run_batch(2, skipped=skipped), [0, 25])
 
 
+class HubTimingTests(unittest.TestCase):
+    def run_1000_comments(self, rng):
+        instant = [0.0]
+        sleeps = []
+        clock = lambda: instant[0]
+
+        async def sleep(delay):
+            if delay == 0.05:
+                self.assertTrue(lock.acquire(blocking=False))
+                lock.release()
+            sleeps.append(delay)
+            instant[0] += delay
+
+        with tempfile.TemporaryDirectory() as folder:
+            budget = Budget(DailyCounter(Path(folder), limit=3000), batch_limit=1500, video_limit=1500)
+            pacer = HubPacer(clock=clock, sleep=sleep, rng=rng)
+            window = FakeWindow()
+            state = {}
+            requests = []
+            lock = threading.Lock()
+
+            def evaluate(js, arg=None):
+                if js == app_module_comments.ARM_JS:
+                    state.clear()
+                    return True
+                if js == app_module_comments.PROBE_JS:
+                    return json.dumps(dict(ready='complete', https=True, host='www.douyin.com',
+                                           path='/video/100', account=True))
+                if js in (app_module_comments.READ_JS, app_module_comments.CLOSE_JS):
+                    if state.get('sent') and clock() + 1e-9 >= state['due']:
+                        state['result'] = json.dumps(state['response'])
+                    return json.dumps(state)
+                if js == app_module_comments.REPLAY_JS:
+                    cursor = int(arg['cursor'])
+                    requests.append(cursor)
+                    state.update(sent=True, due=clock() + 0.3, response=response(
+                        [comment(i) for i in range(cursor + 1, cursor + 21)],
+                        cursor=cursor + 20, more=cursor + 20 < 1000))
+                    return True
+
+            hub = CommentsHub(window_factory=lambda: window, state_dir=folder,
+                              transport_factory=lambda b, p: QtCommentTransport(window, b, p, evaluate=evaluate),
+                              acquire=lambda _: lock.acquire(blocking=False), release=lock.release)
+            video = Video('100', 'https://www.douyin.com/video/100')
+            with patch('dyc.hub_comments.asyncio.sleep', sleep), \
+                 patch('dyc.hub_comments.time', wraps=time) as fake_time:
+                fake_time.monotonic.side_effect = clock
+                hub._run([video], budget, pacer)
+            self.assertFalse(hub.status()['paused'])
+            self.assertEqual((video.status, len(video.comments), video.top_requests), ('complete', 1000, 50))
+            self.assertEqual((requests, budget.used, pacer.count), (list(range(0, 1000, 20)), 50, 50))
+            self.assertEqual(window.loaded, [video.video_url])
+            self.assertEqual(sleeps.count(0.05), 50)
+            self.assertLessEqual(clock(), 60)
+            return clock(), pacer
+
+    def test_1000_comments_seeded_hub_pacer_under_60_seconds(self):
+        elapsed, _ = self.run_1000_comments(random.Random(0))
+        self.assertAlmostEqual(elapsed, 40.858371375)
+
+    def test_1000_comments_maximum_intervals_under_60_seconds(self):
+        rng = Mock()
+        rng.uniform.side_effect = lambda low, high: high
+        elapsed, pacer = self.run_1000_comments(rng)
+        self.assertAlmostEqual(elapsed, 49.35)
+        # The 50th rest remains due for a following request/video.
+        asyncio.run(pacer.between_videos())
+        self.assertAlmostEqual(pacer.clock() - elapsed, 4.65)
+        self.assertEqual(pacer.count, 50)
+
+
 class RequestStatsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_short_pages_with_more_continue_top_and_replies(self):
+        video = Video('100', '')
+        transport = Transport({
+            (None, '0'): response([comment(1, replies=2)], cursor=7, more=True),
+            (None, '7'): response([comment(2)], cursor=8),
+            ('1', '0'): response([comment(3)], cursor=9, more=True),
+            ('1', '9'): response([comment(4)], cursor=10),
+        })
+        await CollectJob(video, transport).run_slice(10)
+        self.assertEqual(transport.calls, [(None, '0'), (None, '7'), ('1', '0'), ('1', '9')])
+        self.assertEqual((video.status, video.top_items, video.reply_items), ('complete', 2, 2))
+
     async def test_small_top_pages_explain_121_items_with_pending_replies(self):
         pages = {}
         for page in range(25):
@@ -1008,7 +1095,7 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
                     actions.append(('replay', arg['cursor']))
                     if arg['cursor'] == '0':
                         return False
-                    state.update(sent=True, result=json.dumps(_page()))
+                    state.update(sent=True, result=json.dumps(_page([comment(2)])))
                     return True
                 if js == app_module_comments.SCROLL_JS:
                     actions.append(('ui', '0'))
@@ -1022,6 +1109,8 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('1', video.comments)
             self.assertEqual(actions, [('replay', '0'), ('ui', '0'), ('replay', '2')])
             self.assertEqual((budget.used, budget.counter.usage(), video.pages), (2, 2, 2))
+            self.assertEqual(window.loaded, ['https://www.douyin.com/video/100'])
+            self.assertEqual(video.status, 'complete')
 
     async def test_sent_and_unsent_accounting(self):
         with tempfile.TemporaryDirectory() as folder:

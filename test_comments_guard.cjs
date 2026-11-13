@@ -58,7 +58,7 @@ async function captureTests() {
     assert(p.ctx.__dycReplay({video:'100', root:'', cursor:'20'}));
     const replay = new URL(p.calls.at(-1).url);
     assert.equal(replay.pathname, path);
-    assert.deepEqual([...replay.searchParams.entries()], [['item_id','100'],['cursor','20'],['count','5'],['common','kept'],['msToken','fresh']]);
+    assert.deepEqual([...replay.searchParams.entries()], [['item_id','100'],['cursor','20'],['count','20'],['common','kept'],['msToken','fresh']]);
     assert.equal(p.ctx.sdkCalls, 4);
     p.begin('123');
     request(p.ctx, '/aweme/v2/web/comment/list/reply/?item_id=100&comment_id=123&cursor=0');
@@ -67,6 +67,19 @@ async function captureTests() {
     const reply = new URL(p.calls.at(-1).url);
     assert.equal(reply.searchParams.get('comment_id'), '456');
     assert.equal(reply.searchParams.get('cursor'), '8');
+    assert(!reply.searchParams.has('count'));
+  }
+  for (const root of ['', '123']) {
+    for (const count of [null, '5', '20', '050']) {
+      const p = page(); p.begin(root); sdk(p.ctx);
+      const path = base + (root ? 'reply/' : '');
+      const query = '?aweme_id=100&cursor=0' + (root ? '&comment_id=' + root : '') + (count === null ? '' : '&count=' + count);
+      request(p.ctx, path + query);
+      p.begin(root, '20');
+      assert(p.ctx.__dycReplay({video:'100', root, cursor:'20'}));
+      const replay = new URL(p.calls.at(-1).url);
+      assert.equal(replay.searchParams.get('count'), count === null ? null : root && Number(count) > 20 ? count : '20');
+    }
   }
   const unrelated = page(); unrelated.begin(); sdk(unrelated.ctx);
   request(unrelated.ctx, '/aweme/v1/web/other/list/?aweme_id=100');
