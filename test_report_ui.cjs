@@ -3,7 +3,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8');
 const code=html.slice(html.indexOf('let reportBatch=null'),html.indexOf("$('#retryBundle').onclick"));
 const nodes={};const $=id=>nodes[id]??={value:'',hidden:false,textContent:'',innerHTML:'',disabled:false};
-let calls=[],fail=true;const ctx=vm.createContext({$,chosenPlatform:'douyin',sessionStorage:{getItem(){return null},setItem(){}},esc:s=>String(s),readingInfo:()=>false,infoTip:(status,detail)=>status+' '+detail,statusName:s=>s,toast(){},api:async(path,options)=>{calls.push({path,key:options?.headers?.['Idempotency-Key'],body:options?.body});if(path==='insights/queries'&&fail){fail=false;throw Error('simulated disconnect')}return {job:{id:'job-'+calls.length,status:'queued',cache_hit:false}}}});
+let calls=[],fail=true;const ctx=vm.createContext({$,chosenPlatform:'douyin',sessionStorage:{getItem(){return null},setItem(){}},esc:s=>String(s),readingInfo:()=>false,loginAction:()=>'',infoTip:(status,detail)=>status+' '+detail,statusName:s=>s,toast(){},api:async(path,options)=>{calls.push({path,key:options?.headers?.['Idempotency-Key'],body:options?.body});if(path==='insights/queries'&&fail){fail=false;throw Error('simulated disconnect')}return {job:{id:'job-'+calls.length,status:'queued',cache_hit:false}}}});
 vm.runInContext('let relatedLatestDate=null;'+html.slice(html.indexOf('function insightDates('),html.indexOf('function renderInsight(')),ctx);
 vm.runInContext(code,ctx);
 ctx.platformModules=id=>id==='douyin'?['related','audience']:[];
@@ -57,7 +57,7 @@ ctx.query=query;
  vm.runInContext("reportBatch=makeReportBatch({...query,platform:'baidu',keywords:['合成词']},'before-douyin')",ctx);
  await vm.runInContext('submitReportBatch()',ctx);assert(vm.runInContext('reportBatch.entries[0].rejected',ctx));
  const afterReject=[];
- Object.assign(ctx,{dateHint(){},updateRange:()=>true,drawPlatforms(){},renderHistory(){},refresh:async()=>{},crypto:{randomUUID:()=> 'after-rejection'}});
+ Object.assign(ctx,{queryRegions:q=>q,dateHint(){},updateRange:()=>true,drawPlatforms(){},renderHistory(){},refresh:async()=>{},crypto:{randomUUID:()=> 'after-rejection'}});
  ctx.api=async(path,options)=>{afterReject.push(options.body);return {job:{id:'accepted-'+afterReject.length,status:'queued',cache_hit:false}}};
  vm.runInContext(html.slice(html.indexOf("$('#queryForm').onsubmit=async"),html.indexOf('(async()=>{try{platforms=')),ctx);
  $('#queryPlatform').value='douyin';$('#queryWords').value='酵素';$('#queryStart').value=query.start_date;$('#queryEnd').value=query.end_date;
@@ -68,13 +68,13 @@ ctx.query=query;
 })().catch(e=>{console.error(e);process.exitCode=1});
 
 const qrNodes={};const qr$=id=>qrNodes[id]??={hidden:false,textContent:'',innerHTML:'',removeAttribute(){},getAttribute(){return null}};
-const qrCtx=vm.createContext({$:qr$,esc:String,clearTimeout(){},setTimeout(){},loadQr(){}});
+const qrCtx=vm.createContext({$:qr$,esc:String,clearTimeout(){},setTimeout(){},loadQr(){},smsLoggedIn:false,smsLoginRevision:0,douyinNeedsLogin:false,commentsAction(){},renderDouyinLoginActions(){}});
 vm.runInContext('let qrTimer=null;'+html.slice(html.indexOf('function renderQr('),html.indexOf('async function openDesktop(')),qrCtx);
 for(const browser of ['browser_ready','login_required']){
- qrCtx.data={state:'verification_required',browser};vm.runInContext('renderQr(data)',qrCtx);
+ qrCtx.smsLoggedIn=false;qrCtx.data={state:'verification_required',browser};vm.runInContext('renderQr(data)',qrCtx);
  assert.equal(qr$('#qrState').innerHTML.includes('已检测到登录凭据（有效性以最近取数为准）'),browser==='browser_ready');
  assert.equal(qr$('#qrDesktop').hidden,browser==='browser_ready');
- if(browser==='browser_ready'){assert(qr$('#qrRefresh').hidden);assert(!qr$('#qrStart').hidden);assert.equal(qr$('#qrStart').textContent,'重新扫码')}
+ if(browser==='browser_ready'){assert(qr$('#qrRefresh').hidden);assert(qr$('#qrStart').hidden);assert.equal(qr$('#qrStart').textContent,'开始扫码')}
  else assert(qr$('#qrState').innerHTML.includes('需要安全验证'));
 }
 console.log('QR browser-ready copy checks passed');
