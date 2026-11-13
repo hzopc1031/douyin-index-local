@@ -27,7 +27,7 @@ AUDIENCE = [dict(dimension=key, name=key, labels=[dict(name=name, value=620-i*67
            for i, name in enumerate(names + ([f'其他分组 {j}' for j in range(20)] if key in ('province','city','interest') else []))]) for key,names in DIMENSIONS]
 META = dict(start_date=START, end_date=END, source='离线合成样例', fetched_at='2026-11-01T10:00:00+08:00',
             keywords=['杭州'], complete=True, verification='pending')
-PLATFORMS = [dict(id=key, name=name, available=key=='douyin', metric_name='搜索指数', description='离线合成数据',
+PLATFORMS = [dict(id=key, name=name, available=key!='google_trends', metric_name='搜索指数', description='离线合成数据',
                     modules=(['related','audience'] if key=='douyin' else []))
              for key,name in [('douyin','抖音'),('baidu','百度指数'),('google_trends','Google Trends')]]
 
@@ -177,6 +177,14 @@ def run(output=None):
                 context.route('**/*', route)
                 page.goto('http://hub-ui.invalid/')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
+                assert page.locator('#platformChips [data-platform]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.platform)') == ['douyin', 'baidu']
+                assert page.locator('#queryPlatform option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['douyin', 'baidu']
+                page.wait_for_function("document.querySelector('#statPlatforms').textContent==='2'")
+                assert page.locator('#statPlatforms').text_content() == '2'
+                for selector in ('body', '#platformList', '#connectionCards', '#queryPlatform'):
+                    text = page.locator(selector).inner_text() if selector == 'body' else page.locator(selector).text_content()
+                    assert all(name not in text for name in ('Google Trends', '谷歌趋势', '待接入'))
+                assert 'google_trends' not in (ROOT/'hub.html').read_text()
                 assert page.locator('#queryStart').input_value() == DEFAULT_START
                 assert page.locator('#queryEnd').input_value() == END
                 assert page.locator('#insightRangeLabel').inner_text().endswith('30 天')
@@ -382,8 +390,9 @@ def run(output=None):
                 page.evaluate('loadInsights()')
                 assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
                 page.locator('#platformChips [data-platform=baidu]').click()
-                page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
-                assert '尚未接入' in page.locator('#trendSummary').inner_text()
+                page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('不支持此模块')")
+                page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('暂无趋势数据')")
+                assert '尚未接入' not in page.locator('#trendSummary').inner_text()
                 assert page.locator('#viewChips').is_visible()
                 assert '搜索指数' in page.locator('#viewChips').inner_text()
                 assert '热搜榜' in page.locator('#viewChips').inner_text()
