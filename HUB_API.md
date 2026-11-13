@@ -202,7 +202,7 @@ sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_D
 
 融合分：搜索分和热榜分都有值时为 `search_weight × 搜索分 + hot_weight × 热榜分`，否则 null。默认权重 0.7 和 0.3。环境变量 `INDEX_HUB_GROUP_SEARCH_WEIGHT`、`INDEX_HUB_GROUP_HOT_WEIGHT` 取 0 到 1 的有限数；settings 键 `group_score_weights` 的合法字段再覆盖。页面显示实际权重。文案固定为工作台热度分，不是搜索次数，也不是抖音综合指数。
 
-关键词组的新建、编辑、删除和查看分数在趋势总览里完成，侧栏不再单开一页。
+关键词组的新建、编辑、删除和查看分数在趋势总览的「关键词组与评分」折叠区完成，默认收起。热搜榜口径、调度状态、飙升阈值和单个话题历史也默认收起；展开后保留全部操作。页面采集诊断统一放在「平台连接」，已登录且未暂停时不重复显示查询登录提示。评论页宽屏并列展示采集表单、最近运行与评论内容，窄屏纵向排列。
 
 ## 热点宝·话题（待联调）
 

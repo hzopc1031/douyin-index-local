@@ -127,6 +127,8 @@ def run(output=None):
                                            dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
                         if fixture.get('hot_empty') and 'board' not in query:
                             data.update(items=[], fetched_at=None)
+                        if 'board' in query:
+                            data.update(board=query['board'][0], items=[dict(position=1, word='合成百度话题甲', hot_value=654321, fetched_at=data['fetched_at'])])
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
                     elif path == 'groups' and request.method == 'GET':
@@ -405,7 +407,7 @@ def run(output=None):
                 with page.expect_request(lambda req: 'hot/latest?board=baidu_realtime' in req.url):
                     page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotIntro').textContent.includes('百度热搜')")
-                assert '不是百度搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '不是百度搜索指数' in page.locator('#hotIntro').text_content()
                 assert page.locator('#groupPanel').is_hidden()
                 page.locator('#platformChips [data-platform=douyin]').click()
                 assert page.locator('#viewChips').is_visible()
@@ -415,9 +417,9 @@ def run(output=None):
                 assert '热榜' not in page.locator('.nav').inner_text()
                 page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
-                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
-                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
-                assert '热点宝' in page.locator('#hotIntro').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').text_content()
+                assert '不是搜索指数' in page.locator('#hotIntro').text_content()
+                assert '热点宝' in page.locator('#hotIntro').text_content()
                 assert page.locator('#hotResume').is_hidden()
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(0).inner_text() == '1'
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
@@ -435,22 +437,30 @@ def run(output=None):
                     assert expected in page.locator('#hotRows').inner_text()
                     assert expected in page.locator('#hotRisingRows').inner_text()
                     assert page.locator('#hotResume').is_visible() == bool(paused)
-                    page.locator('#hotRisingButton').click()
+                    page.evaluate("$('#hotRisingButton').onclick()")
                     page.wait_for_function("document.querySelector('#hotRisingBaseline').textContent.includes('当前快照 —')")
                     assert expected in page.locator('#hotRisingRows').inner_text()
                     assert page.locator('#overviewHot [data-login-platform]').count() == 0
                     assert page.locator('#hotRows img, #hotRisingRows img').count() == 0
+                    assert page.locator('table:has(#hotRows) thead').is_hidden()
+                    assert page.locator('table:has(#hotRisingRows) thead').is_hidden()
+                    empty_cell = page.locator('#hotRisingRows td')
+                    assert empty_cell.is_visible(), empty_cell.evaluate('(n)=>n.parentElement.parentElement.outerHTML')
+                    assert empty_cell.bounding_box()['width'] <= width
                 fixture.update(hot_empty=False, hot_enabled=True, hot_paused=None)
                 page.evaluate('loadHot()')
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert page.locator('#hotSentence').is_hidden()
+                page.locator('#overviewHot > details.card > summary').click()
+                assert page.locator('#hotSentence').is_visible()
                 page.locator('#hotSentence').fill('s1')
                 page.locator('#hotWordButton').click()
                 page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")
                 page.locator('#hotRisingButton').click()
                 page.wait_for_function("document.querySelector('#hotRisingRows').textContent.includes('合成话题甲')")
-                assert '本库热榜快照' in page.locator('#hotRisingNote').inner_text()
-                assert '不是搜索指数' in page.locator('#hotRisingNote').inner_text()
-                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
+                assert '本库热榜快照' in page.locator('#hotRisingNote').text_content()
+                assert '不是搜索指数' in page.locator('#hotRisingNote').text_content()
+                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').text_content()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
                 assert page.locator('#topicCategory').is_hidden()
@@ -461,10 +471,14 @@ def run(output=None):
                 assert '关键词组' not in page.locator('.nav').inner_text()
                 page.locator('[data-tab=overview]').click()
                 page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
-                assert '工作台热度分' in page.locator('#groupIntro').inner_text()
-                assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
-                assert '名称只用于显示' in page.locator('#groupIntro').inner_text()
-                assert '不会触发搜索查询' in page.locator('#groupIntro').inner_text()
+                assert '工作台热度分' in page.locator('#groupIntro').text_content()
+                assert '不是搜索次数' in page.locator('#groupIntro').text_content()
+                assert '名称只用于显示' in page.locator('#groupIntro').text_content()
+                assert '不会触发搜索查询' in page.locator('#groupIntro').text_content()
+                assert not page.locator('#groupPanel').evaluate('(node)=>node.open')
+                assert page.locator('#groupScoreButton').is_hidden()
+                page.locator('#groupPanel > summary').click()
+                assert page.locator('#groupScoreButton').is_visible()
                 assert page.locator('#groupEdit').inner_text() == '编辑这组'
                 page.locator('#groupScoreButton').click()
                 page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('未上榜')")
@@ -492,8 +506,8 @@ def run(output=None):
                 page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
                 assert '—' in page.locator('#hotRows').inner_text()
-                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
-                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').text_content()
+                assert '不是搜索指数' in page.locator('#hotIntro').text_content()
                 assert page.locator('#keywordSelect').is_hidden()
                 assert page.locator('#resultTab-summary').is_hidden()
                 assert page.locator('#groupPanel').is_hidden()
@@ -765,6 +779,7 @@ def run(output=None):
                 assert writes[before_qr_success:] == [('comments/probe', {})]
                 fixture.update(login='expired', qr_state='verification_required')
                 page.evaluate('refresh()')
+                page.wait_for_function('!qrLoading')
                 page.evaluate('loadQr()')
                 assert page.locator('#qrDesktop').is_visible()
                 assert page.locator('#desktopLogin').is_hidden()
@@ -858,6 +873,45 @@ def run(output=None):
                 page.evaluate("renderComments({running:false,paused:true,pause_reason:'user'})")
                 assert page.locator('#toast').inner_text() == '采集已暂停：手动暂停'
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Check the six primary surfaces at 360px as well; all requests remain routed above.
+                fixture.update(login='cookie_present', login_mode='desktop', comments_probe='logged_in', hot_empty=True, hot_enabled=False, hot_paused=None, history=True, related='available', audience='available', missing_latest=False, all_missing=False)
+                page.evaluate("async () => {reportBatch=null;await refresh();renderBaiduLogin({browser:'browser_ready'});closeInfo();$('#toast').hidden=true;$('#groupPanel').open=false}")
+                fixture['comments_rows'] = [dict(row, text='示例评论一' if row['level']=='1' else '示例回复二', nickname='测试用户甲' if row['level']=='1' else '测试用户乙') for row in fixture['comments_rows']]
+                fixture['comments_output'] = fixture['comments_runs'][0]
+                page.evaluate("async () => {tab('comments');$('#commentsMessage').textContent='';await loadComments();await loadCommentsRuns();await loadCommentsRun('20261113T101112')}")
+                # Capture only fictional comments; the malicious strings were checked above.
+                if output:
+                    page.evaluate('scrollTo(0,0)')
+                    page.screenshot(path=str(output/f'hub-1113-comments-{width}.png'), full_page=True)
+                for view in ('comments', 'overview', 'hot-empty', 'baidu-hot', 'connections', 'query'):
+                    if view == 'overview':
+                        page.evaluate("async () => {tab('overview');chosenPlatform='douyin';chosenSource='index';drawPlatforms();$('#keywordSelect').value='杭州';$('#insightStart').value='2026-10-02';$('#insightEnd').value='2026-10-31';updateRange('insight');resultTab('summary');await showSource()}")
+                        assert page.locator('#indexLoginStatus').is_hidden()
+                    elif view in ('hot-empty', 'baidu-hot'):
+                        platform = 'douyin' if view == 'hot-empty' else 'baidu'
+                        page.evaluate("async platform => {chosenPlatform=platform;chosenSource='hot_search';drawPlatforms();document.querySelector('#overviewHot > details.card').open=false;await loadHot();await loadHotRising()}", platform)
+                        assert page.locator('#overviewHot [data-login-platform]').count() == 0
+                        if platform == 'baidu':
+                            assert '合成百度话题甲' in page.locator('#hotRows').inner_text()
+                            assert page.locator('#hotRows td').nth(2).inner_text() == '654321'
+                    elif view == 'connections':
+                        page.evaluate("tab('connections')")
+                        assert page.locator('#sessionDetail').is_visible()
+                        assert page.locator('#douyinLoginCard #sessionDetail').count() == 1
+                    elif view == 'query':
+                        page.evaluate("tab('overview');chosenPlatform='douyin';chosenSource='index';drawPlatforms();$('#openQuery').click();$('#queryWords').value='合成关键词';$('#queryStart').value='2026-10-25';$('#queryEnd').value='2026-10-31';updateRange('query');$('#queryRange').open=false")
+                    if output and view != 'comments':
+                        page.evaluate('scrollTo(0,0)')
+                        page.screenshot(path=str(output/f'hub-1113-{view}-{width}.png'), full_page=True)
+                    page.set_viewport_size(dict(width=360, height=932))
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), view
+                    if view == 'query':
+                        assert page.locator('#queryDialog').evaluate('(n)=>n.scrollWidth<=n.clientWidth')
+                        page.locator('#closeQuery').click()
+                    if view == 'comments':
+                        for selector in ('#commentsStartButton', '#commentsPauseButton', '#commentsResumeButton'):
+                            assert page.locator(selector).evaluate('(n)=>n.getBoundingClientRect().height<50')
+                    page.set_viewport_size(dict(width=width, height=height))
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit, comments navigation/login')
