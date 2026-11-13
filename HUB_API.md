@@ -369,6 +369,10 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 - `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
 - `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
 
+`start.videos` 可混合视频页（含参数或唯一 `modal_id`）、`v.douyin.com/<code>/` 短链、App 分享口令和 `iesdouyin.com` / `www.iesdouyin.com` 的 `/share/video/<数字ID>/`。每项仅取第一个 HTTP(S) 链接，不接受纯数字 ID、`/note/` 图文、其他域名或无 ID 的普通页面。任一项无法识别时整批不启动，返回 `invalid_parameters`、中文 `message` 和 `invalid_lines`（从 1 开始的输入项行号，不回显原文）。网页仍按行拆分并忽略空行。
+
+输入校验不访问短链。点击开始并通过原有登录探测后，worker 处理该视频时才在采集用的同一个 Qt 窗口中持锁导航，最多等待约 15 秒；只读取主机、路径及 `modal_id`，不返回带参原始地址。解析成功统一为 `https://www.douyin.com/video/<id>`，与本批已知 ID 重复时标记 `duplicate/deduplicated` 并跳过。官方中间页继续等待；超时标记该条 `partial/short_link_unresolved`，外域标记 `partial/untrusted_video_redirect`，继续下一条且不暂停整批。导航不调用评论接口、不计评论请求额度；后续采集沿用原有请求、额度和暂停规则。
+
 三个运行读取接口均仅管理员可用，响应不缓存，不经桌面 bridge、不触发采集；部署这些接口只需重启网关。运行编号须严格为 `YYYYMMDDTHHMMSS` 且日期时间有效，否则 400；路径始终限制在 runs 目录内，逐级拒绝符号链接。固定文件不存在或不可读取返回 404 `not_found`，单文件超过 20 MiB 返回 413 `file_too_large`，导出格式损坏返回 422 `invalid_comments_run`。错误不包含本地路径或文件正文。历史列表只读取已有 `run.json` 的运行，未导出摘要的目录不作为完成记录；单个运行读取或校验失败时跳过该运行，其余正常返回，不记录路径或内容。runs 目录不存在仍返回空列表，目录本身不可打开仍报错。网页在评论页展示额度、最近运行和评论，支持手动选择及 CSV 下载；采集期间每 5 秒读取状态，结束后刷新历史并打开最近运行。桌面当前没有持续更新的请求计数时，只显示采集中。
 
 独立的 Playwright `dyc login-web` / CLI 仍保留作退路。主站是否接受已有 `.douyin.com` 会话，须在部署后先做一次只读探测。离线测试不代表线上验收。

@@ -6,6 +6,7 @@ const start=script.indexOf('// Comments collection:'),end=script.indexOf('// End
 assert(start>=0&&end>start);
 for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsConnectionState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsProbeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
 assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
+assert(html.includes('placeholder="每行一个：视频链接、短链或 App 分享口令"'));
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
  const $=id=>nodes[id]??={hidden:false,value:'',textContent:'',scrollIntoView(){this.scrolled=true},setAttribute(){},focus(){this.focused=true}};
@@ -15,6 +16,8 @@ function fixture(){
 }
 (async()=>{
  const f=fixture();await new Promise(setImmediate);
+ assert.equal(f.run("commentsName('short_link_unresolved')"),'短链未能解析');
+ assert.equal(f.run("commentsName('untrusted_video_redirect')"),'短链跳转到非抖音页面');
  f.$('#commentsVideoInput').value='  https://example.com/1  \n\nhttps://example.com/2\r\n';
  await f.$('#commentsStartButton').onclick();
  assert.deepStrictEqual(Array.from(f.calls.find(c=>c.path==='comments/start').body.videos),['https://example.com/1','https://example.com/2']);
@@ -33,6 +36,7 @@ function fixture(){
  assert(!f.$('#commentsLoginButton').hidden);assert(!f.$('#commentsProbeButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('需要验证'));
  f.$('#commentsLoginButton').onclick();assert.equal(f.tab,'connections');assert(f.$('#douyinLoginCard').focused);assert(f.$('#douyinLoginCard').scrolled);
  f.error=Error('comments_busy：正在采集评论，稍后重试');await f.$('#commentsStartButton').onclick();assert(f.$('#commentsMessage').textContent.includes('comments_busy'));
+ f.error=Error('第 2、4 行无法识别为抖音视频链接。');await f.$('#commentsStartButton').onclick();assert.equal(f.$('#commentsMessage').textContent,'第 2、4 行无法识别为抖音视频链接。');
  f.status={probe:'logged_in',running:true,waiting_for_index:true};await f.run('loadComments()');assert(f.$('#commentsStatus').textContent.includes('等待指数采集'));assert(f.$('#commentsBusyReason').textContent.includes('等待指数'));assert.equal(f.timers.size,1);
  f.status={running:false};await f.run('loadComments()');assert.equal(f.timers.size,0);
  assert(f.notices.includes('已开始采集…'));assert(f.notices.includes('采集完成'));

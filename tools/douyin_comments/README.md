@@ -23,10 +23,12 @@ bin/dyc fetch 'https://www.douyin.com/video/<id>' 'https://v.douyin.com/<short>/
 .venv/bin/python -m dyc --help
 ```
 
-`urls.txt` 每行一个链接，空行和 `#` 注释忽略；也支持带 `modal_id` 的链接。
+`urls.txt` 每行一个链接，空行和 `#` 注释忽略；也支持带 `modal_id` 的链接及 `iesdouyin.com` / `www.iesdouyin.com` 的 `/share/video/<id>/` 分享页。
 按视频 ID 去重；短链由浏览器导航解析。默认输出 `~/dyc-output/<run_id>/`。
 `--help` 在每个子命令可用；`--max-pages` 可降低单视频请求预算，不能提高硬上限。
 完成时 stdout **恰好一行 JSON**，包含目录、每个视频状态/数量和退出原因；人类日志在 stderr 和 `run.log`。
+
+中枢评论输入框还支持每行一段 App 分享口令，只取第一个 HTTP(S) 链接。视频页、短链和分享页可混合提交；无效行会整批拒绝并返回行号，不回显原文。短链在点击开始、通过登录探测后的 worker 中，通过采集用的同一个 Qt 窗口及原有窗口锁解析，最多等待约 15 秒；解析失败只影响该条，不计评论请求额度。详细接口与原因码见 [HUB_API.md](../../HUB_API.md)。CLI 的分享口令抽链行为未扩展。
 
 输出目录 0700，文件 0600：
 
