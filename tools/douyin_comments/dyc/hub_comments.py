@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -55,6 +56,9 @@ PROBE_JS = """JSON.stringify((() => {
       || ['安全验证', '身份验证', '使用原设备'].some(t => text.includes(t))
   };
 })())"""
+
+MARK_RESOLVE_JS = "(token => (window.__dycResolveToken = token) === token)"
+RESOLVE_JS = "(token => window.__dycResolveToken === token ? null : " + PROBE_JS + ")"
 
 # One page request is admitted per scheduler slice; only its non-secret ticket survives navigation.
 GUARD_JS = r"""(function(){
@@ -329,10 +333,13 @@ class QtCommentTransport:
         self.video_id = None
 
     async def resolve(self, video):
+        token = secrets.token_hex(16)
+        if self._evaluate(MARK_RESOLVE_JS, token) is not True:
+            raise Stop(2, "short_link_unresolved")
         self.window.load_url(video.video_url)
         deadline = time.monotonic() + SHORT_LINK_TIMEOUT
         while time.monotonic() < deadline:
-            page = parse_probe_js(self._evaluate(PROBE_JS))
+            page = parse_probe_js(self._evaluate(RESOLVE_JS, token))
             if page:
                 url = f"{'https' if page.get('https') else 'http'}://{page.get('host', '')}{page.get('path', '/')}"
                 if not site.trusted_video_landing(url):
@@ -343,7 +350,7 @@ class QtCommentTransport:
                     target = site.parse_url(url)
                 except Stop:
                     target = None
-                if target and target.video_id:
+                if target and target.video_id and page.get("ready") == "complete":
                     video.video_id, video.video_url = target.video_id, target.url
                     return
             await asyncio.sleep(0.1)
@@ -889,6 +896,7 @@ class CommentsHub:
         run_id = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         out = self.state_dir / "runs" / run_id
         requests = sum(getattr(video, "pages", 0) for video in videos)
+        videos = [video for video in videos if video.status != "duplicate"]
         result = export(out, run_id, videos, code, reason, requests, metadata=metadata)
         with self._guard:
             self._snapshot["output"] = {"run_id": run_id, "requests": requests,
