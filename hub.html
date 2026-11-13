@@ -58,6 +58,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--green);box-shadow:non
 .chip{background:var(--surface);color:var(--muted)}.chip.active{border-color:var(--green)}
 .badge,.status{border-radius:5px;background:var(--raised);color:var(--muted)}
 .badge:not(.warn),.status.succeeded{background:var(--success-soft);color:var(--success)}
+#browserBadge:not(.warn){background:var(--raised);color:var(--ink)}
 .badge.warn,.notice,.status.running,.status.queued{background:var(--soft);color:var(--orange)}
 .status.failed,.status.partial,.query-error{background:var(--danger-soft);color:var(--danger)}
 .platformrow.pending{opacity:1}
@@ -74,6 +75,8 @@ tbody tr:nth-child(even){background:var(--raised)}
 .chartlabels{fill:var(--muted)}.charttip{max-width:100%;white-space:pre-line;overflow-wrap:anywhere}
 .comment-row strong{color:var(--ink)}.comment-reply{border-left-width:1px}
 @media(hover:hover){.btn:hover{background:var(--orange)}.btn.secondary:hover,.btn.light:hover,.chip:not(.active):hover,.nav button:not(.active):hover,.range-presets button:hover{background:var(--raised);color:var(--ink)}.btn.danger:hover{background:var(--danger-soft)}.text-button:hover{color:var(--ink)}}
+/* 桌面细轨底色延伸到页尾，导航仍按视口吸顶。 */
+@media(min-width:851px){.shell{background:var(--surface)}.main{background:var(--paper)}.brand:has(>div) small{margin-bottom:8px}.brand>div{float:none!important;font-size:11px!important;color:var(--muted)!important;line-height:1.6;margin-bottom:18px}}
 @media(max-width:850px){.shell{display:block}.side{padding:12px 18px;border-right:0;border-bottom:1px solid var(--line)}.brand{font-size:17px}.nav button{padding:9px 10px}.nav button.active::before{top:auto;bottom:3px;left:10px;right:10px;width:auto;height:2px}.top{padding-bottom:8px}.summary-number{font-size:29px}.stat strong{font-size:30px}.cardhead{flex-wrap:wrap}.topline>div,.smsframe-scroll{min-width:0;max-width:100%}.range-picker>summary{flex-wrap:wrap}.range-picker>summary strong{min-width:0;overflow-wrap:anywhere}.btn{white-space:normal}.smsactions .btn{max-width:100%}}
 @media(prefers-reduced-motion:reduce){button,.btn{transition:none}}
 </style></head><body>
