@@ -780,8 +780,25 @@ class HubAllocationTests(unittest.TestCase):
             self.assertFalse(hub.status()["paused"])
             saved = json.loads(next((Path(folder) / "runs").glob("*/run.json")).read_text())
             self.assertEqual(saved["requests"], len(calls))
+            self.assertEqual(sum(v["top_requests"] for v in saved["videos"]), len(calls))
+            self.assertTrue(all(v["reply_requests"] == v["retries"] == 0 for v in saved["videos"]))
             self.assertEqual(budget.counter.usage(), len(calls))
             return [v.pages for v in videos]
+
+    def test_hub_start_uses_explicit_1500_3000_limits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            observed = []
+            class FakeTransport:
+                async def fetch(self, *_):
+                    return response([comment(1)])
+            def factory(budget, pacer):
+                observed.append((budget.limit, budget.counter.limit, budget.video_limit))
+                return FakeTransport()
+            hub = CommentsHub(window_factory=FakeWindow, state_dir=folder, transport_factory=factory)
+            with patch('dyc.hub_comments.asyncio.sleep', new=unittest.mock.AsyncMock()):
+                self.assertTrue(hub.start({"videos": ["https://www.douyin.com/video/7300000000000000001"]}, pacer=InstantPacer())["ok"])
+                hub._worker.join(5)
+            self.assertEqual(observed, [(1500, 3000, 1500)])
 
     def test_two_videos_share_25_requests(self):
         self.assertEqual(self.run_batch(2), [13, 12])
@@ -843,6 +860,18 @@ class RequestStatsTests(unittest.IsolatedAsyncioTestCase):
         empty = Video("7300000000000000002", "")
         await CollectJob(empty, Transport({(None, "0"): response([], more=True, cursor=1)})).run_slice(10)
         self.assertEqual((empty.top_requests, empty.empty_pages, empty.reason), (1, 1, "empty_with_more"))
+
+    async def test_stalled_and_cyclic_cursors_stop_without_extra_requests(self):
+        for cycle in (False, True):
+            with self.subTest(cycle=cycle):
+                video = Video("7300000000000000001", "")
+                transport = Transport({
+                    (None, "0"): response([comment(1)], cursor=1 if cycle else 0, more=True),
+                    (None, "1"): response([comment(2)], cursor=0, more=True),
+                })
+                await CollectJob(video, transport).run_slice(10)
+                self.assertEqual(len(transport.calls), 2 if cycle else 1)
+                self.assertEqual(video.reason, "cursor_cycle" if cycle else "cursor_unchanged")
 
     async def test_qt_path_does_not_retry_network_failure(self):
         video = Video("7300000000000000001", "")
@@ -1479,6 +1508,19 @@ class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['runs'][0]['videos'][0]['reply_items'], 1)
         self.assertNotIn('private', json.dumps(data))
         self.bridge.assert_not_called()
+
+    async def test_legacy_summary_statistics_stay_unknown(self):
+        folder = self.export()
+        path = folder / 'run.json'
+        data = json.loads(path.read_text())
+        fields = ('title', 'reported', 'displayed', 'top_requests', 'top_items',
+                  'reply_requests', 'reply_items', 'retries', 'empty_pages')
+        for field in fields:
+            data['videos'][0].pop(field)
+        path.write_text(json.dumps(data))
+        video = (await (await self.get()).json())['runs'][0]['videos'][0]
+        self.assertTrue(all(video[field] is None for field in fields))
+        self.assertEqual(video['pages'], 3)
 
     async def test_list_skips_invalid_runs_and_keeps_valid_run(self):
         self.export()

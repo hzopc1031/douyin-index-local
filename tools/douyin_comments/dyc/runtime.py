@@ -129,6 +129,7 @@ def check_memory(minimum=2 * 1024**3, path="/proc/meminfo"):
     return available
 
 
+# Hub 显式启用新额度，CLI 保留原来的默认额度。
 BATCH_LIMIT = 1500
 DAILY_LIMIT = 3000
 
