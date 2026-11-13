@@ -358,10 +358,15 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 管理员 Basic 认证；POST 须带 `X-Hub-Request: 1`，有 Origin 时须同源。
 
 - `GET /api/v1/comments/status`：主站登录探测结果与采集状态（`logged_in`、`not_logged_in`、`verification_required`）。未登录时 `login_entry` 为 `index_sms`，入口 `/api/v1/login/sms`。不触发评论请求。
+- `GET /api/v1/comments/runs`：网关直接只读 `state_dir/comments/runs`，返回 `{runs, usage}`。按运行编号倒序，最多 20 次；无目录时 `runs=[]`。每项仅含 `run_id`、`finished_at`（编号解析出的上海本地 ISO 时间）、`exit_code`、`exit_reason`、`requests` 及 `videos`；视频仅含 `video_id/status/reason/top_count/reply_count`。不返回 `out` 或其他内部字段。`usage={today_used,daily_limit:150,batch_limit:25}`，上海当日计数只读、不加锁，读取失败为 null，缺少计数文件或旧日计数为 0。
+- `GET /api/v1/comments/runs/{run_id}`：返回 `{run_id,total,truncated,comments}`；`total` 为 CSV 全部记录数，最多展示前 2000 条，超出时 `truncated=true`。评论字段仅有 `video_id/comment_id/level/root_comment_id/parent_comment_id/text/created_at/like_count/reply_count_reported/nickname/reply_to_nickname/ip_label/thread_status`，保留 CSV 字符串和空值，不下发用户 ID、视频 URL 或原始字段。
+- `GET /api/v1/comments/runs/{run_id}/comments.csv`：原样下载带 BOM 的 UTF-8 CSV，保留原文件全部列（包括昵称、用户 ID、IP 属地）。响应 `Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="comments-<run_id>.csv"`、`Cache-Control: no-store`。
 - `POST /api/v1/comments/probe`：只读再探测一次，请求体为空对象。
 - `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每次请求短时间持锁，请求之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 25 次、上海自然日最多 150 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
 - `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
 - `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
+
+三个运行读取接口均仅管理员可用，响应不缓存，不经桌面 bridge、不触发采集；部署这些接口只需重启网关。运行编号须严格为 `YYYYMMDDTHHMMSS` 且日期时间有效，否则 400；路径始终限制在 runs 目录内，逐级拒绝符号链接。固定文件不存在或不可读取返回 404 `not_found`，单文件超过 20 MiB 返回 413 `file_too_large`，导出格式损坏返回 422 `invalid_comments_run`。错误不包含本地路径或文件正文。历史列表只读取已有 `run.json` 的运行，未导出摘要的目录不作为完成记录。网页在评论页展示额度、最近运行和评论，支持手动选择及 CSV 下载；采集期间每 5 秒读取状态，结束后刷新历史并打开最近运行。桌面当前没有持续更新的请求计数时，只显示采集中。
 
 独立的 Playwright `dyc login-web` / CLI 仍保留作退路。主站是否接受已有 `.douyin.com` 会话，须在部署后先做一次只读探测。离线测试不代表线上验收。
 
