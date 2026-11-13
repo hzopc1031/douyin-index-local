@@ -9,8 +9,8 @@ assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
  const $=id=>nodes[id]??={hidden:false,value:'',textContent:'',scrollIntoView(){this.scrolled=true},setAttribute(){},focus(){this.focused=true}};
- const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null};
- const ctx=vm.createContext({$,renderDouyinLoginActions(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:{ok:true}}});
+ const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null,runs:[],details:{},notices:[]};
+ const ctx=vm.createContext({$,encodeURIComponent,document:{querySelectorAll:()=>[]},esc:s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),toast:message=>f.notices.push(message),renderDouyinLoginActions(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:path==='comments/runs'?{runs:f.runs,usage:{today_used:null}}:path.startsWith('comments/runs/')?f.details[path.split('/')[2]]:{ok:true}}});
  vm.runInContext(script.slice(start,end),ctx);f.run=code=>vm.runInContext(code,ctx);return f;
 }
 (async()=>{
@@ -30,10 +30,21 @@ function fixture(){
  f.readError=Error('合成状态读取失败');await f.run('loadComments()');
  assert.equal(f.$('#commentsConnectionState').textContent,'评论登录状态读取失败');f.readError=null;
  f.status={probe:'not_logged_in',paused:true,pause_reason:'verification_required',waiting_for_index:false};await f.run('loadComments()');
- assert(!f.$('#commentsLoginButton').hidden);assert(!f.$('#commentsProbeButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('verification_required'));
+ assert(!f.$('#commentsLoginButton').hidden);assert(!f.$('#commentsProbeButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('需要验证'));
  f.$('#commentsLoginButton').onclick();assert.equal(f.tab,'connections');assert(f.$('#douyinLoginCard').focused);assert(f.$('#douyinLoginCard').scrolled);
  f.error=Error('comments_busy：正在采集评论，稍后重试');await f.$('#commentsStartButton').onclick();assert(f.$('#commentsMessage').textContent.includes('comments_busy'));
- f.status={probe:'logged_in',running:true,waiting_for_index:true};await f.run('loadComments()');assert(f.$('#commentsStatus').textContent.includes('waiting_for_index'));assert(f.$('#commentsBusyReason').textContent.includes('等待指数'));assert.equal(f.timers.size,1);
+ f.status={probe:'logged_in',running:true,waiting_for_index:true};await f.run('loadComments()');assert(f.$('#commentsStatus').textContent.includes('等待指数采集'));assert(f.$('#commentsBusyReason').textContent.includes('等待指数'));assert.equal(f.timers.size,1);
  f.status={running:false};await f.run('loadComments()');assert.equal(f.timers.size,0);
+ assert(f.notices.includes('已开始采集…'));assert(f.notices.includes('采集完成'));
+ await f.run('loadCommentsRuns()');assert(f.$('#commentsRuns').innerHTML.includes('还没有评论运行记录'));assert(f.$('#commentsUsage').textContent.includes('今日用量未知'));
+ f.status={probe:'custom_probe',paused:true,pause_reason:'custom_reason'};await f.run('loadComments()');assert(f.$('#commentsProbeState').textContent.includes('custom_probe'));assert(f.$('#commentsPauseReason').textContent.includes('custom_reason'));
+ f.status={running:true,output:{requests:3,run_id:'20261113T101112',videos:[{video_id:'100',top_count:1,reply_count:1,status:'complete',reason:'exhausted'}]}};await f.run('loadComments()');
+ assert(f.$('#commentsStatus').textContent.includes('采集中 · 已请求 3 次'));assert(f.$('#commentsLatest').innerHTML.includes('评论已翻完'));assert.equal([...f.timers.values()][0].delay,5000);
+ f.runs=[{run_id:'20261113T101112',finished_at:'2026-11-13T10:11:12+08:00',exit_reason:'complete',videos:[]}];f.details['20261113T101112']={total:0,truncated:false,comments:[]};
+ f.status={running:false,paused:true,pause_reason:'user'};await f.run('loadComments()');await new Promise(setImmediate);
+ assert.equal(f.notices.at(-1),'采集已暂停：手动暂停');assert(f.$('#commentsList').innerHTML.includes('这次没有采到评论'));assert.equal(f.$('#commentsDownload').href,'/api/v1/comments/runs/20261113T101112/comments.csv');
+ f.details['20261113T101112']={total:2001,truncated:true,comments:[{video_id:'100',level:'2',root_comment_id:'1',text:'示例回复',reply_to_nickname:'测试用户甲'},{video_id:'100',level:'1',comment_id:'1',text:'<img src=x onerror=alert(1)>',nickname:'测试用户甲'}]};
+ await f.run("loadCommentsRun('20261113T101112')");assert(f.$('#commentsList').innerHTML.includes('&lt;img'));assert(!f.$('#commentsList').innerHTML.includes('<img'));assert(f.$('#commentsList').innerHTML.includes('comment-reply'));assert(f.$('#commentsList').innerHTML.indexOf('&lt;img')<f.$('#commentsList').innerHTML.indexOf('示例回复'));assert(f.$('#commentsList').innerHTML.includes('回复 @测试用户甲'));assert(f.$('#commentsDetailNote').textContent.includes('前 2000 条'));
+ await f.run('commentsOutput=null;loadCommentsRuns()');f.status={running:false};await f.run('loadComments()');assert(f.$('#commentsLatest').innerHTML.includes('20261113T101112'));
  console.log('comments UI: 1 focused suite passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

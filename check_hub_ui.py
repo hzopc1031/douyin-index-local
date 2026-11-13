@@ -61,6 +61,10 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif path in ('comments/start', 'comments/pause', 'comments/resume'):
+                            fixture['comments_running'] = path == 'comments/start'
+                            fixture['comments_paused'] = path == 'comments/pause'
+                            data = dict(ok=True)
                         elif path == 'comments/probe':
                             data = dict(ok=True, probe=fixture['comments_probe'])
                         elif path == 'desktop/ticket':
@@ -103,7 +107,12 @@ def run(output=None):
                     elif path == 'jobs': data = dict(jobs=fixture.get('jobs', []))
                     elif path == 'jobs/synthetic-douyin-login-failure': data = dict(job=fixture['jobs'][0])
                     elif path == 'keys': data = dict(keys=[])
-                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=False, paused=False)
+                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=fixture.get('comments_running', False), paused=fixture.get('comments_paused', False), pause_reason='user' if fixture.get('comments_paused') else None, output=fixture.get('comments_output'))
+                    elif path == 'comments/runs': data = dict(runs=fixture.get('comments_runs', []), usage=dict(today_used=fixture.get('comments_used'), daily_limit=150, batch_limit=25))
+                    elif path.startswith('comments/runs/'):
+                        run_id = path.split('/')[2]
+                        comments = fixture.get('comments_rows', []) if run_id == '20261113T101112' else []
+                        data = dict(run_id=run_id, total=len(comments), truncated=False, comments=comments)
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,
@@ -334,11 +343,19 @@ def run(output=None):
                     assert '不同的关键词' in page.locator('#queryError').inner_text()
                     assert len(writes)==0
                 page.locator('#queryWords').fill('杭州')
-                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed')")
+                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed');reportBatch.entries[0].error='合成网络错误'")
                 page.locator('#submitButton').click()
-                assert '上一批' in page.locator('#queryError').inner_text()
+                assert '上一批' in page.locator('#toast').inner_text()
+                assert '「本次完整查询」' in page.locator('#toast').inner_text()
+                assert not page.locator('#queryDialog').is_visible()
+                assert page.locator('#reportProgress').evaluate('(node)=>node.open')
+                assert page.locator('#retryBundle').is_visible()
+                assert page.locator('#retryBundle').evaluate('(node)=>node===document.activeElement')
+                retry_box = page.locator('#retryBundle').bounding_box()
+                assert 0 <= retry_box['y'] and retry_box['y']+retry_box['height'] <= 700
                 assert len(writes)==0
                 page.evaluate('reportBatch=null;saveBatch()')
+                page.locator('#openQuery').click()
                 page.set_viewport_size(dict(width=width,height=height))
                 page.keyboard.press('Escape')
                 assert not page.locator('#queryDialog').is_visible()
@@ -746,6 +763,68 @@ def run(output=None):
                 assert page.evaluate('window.syntheticDesktop.opened && !window.syntheticDesktop.closed')
                 assert writes[-1] == ('desktop/ticket', {})
                 assert writes[writes_before_navigation:] == [('comments/probe', {})] * 7 + [('desktop/ticket', {})]
+                # Saved comments, progress and every displayed string use offline synthetic exports.
+                page.evaluate("async () => {tab('comments');await loadCommentsRuns();await loadComments()}")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：空闲'
+                assert page.locator('#commentsRuns').inner_text() == '还没有评论运行记录。填写视频链接后点击开始采集。'
+                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 · 每批最多 25'
+                fixture['comments_used'] = 17
+                fixture['comments_output'] = dict(run_id='20261113T101112', requests=3, videos=[dict(
+                    video_id='100', top_count=1, reply_count=2, status='complete', reason='exhausted')])
+                fixture['comments_rows'] = [dict(video_id='100', comment_id='2', level='2', root_comment_id='1',
+                    text='示例回复二', nickname='测试用户乙', reply_to_nickname='测试用户甲', ip_label='测试属地乙', like_count='0', created_at='2026-11-13 10:00'),
+                    dict(video_id='100', comment_id='1', level='1', text='示例评论一 <img src=x onerror="window.commentXss=1">',
+                         nickname='测试用户甲 <script>window.commentXss=1</script>', ip_label='测试属地甲', like_count='5', created_at='2026-11-13 09:00'),
+                    dict(video_id='100', comment_id='3', level='2', root_comment_id='missing', text='示例独立回复三', nickname='测试用户丙')]
+                fixture['comments_runs'] = [dict(run_id=run_id, finished_at='2026-11-13T10:11:12+08:00',
+                    exit_reason='complete', requests=3, videos=fixture['comments_output']['videos'])
+                    for run_id in ('20261113T101112', '20261112T101112')]
+                page.locator('#commentsVideoInput').fill('https://synthetic.invalid/video/100')
+                page.locator('#commentsStartButton').click()
+                page.wait_for_function('commentsRunning')
+                assert page.locator('#toast').inner_text() == '已开始采集…'
+                assert page.locator('#commentsMessage').inner_text() == '已开始采集…'
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中 · 已请求 3 次'
+                latest = page.locator('#commentsLatest').inner_text()
+                for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '评论已翻完'):
+                    assert expected in latest
+                fixture['comments_running'] = False
+                page.clock.fast_forward(5000)
+                page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：已完成'
+                assert page.locator('#toast').inner_text() == '采集完成'
+                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 150 · 每批最多 25'
+                assert page.locator('#commentsRuns [data-comments-run]').count() == 2
+                rows = page.locator('#commentsList .comment-row')
+                assert '示例评论一' in rows.nth(0).inner_text()
+                assert '示例回复二' in rows.nth(1).inner_text()
+                assert '示例独立回复三' in rows.nth(2).inner_text()
+                assert rows.nth(1).locator('.status').inner_text() == '回复 @测试用户甲'
+                assert rows.nth(2).locator('.status').inner_text() == '回复'
+                assert rows.nth(1).evaluate('(node)=>getComputedStyle(node).marginLeft') == '24px'
+                assert '测试属地甲' in rows.nth(0).inner_text() and '点赞 5' in rows.nth(0).inner_text()
+                assert '<img' in rows.nth(0).inner_text() and '<script>' in rows.nth(0).inner_text()
+                assert page.locator('#commentsList img, #commentsList script').count() == 0
+                assert page.evaluate('window.commentXss === undefined')
+                assert page.locator('#commentsList').evaluate('(node)=>getComputedStyle(node).maxHeight') == '480px'
+                assert page.locator('#commentsDownload').get_attribute('href') == '/api/v1/comments/runs/20261113T101112/comments.csv'
+                page.locator('[data-comments-run="20261112T101112"]').click()
+                page.wait_for_function("document.querySelector('#commentsList').textContent==='这次没有采到评论'")
+                assert page.locator('#commentsDownload').get_attribute('href') == '/api/v1/comments/runs/20261112T101112/comments.csv'
+                fixture['comments_output'] = None
+                page.evaluate('async () => {commentsOutput=null;await loadCommentsRuns();await loadComments()}')
+                assert '20261113T101112' in page.locator('#commentsLatest').inner_text()
+                page.locator('[data-comments-run="20261113T101112"]').click()
+                page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
+                page.evaluate("renderComments({probe:'verification_required',paused:true,pause_reason:'verification_required'})")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：已暂停'
+                assert page.locator('#commentsPauseReason').inner_text() == '暂停原因：需要验证'
+                assert page.locator('#commentsProbeState').inner_text() == '主站登录：需要验证'
+                page.evaluate("renderComments({running:true,waiting_for_index:true})")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：等待指数采集'
+                page.evaluate("renderComments({running:false,paused:true,pause_reason:'user'})")
+                assert page.locator('#toast').inner_text() == '采集已暂停：手动暂停'
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit, comments navigation/login')

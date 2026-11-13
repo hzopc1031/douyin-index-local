@@ -513,7 +513,27 @@ def run(output=None):
                         assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
                         page.locator('[data-tab=overview]').click()
                     writes.clear()
+                # A platform-wide rejection covers every unsubmitted module, then permits a fresh batch.
+                page.evaluate("q => {reportBatch=makeReportBatch(q,'synthetic-rejected-batch');renderReportProgress()}", q)
+                page.evaluate('submitReportBatch()')
+                assert writes == [('queries', q)]
+                assert page.evaluate("reportBatch.entries.length===3 && reportBatch.entries.every(e=>e.rejected&&!e.jobId&&e.code==='collection_paused')")
+                assert page.locator('#reportProgressRows .status').all_text_contents() == ['未创建'] * 3
+                assert '待提交' not in page.locator('#reportProgressRows').inner_text()
+                original_key = page.evaluate('reportBatch.entries[0].idem')
                 query_rejected[0] = False
+                for word in (q['keywords'][0], '合成新词'):
+                    previous_count = len(writes)
+                    page.locator('#openQuery').click()
+                    page.locator('#queryWords').fill(word)
+                    page.locator('#submitButton').click()
+                    page.wait_for_function('reportBatch.entries.every(e=>e.jobId) && !bundleSubmitting')
+                    assert len(writes) == previous_count + 3
+                    assert writes[previous_count][0] == 'queries'
+                    assert writes[previous_count][1]['keywords'] == [word]
+                    assert page.evaluate('reportBatch.entries[0].idem') != original_key
+                    original_key = page.evaluate('reportBatch.entries[0].idem')
+                writes.clear()
                 baidu_state[0] = 'login_required'
                 page.evaluate('refresh()')
                 # Opening login keeps the existing pause even before a status poll.
