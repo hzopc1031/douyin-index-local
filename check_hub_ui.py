@@ -171,6 +171,8 @@ def run(output=None):
                                     items=[dict(word='合成话题甲', position=1, new_entry=True, rank_rise=None,
                                                 rank_rise_hit=None, heat_pct=None, heat_hit=None, z_score=None,
                                                 z_hit=None, search_index_ratio=None)])
+                        if 'hot_rising_items' in fixture:
+                            data['items'] = fixture['hot_rising_items']
                         if fixture.get('hot_empty') and 'board' not in query:
                             data.update(items=[], current_fetched_at=None)
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
@@ -181,8 +183,25 @@ def run(output=None):
                     else: request_route.fulfill(content_type='application/json',body=json.dumps(data))
 
                 context.route('**/*', route)
-                page.goto('http://hub-ui.invalid/')
+                page.goto('http://hub-ui.invalid/#api')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
+                # The removed API module cannot be reached by navigation, hash or tab().
+                assert page.locator('.nav [data-tab]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.tab)') == ['overview', 'comments', 'tasks', 'connections']
+                assert page.locator('[data-tab=api], a[href="#api"]').count() == 0
+                assert 'API 与密钥' not in page.locator('.nav').inner_text()
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('[data-section=overview]').is_visible()
+                page.evaluate("tab('connections');tab('api')")
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('#pageTitle').inner_text() == '平台连接'
+                assert page.locator('.nav .active').get_attribute('data-tab') == 'connections'
+                page.evaluate("location.hash='';location.hash='api'")
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('[data-section=connections]').is_visible()
+                page.evaluate("location.hash='';tab('overview')")
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'hub-1113-nav-no-api-1280.png'), full_page=True)
                 assert page.locator('#platformChips [data-platform]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.platform)') == ['douyin', 'baidu']
                 assert page.locator('#queryPlatform option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['douyin', 'baidu']
                 page.wait_for_function("document.querySelector('#statPlatforms').textContent==='2'")
@@ -463,6 +482,96 @@ def run(output=None):
                 assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').text_content()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
+                # Sorting changes only the Douyin rising view; all values below are fictional.
+                fixture['hot_rising_items'] = [
+                    dict(word='示例词甲', position=10, new_entry=False, rank_rise=2, rank_rise_hit=False,
+                         heat_pct=0.2, heat_hit=True, z_score=0, z_hit=False, search_index_ratio=0),
+                    dict(word='示例词丙', position=None, new_entry=None, rank_rise=None, rank_rise_hit=None,
+                         heat_pct=None, heat_hit=None, z_score=None, z_hit=None, search_index_ratio=None),
+                    dict(word='示例词乙', position=2, new_entry=True, rank_rise=10, rank_rise_hit=True,
+                         heat_pct=0.05, heat_hit=False, z_score=2, z_hit=True, search_index_ratio=1.2),
+                    dict(word='示例词丁', position=5, new_entry=False,
+                         heat_pct=-0.1, heat_hit=False, z_score=-1, z_hit=False, search_index_ratio=0.8),
+                ]
+                default_order = ['示例词甲', '示例词丙', '示例词乙', '示例词丁']
+                def rising_order():
+                    return page.locator('#hotRisingRows tr td:first-child').all_text_contents()
+                page.evaluate('loadHotRising()')
+                assert rising_order() == default_order
+                assert page.locator('[data-rising-key] button').count() == 10
+                assert page.locator('[data-rising-key][aria-sort=none]').count() == 10
+                page.evaluate("document.querySelector('#overviewHot > details.card').open=false;scrollTo(0,0)")
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'hub-1113-rising-sort-before-1280.png'), full_page=True)
+                rank_header = page.locator('[data-rising-key=rank_rise]')
+                rank_button = rank_header.locator('button')
+                rank_button.click()
+                assert rising_order() == ['示例词乙', '示例词甲', '示例词丙', '示例词丁']
+                assert rank_header.get_attribute('aria-sort') == 'descending'
+                assert '▼' in rank_button.inner_text()
+                if output and width == 1280:
+                    page.evaluate('scrollTo(0,0)')
+                    page.screenshot(path=str(output/'hub-1113-rising-sort-after-1280.png'), full_page=True)
+                # Native buttons keep focus and support keyboard sorting, including default reset.
+                assert rank_button.evaluate('(n)=>n===document.activeElement')
+                rank_button.press('Enter')
+                assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
+                assert rank_header.get_attribute('aria-sort') == 'ascending'
+                assert '▲' in rank_button.inner_text()
+                rank_button.press('Space')
+                assert rising_order() == default_order
+                assert rank_header.get_attribute('aria-sort') == 'none'
+                # Other numeric columns, boolean hits and Chinese collation use their raw values.
+                expected_orders = {
+                    'word': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词丙', '示例词丁', '示例词甲', '示例词乙']),
+                    'position': (['示例词甲', '示例词丁', '示例词乙', '示例词丙'], ['示例词乙', '示例词丁', '示例词甲', '示例词丙']),
+                    'new_entry': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词甲', '示例词丁', '示例词乙', '示例词丙']),
+                    'rank_rise_hit': (['示例词乙', '示例词甲', '示例词丙', '示例词丁'], ['示例词甲', '示例词乙', '示例词丙', '示例词丁']),
+                    'heat_pct': (['示例词甲', '示例词乙', '示例词丁', '示例词丙'], ['示例词丁', '示例词乙', '示例词甲', '示例词丙']),
+                    'heat_hit': (['示例词甲', '示例词乙', '示例词丁', '示例词丙'], ['示例词乙', '示例词丁', '示例词甲', '示例词丙']),
+                    'z_score': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词丁', '示例词甲', '示例词乙', '示例词丙']),
+                    'z_hit': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词甲', '示例词丁', '示例词乙', '示例词丙']),
+                    'search_index_ratio': (['示例词乙', '示例词丁', '示例词甲', '示例词丙'], ['示例词甲', '示例词丁', '示例词乙', '示例词丙']),
+                }
+                for key, (descending, ascending) in expected_orders.items():
+                    button = page.locator(f'[data-rising-key={key}] button')
+                    button.click()
+                    assert rising_order() == descending, key
+                    button.click()
+                    assert rising_order() == ascending, key
+                    button.click()
+                    assert rising_order() == default_order, key
+                rank_button.click()
+                # Reload with new rows, then change views/platforms while preserving Douyin's choice.
+                fixture['hot_rising_items'][0]['rank_rise'] = 20
+                page.evaluate('loadHotRising()')
+                assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
+                assert rank_header.get_attribute('aria-sort') == 'descending'
+                page.locator('[data-source=index]').click()
+                page.locator('[data-source=hot_search]').click()
+                page.evaluate('loadHotRising()')
+                assert rank_header.get_attribute('aria-sort') == 'descending'
+                assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
+                page.locator('[data-platform=baidu]').click()
+                assert page.locator('[data-rising-key] button').count() == 0
+                page.locator('[data-source=hot_search]').click()
+                page.evaluate('loadHotRising()')
+                assert rising_order() == default_order
+                assert page.locator('[data-rising-key][aria-sort]').count() == 0
+                assert rank_header.inner_text() == '名次上升'
+                rank_header.click()
+                assert rising_order() == default_order
+                assert page.locator('table:has(#hotRows) th button').count() == 0
+                page.locator('[data-platform=douyin]').click()
+                page.locator('[data-source=hot_search]').click()
+                page.evaluate('loadHotRising()')
+                assert rank_header.get_attribute('aria-sort') == 'descending'
+                assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
+                assert page.locator('#hotRows tr td:nth-child(2)').all_text_contents() == ['合成话题甲', '合成话题乙']
+                rank_button.click()
+                rank_button.click()
+                assert rising_order() == default_order
+                del fixture['hot_rising_items']
                 assert page.locator('#topicCategory').is_hidden()
                 assert page.locator('#groupPanel').is_hidden()
                 page.locator('[data-source=index]').click()
