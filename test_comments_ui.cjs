@@ -10,8 +10,8 @@ assert(html.includes('placeholder="每行一个：视频链接、短链或 App �
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
  const $=id=>nodes[id]??={hidden:false,value:'',textContent:'',scrollIntoView(){this.scrolled=true},setAttribute(){},focus(){this.focused=true}};
- const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null,runs:[],details:{},notices:[]};
- const ctx=vm.createContext({$,encodeURIComponent,document:{querySelectorAll:()=>[]},esc:s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),toast:message=>f.notices.push(message),renderDouyinLoginActions(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:path==='comments/runs'?{runs:f.runs,usage:{today_used:null}}:path.startsWith('comments/runs/')?f.details[path.split('/')[2]]:{ok:true}}});
+ const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null,usage:{today_used:null,daily_limit:3000,batch_limit:1500},runs:[],details:{},notices:[]};
+ const ctx=vm.createContext({$,encodeURIComponent,document:{querySelectorAll:()=>[]},esc:s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),toast:message=>f.notices.push(message),renderDouyinLoginActions(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:path==='comments/runs'?{runs:f.runs,usage:f.usage}:path.startsWith('comments/runs/')?f.details[path.split('/')[2]]:{ok:true}}});
  vm.runInContext(script.slice(start,end),ctx);f.run=code=>vm.runInContext(code,ctx);return f;
 }
 (async()=>{
@@ -42,14 +42,35 @@ function fixture(){
  f.status={running:false};await f.run('loadComments()');assert.equal(f.timers.size,0);
  assert(f.notices.includes('已开始采集…'));assert(f.notices.includes('采集完成'));
  await f.run('loadCommentsRuns()');assert(f.$('#commentsRuns').innerHTML.includes('还没有评论运行记录'));assert(f.$('#commentsUsage').textContent.includes('今日用量未知'));
- f.status={probe:'custom_probe',paused:true,pause_reason:'custom_reason'};await f.run('loadComments()');assert(f.$('#commentsProbeState').textContent.includes('custom_probe'));assert(f.$('#commentsPauseReason').textContent.includes('custom_reason'));
+ f.status={probe:'custom_probe',paused:true,pause_reason:'custom_reason'};await f.run('loadComments()');assert.equal(f.$('#commentsProbeState').textContent,'主站登录：未知状态');assert.equal(f.$('#commentsPauseReason').textContent,'暂停原因：未知状态');
  f.status={running:true,output:{requests:3,run_id:'20261113T101112',videos:[{video_id:'100',top_count:1,reply_count:1,status:'complete',reason:'exhausted'}]}};await f.run('loadComments()');
- assert(f.$('#commentsStatus').textContent.includes('采集中 · 已请求 3 次'));assert(f.$('#commentsLatest').innerHTML.includes('评论已翻完'));assert.equal([...f.timers.values()][0].delay,5000);
+ assert(f.$('#commentsStatus').textContent.includes('采集中 · 已请求 3 次'));assert(f.$('#commentsLatest').innerHTML.includes('已采完'));assert.equal([...f.timers.values()][0].delay,5000);
  f.runs=[{run_id:'20261113T101112',finished_at:'2026-11-13T10:11:12+08:00',exit_reason:'complete',videos:[]}];f.details['20261113T101112']={total:0,truncated:false,comments:[]};
  f.status={running:false,paused:true,pause_reason:'user'};await f.run('loadComments()');await new Promise(setImmediate);
  assert.equal(f.notices.at(-1),'采集已暂停：手动暂停');assert(f.$('#commentsList').innerHTML.includes('这次没有采到评论'));assert.equal(f.$('#commentsDownload').href,'/api/v1/comments/runs/20261113T101112/comments.csv');
  f.details['20261113T101112']={total:2001,truncated:true,comments:[{video_id:'100',level:'2',root_comment_id:'1',text:'示例回复',reply_to_nickname:'测试用户甲'},{video_id:'100',level:'1',comment_id:'1',text:'<img src=x onerror=alert(1)>',nickname:'测试用户甲'}]};
  await f.run("loadCommentsRun('20261113T101112')");assert(f.$('#commentsList').innerHTML.includes('&lt;img'));assert(!f.$('#commentsList').innerHTML.includes('<img'));assert(f.$('#commentsList').innerHTML.includes('comment-reply'));assert(f.$('#commentsList').innerHTML.indexOf('&lt;img')<f.$('#commentsList').innerHTML.indexOf('示例回复'));assert(f.$('#commentsList').innerHTML.includes('回复 @测试用户甲'));assert(f.$('#commentsDetailNote').textContent.includes('前 2000 条'));
  await f.run('commentsOutput=null;loadCommentsRuns()');f.status={running:false};await f.run('loadComments()');assert(f.$('#commentsLatest').innerHTML.includes('20261113T101112'));
+ f.usage={today_used:19,daily_limit:900,batch_limit:77};await f.run('loadCommentsRuns()');
+ assert.equal(f.$('#commentsUsage').textContent,'今日已用 19 / 900 · 每批最多 77');
+ f.usage={today_used:17,daily_limit:3000,batch_limit:1500};await f.run('loadCommentsRuns()');
+ assert.equal(f.$('#commentsUsage').textContent,'今日已用 17 / 3000 · 每批最多 1500');
+ f.runs[0].videos=[{video_id:'7300000000000000001',title:'虚构视频甲',reported:165,top_count:2,reply_count:1,pages:13,status:'partial',reason:'video_page_budget'},{video_id:'7300000000000000002',top_count:1,reply_count:0,pages:1,status:'complete',reason:'exhausted'}];
+ f.details['20261113T101112']={total:4,truncated:false,comments:[
+  {video_id:'7300000000000000001',comment_id:'1',level:'1',text:'旧评论',nickname:'虚构小竹',like_count:'100',created_at:'2026-11-12T10:00:00+08:00',user_id:'不应展示的用户编号'},
+  {video_id:'7300000000000000001',comment_id:'2',level:'1',text:'新评论'+('很长的虚构内容'.repeat(30)),nickname:'虚构小云',like_count:'2',created_at:'2026-11-13T10:00:00+08:00'},
+  {video_id:'7300000000000000001',comment_id:'3',root_comment_id:'1',level:'2',text:'藏在回复里的关键词纸鹤',nickname:'虚构小鹤',like_count:'3'},
+  {video_id:'7300000000000000002',comment_id:'4',level:'1',text:'另一条视频正文',nickname:'虚构小雨',like_count:'0'}]};
+ await f.run('loadCommentsRuns()');await f.run("loadCommentsRun('20261113T101112')");
+ let rows=f.$('#commentsList').innerHTML;
+ assert(rows.indexOf('旧评论')<rows.indexOf('新评论'));assert(rows.includes('<details class="cm-replies"><summary>展开 1 条回复'));
+ assert(rows.includes('<details class="cm-text">'));assert(!rows.includes('<details class="cm-text" open'));assert(!rows.includes('不应展示的用户编号'));
+ assert(f.$('#commentsVideoSummary').innerHTML.includes('虚构视频甲'));assert(f.$('#commentsVideoSummary').innerHTML.includes('165'));assert(f.$('#commentsVideoSummary').innerHTML.includes('请求 13 次'));assert(f.$('#commentsVideoSummary').innerHTML.includes('达到本批上限，可继续采集'));
+ assert(f.$('#commentsVideo').innerHTML.includes('7300000000000000002'));
+ f.$('#commentsSort').value='time';f.$('#commentsSort').onchange();rows=f.$('#commentsList').innerHTML;assert(rows.indexOf('新评论')<rows.indexOf('旧评论'));
+ f.$('#commentsSearch').value='纸鹤';f.$('#commentsSearch').oninput();rows=f.$('#commentsList').innerHTML;assert(rows.includes('旧评论'));assert(rows.includes('纸鹤'));assert(!rows.includes('新评论'));assert(!rows.includes('另一条视频正文'));
+ f.$('#commentsSearch').value='虚构小云';f.$('#commentsSearch').oninput();assert(f.$('#commentsList').innerHTML.includes('新评论'));assert(!f.$('#commentsList').innerHTML.includes('旧评论'));
+ f.$('#commentsSearch').value='';f.$('#commentsVideo').value='7300000000000000002';f.$('#commentsVideo').onchange();assert(f.$('#commentsList').innerHTML.includes('另一条视频正文'));assert(!f.$('#commentsList').innerHTML.includes('旧评论'));
+ f.$('#commentsSearch').value='不存在的词';f.$('#commentsSearch').oninput();assert.equal(f.$('#commentsList').innerHTML,'没有匹配的评论');
  console.log('comments UI: 1 focused suite passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
