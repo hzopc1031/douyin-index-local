@@ -97,7 +97,7 @@ def run(output=None):
                     elif path == 'status':
                         status_reads.append(request.url)
                         data = dict(browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',login_state=fixture['login'],login_mode=fixture.get('login_mode', 'desktop'),counts=dict(keywords=1,points=7),
-                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None)
+                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None, hotlist=dict(enabled=fixture.get('hot_enabled', True), paused=fixture.get('hot_paused'), interval_seconds=3600, daily_success_limit=48, daily_successes=0))
                     elif path == 'login/qr':
                         data = dict(state=fixture['qr_state'],
                                     browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',
@@ -125,6 +125,8 @@ def run(output=None):
                                     note='热榜热度不是搜索指数，也不是创作者中心综合指数。',
                                     items=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00'),
                                            dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
+                        if fixture.get('hot_empty') and 'board' not in query:
+                            data.update(items=[], fetched_at=None)
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
                     elif path == 'groups' and request.method == 'GET':
@@ -167,6 +169,8 @@ def run(output=None):
                                     items=[dict(word='合成话题甲', position=1, new_entry=True, rank_rise=None,
                                                 rank_rise_hit=None, heat_pct=None, heat_hit=None, z_score=None,
                                                 z_hit=None, search_index_ratio=None)])
+                        if fixture.get('hot_empty') and 'board' not in query:
+                            data.update(items=[], current_fetched_at=None)
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
@@ -419,6 +423,26 @@ def run(output=None):
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
                 assert page.locator('#hotRows tr').nth(1).locator('td').nth(0).inner_text() == '2'
                 assert page.locator('#hotRows tr').nth(1).locator('td').nth(2).inner_text() == '—'
+                fixture['hot_empty'] = True
+                for enabled, paused, expected in (
+                    (False, None, '抖音热榜自动抓取未开启（服务端配置），暂无快照。开启后每小时抓取一次，无需登录。'),
+                    (True, None, '尚未抓到热榜快照，首次抓取完成后显示。'),
+                    (True, dict(code='rate_limited', message='合成限频 <img src=x>'), '热榜抓取已暂停：合成限频 <img src=x>'),
+                    (False, dict(code='access_denied'), '热榜抓取已暂停：access_denied'),
+                ):
+                    fixture.update(hot_enabled=enabled, hot_paused=paused)
+                    page.evaluate('loadHot()')
+                    assert expected in page.locator('#hotRows').inner_text()
+                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('#hotResume').is_visible() == bool(paused)
+                    page.locator('#hotRisingButton').click()
+                    page.wait_for_function("document.querySelector('#hotRisingBaseline').textContent.includes('当前快照 —')")
+                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('#overviewHot [data-login-platform]').count() == 0
+                    assert page.locator('#hotRows img, #hotRisingRows img').count() == 0
+                fixture.update(hot_empty=False, hot_enabled=True, hot_paused=None)
+                page.evaluate('loadHot()')
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
                 page.locator('#hotSentence').fill('s1')
                 page.locator('#hotWordButton').click()
                 page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")

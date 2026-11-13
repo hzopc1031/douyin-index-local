@@ -148,6 +148,8 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 | GET `/hot/word?sentence_id=` 或 `?word=` | read | 该话题实际上榜记录；两者只能填一个 |
 | POST `/hot/resume` | 仅管理登录 | 解除热榜暂停，不消耗搜索指数额度 |
 
+网页抖音热搜榜及飙升空态区分服务端未开启、等待首次快照和抓取暂停；暂停时保留人工恢复按钮，均无需登录。已有快照仍可读取，百度热搜行为不变。默认开启后每小时抓取一次，实际间隔以服务端配置为准。
+
 `GET /status` 增加 `hotlist`：`enabled`、`paused`、`interval_seconds`、`daily_success_limit`、`daily_successes`。搜索指数的 `daily_online_attempts` 与此无关。
 
 ## 飙升词（第二期）
