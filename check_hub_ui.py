@@ -502,6 +502,7 @@ def run(output=None):
                 assert page.locator('[data-rising-key][aria-sort=none]').count() == 10
                 page.evaluate("document.querySelector('#overviewHot > details.card').open=false;scrollTo(0,0)")
                 if output and width == 1280:
+                    page.locator('#toast').evaluate('(n)=>n.hidden=true')
                     page.screenshot(path=str(output/'hub-1113-rising-sort-before-1280.png'), full_page=True)
                 rank_header = page.locator('[data-rising-key=rank_rise]')
                 rank_button = rank_header.locator('button')
