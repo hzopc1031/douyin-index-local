@@ -340,7 +340,7 @@ class QtCommentTransport:
         deadline = time.monotonic() + SHORT_LINK_TIMEOUT
         while time.monotonic() < deadline:
             page = parse_probe_js(self._evaluate(RESOLVE_JS, token))
-            if page:
+            if page and page.get("host"):
                 url = f"{'https' if page.get('https') else 'http'}://{page.get('host', '')}{page.get('path', '/')}"
                 if not site.trusted_video_landing(url):
                     raise Stop(2, "untrusted_video_redirect")

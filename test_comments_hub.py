@@ -494,6 +494,16 @@ class CommentsHubTests(unittest.TestCase):
         self.assertEqual(calls, ["7300000000000000002"])
         self.assertEqual((videos[0]["video_url"], videos[0]["status"]), (canonical, "complete"))
 
+    def test_short_resolution_waits_through_blank_document(self):
+        short = "https://v.douyin.com/AbCd123/"
+        old = "https://www.douyin.com/video/7300000000000000001"
+        canonical = "https://www.douyin.com/video/7300000000000000002"
+        locations = ["about:blank", canonical]
+        videos, calls = self.run_redirect_batch([short], {short: locations}, previous_url=old)
+        self.assertEqual(self.window.probed_locations[1:], locations)
+        self.assertEqual(calls, ["7300000000000000002"])
+        self.assertEqual((videos[0]["video_url"], videos[0]["status"]), (canonical, "complete"))
+
     def test_short_returning_to_previous_video_is_deduplicated(self):
         short = "https://v.douyin.com/AbCd123/"
         canonical = "https://www.douyin.com/video/7300000000000000001"
