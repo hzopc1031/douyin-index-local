@@ -219,7 +219,7 @@ def run(output=None):
                 assert page.locator('#audienceSummary').bounding_box()['y'] + page.locator('#audienceSummary').bounding_box()['height'] < height
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 if output:
-                    page.evaluate("""() => {const n=document.createElement('div');n.textContent='离线合成样例 · 未调用真实查询';n.style='float:right;font-size:9px;font-weight:400;letter-spacing:0;color:#b2c8bc;padding-top:5px';document.querySelector('.brand').append(n)}""")
+                    page.evaluate("""() => {const n=document.createElement('div');n.textContent='离线合成样例 · 未调用真实查询';n.style='font-size:11px;font-weight:400;letter-spacing:0;color:var(--side-text);line-height:1.5;margin-bottom:16px';document.querySelector('.brand').append(n)}""")
                     page.screenshot(path=str(output/f'hub-tips-{"mobile" if width==430 else "desktop"}.png'))
                 # Native popovers: touch, mouse hover, keyboard, dismissal and viewport bounds.
                 tip = page.locator('#relatedSummary .info-button')
@@ -502,6 +502,7 @@ def run(output=None):
                 assert page.locator('[data-rising-key][aria-sort=none]').count() == 10
                 page.evaluate("document.querySelector('#overviewHot > details.card').open=false;scrollTo(0,0)")
                 if output and width == 1280:
+                    page.evaluate("document.querySelector('#toast').hidden=true")
                     page.screenshot(path=str(output/'hub-1113-rising-sort-before-1280.png'), full_page=True)
                 rank_header = page.locator('[data-rising-key=rank_rise]')
                 rank_button = rank_header.locator('button')

@@ -51,7 +51,7 @@ button:active,.btn:active{transform:scale(.97)}
 .btn{background:var(--accent);color:var(--ink);border-color:var(--accent);border-radius:4px;font-weight:750;text-decoration:none}
 .btn:hover{background:#e8c200;border-color:#e8c200}
 .btn.secondary{background:var(--surface);color:var(--ink);border-color:var(--line)}
-.btn.light{background:transparent;color:var(--ink);border-color:transparent;text-decoration:underline;text-underline-offset:4px}
+.btn.light{background:var(--soft);color:var(--ink);border-color:transparent}
 .btn.secondary:hover,.btn.light:hover{background:var(--soft);border-color:var(--line)}
 .btn.danger{background:var(--surface);color:var(--danger);border-color:var(--danger)}
 .btn.danger:hover{background:var(--soft)}
@@ -94,6 +94,9 @@ pre{background:var(--soft);color:var(--ink);border-radius:4px}code{color:inherit
  .topline>div:last-child{min-width:0}.topline .btn{white-space:normal}
 }
 @media(prefers-reduced-motion:reduce){button,.btn{transition:none}}
+/* 内侧填色延续整列黑底，保留 sticky 导航和主区最大宽度。 */
+@media(min-width:851px){.shell{box-shadow:inset 218px 0 var(--side)}}
+@media(min-width:851px) and (max-width:1150px){.shell{box-shadow:inset 185px 0 var(--side)}}
 </style></head><body>
 <div class="shell"><aside class="side"><div class="brand">指数工作台<small>INDEX ATLAS</small></div><nav class="nav"><button class="active" data-tab="overview"><span>◈</span>趋势总览</button><button data-tab="comments"><span>☰</span>评论采集</button><button data-tab="tasks"><span>☷</span>采集任务</button><button data-tab="connections"><span>⊞</span>平台连接</button></nav><div class="sidefoot"><b>多平台关键词洞察</b><br>每个平台，保留自己的口径。<br><br>PRIVATE WORKSPACE · V1.0</div></aside>
 <main class="main"><header class="top"><div><h1 id="pageTitle">趋势总览</h1></div><div class="topright"><button class="btn secondary" id="globalRefresh">刷新</button><span class="badge" id="browserBadge"><span class="dot"></span>正在连接</span></div></header>
