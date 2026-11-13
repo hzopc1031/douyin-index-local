@@ -23,7 +23,7 @@
 @media(min-width:1051px){[data-section=comments]{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:18px;align-items:start}[data-section=comments]>.card{margin:0;min-width:0}#overviewComments{grid-row:span 2}}
 @media(max-width:850px){.nav{flex-wrap:nowrap}.nav button{flex:none;padding:9px 10px}.main{padding:18px 16px}.topright{gap:8px}.topright .badge{font-size:12px}.cardhead,.cardbody{padding:16px}.result-context .chartbar{align-items:start}.result-context .metric{font-size:12px}.result-context .chartbar select{min-width:0;max-width:48%}.result-heading h2{font-size:17px}.result-heading .btn{padding:8px 12px}.summary-card .summary-caption,.summary-card .summary-note{font-size:11px}.topline{flex-wrap:wrap}.topline>.btn{padding:8px 12px}.topline>div:first-child{flex-basis:100%}.topline:has(#hotRefresh){display:grid;grid-template-columns:minmax(0,1fr) auto}.topline:has(#hotRefresh) #hotResume{grid-column:1/-1;justify-self:start}.range-picker>summary{font-size:12px}.tablewrap{max-width:100%}.smsfields label{min-width:0;flex-basis:180px}.smsactions .btn{padding:9px 12px}.footer{font-size:11px}}
 /* 评论展示 */
-.cm-controls{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}.cm-controls label{flex:1 1 140px;min-width:0;font-size:12px;color:var(--muted)}.cm-controls .cm-search{flex-basis:100%}.cm-controls select,.cm-controls input{margin-top:5px;min-width:0}.cm-summaries{display:grid;gap:8px}.cm-video{padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);overflow-wrap:anywhere;font-size:12px}.cm-video p{margin:4px 0}.cm-reason{color:var(--green)}.cm-replies>summary,.cm-text>summary{cursor:pointer;color:var(--green);padding:6px 0;font-size:12px}.cm-replies{border-bottom:1px solid var(--line)}.cm-text{overflow-wrap:anywhere}.cm-text>summary{color:var(--ink);white-space:pre-wrap}.cm-text .cm-expand,.cm-text .cm-close{color:var(--green);margin-left:8px}.cm-text .cm-close,.cm-text[open] .cm-preview,.cm-text[open] .cm-expand{display:none}.cm-text[open] .cm-close{display:inline}.cm-thread .comment-row{overflow-wrap:anywhere}.cm-controls~.comments-scroll{min-width:0}.cm-summaries:empty{display:none}
+.cm-controls{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}.cm-controls label{flex:1 1 140px;min-width:0;font-size:12px;color:var(--muted)}.cm-controls .cm-search{flex-basis:100%}.cm-controls select,.cm-controls input{margin-top:5px;min-width:0}.cm-summaries{display:grid;gap:8px}.cm-video{padding:10px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);overflow-wrap:anywhere;font-size:12px}.cm-video p{margin:4px 0}.cm-reason{color:var(--green)}.cm-replies>summary,.cm-text>summary{cursor:pointer;color:var(--green);padding:6px 0;font-size:12px}.cm-replies{border-bottom:1px solid var(--line)}.cm-text{overflow-wrap:anywhere}.cm-text>summary{color:var(--ink);white-space:pre-wrap;list-style:none}.cm-text>summary::-webkit-details-marker{display:none}.cm-text .cm-expand,.cm-text .cm-close{color:var(--green);margin-left:8px}.cm-text .cm-close,.cm-text[open] .cm-preview,.cm-text[open] .cm-expand{display:none}.cm-text[open] .cm-close{display:inline}.cm-thread .comment-row{overflow-wrap:anywhere}.cm-controls~.comments-scroll{min-width:0}.cm-summaries:empty{display:none}
 </style></head><body>
 <div class="shell"><aside class="side"><div class="brand">指数工作台<small>INDEX ATLAS</small></div><nav class="nav"><button class="active" data-tab="overview"><span>◈</span>趋势总览</button><button data-tab="comments"><span>☰</span>评论采集</button><button data-tab="tasks"><span>☷</span>采集任务</button><button data-tab="connections"><span>⊞</span>平台连接</button></nav><div class="sidefoot"><b>多平台关键词洞察</b><br>每个平台，保留自己的口径。<br><br>PRIVATE WORKSPACE · V1.0</div></aside>
 <main class="main"><header class="top"><div><h1 id="pageTitle">趋势总览</h1></div><div class="topright"><button class="btn secondary" id="globalRefresh">刷新</button><span class="badge" id="browserBadge"><span class="dot"></span>正在连接</span></div></header>
@@ -519,6 +519,10 @@ function commentsVideoSummary(v){
  const requests=v.pages??(v.top_requests!=null&&v.reply_requests!=null?v.top_requests+v.reply_requests:null);
  return '<div class="cm-video"><strong>视频 '+esc(v.video_id||'未解析')+'</strong>'+(v.title?'<p>'+esc(v.title)+'</p>':'')+'<p>抖音报告评论总数 '+esc(v.reported??'未知')+(v.displayed?' · 页面显示 '+esc(v.displayed):'')+' · 实采一级 '+esc(v.top_count??'未知')+' / 楼中楼 '+esc(v.reply_count??'未知')+'</p><p>请求 '+esc(requests??'未知')+' 次'+(v.top_requests!=null?'（一级 '+esc(v.top_requests)+' / 回复 '+esc(v.reply_requests??'未知')+'）':'')+'</p><p class="cm-reason">'+esc(commentsName(v.status))+' · '+esc(commentsName(v.reason))+'</p></div>';
 }
+function commentsTime(value){
+ const date=new Date(value||NaN);
+ return Number.isNaN(date.getTime())?'—':date.toLocaleString('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+}
 function renderCommentRows(comments){
  const replies=new Map(),roots=new Set(comments.filter(c=>String(c.level)==='1').map(c=>JSON.stringify([c.video_id,c.comment_id])));
  for(const c of comments)if(String(c.level)!=='1'){const key=JSON.stringify([c.video_id,c.root_comment_id]);if(!replies.has(key))replies.set(key,[]);replies.get(key).push(c)}
@@ -527,7 +531,7 @@ function renderCommentRows(comments){
  const rank=c=>sort==='time'?(Date.parse(c.created_at)||-Infinity):(c.like_count===''||c.like_count==null?-Infinity:Number(c.like_count));
  const ordered=items=>items.slice().sort((a,b)=>rank(b)-rank(a));
  const text=c=>{const chars=Array.from(c.text||'');return chars.length>120?'<details class="cm-text"><summary><span class="cm-preview">'+esc(chars.slice(0,120).join(''))+'…</span><span class="cm-expand">展开</span><span class="cm-close">收起</span></summary><p>'+esc(c.text)+'</p></details>':'<p>'+esc(c.text||'')+'</p>'};
- const row=c=>'<div class="comment-row'+(String(c.level)==='1'?'':' comment-reply')+'"><div class="tiny">'+esc(c.nickname||'匿名')+' · '+esc(c.ip_label||'属地未知')+' · '+esc(c.created_at||'时间未知')+' · 点赞 '+esc(c.like_count===''||c.like_count==null?'—':c.like_count)+'</div>'+(String(c.level)==='1'?'':'<span class="status">'+esc(c.reply_to_nickname?'回复 @'+c.reply_to_nickname:'回复')+'</span>')+text(c)+'</div>';
+ const row=c=>'<div class="comment-row'+(String(c.level)==='1'?'':' comment-reply')+'"><div class="tiny">'+esc(c.nickname||'匿名')+' · '+esc(c.ip_label||'属地未知')+' · '+esc(commentsTime(c.created_at))+' · 点赞 '+esc(c.like_count===''||c.like_count==null?'—':c.like_count)+'</div>'+text(c)+'</div>';
  return ordered(comments.filter(c=>String(c.level)==='1'||!roots.has(JSON.stringify([c.video_id,c.root_comment_id])))).map(c=>{
   const children=ordered(replies.get(JSON.stringify([c.video_id,c.comment_id]))||[]);
   if(query&&!matches(c)&&!children.some(matches))return '';
@@ -552,7 +556,10 @@ async function loadCommentsRun(runId){
   const videos=commentsRunsData.find(r=>r.run_id===runId)?.videos||[];
   $('#commentsVideoSummary').innerHTML=videos.map(commentsVideoSummary).join('');
   const ids=[...new Set([...videos.map(v=>v.video_id),...commentsRows.map(c=>c.video_id)].filter(Boolean))];
-  $('#commentsVideo').innerHTML='<option value="">全部视频</option>'+ids.map(id=>'<option value="'+esc(id)+'">视频 '+esc(id)+'</option>').join('');
+  $('#commentsVideo').innerHTML='<option value="">全部视频</option>'+ids.map(id=>{
+   const title=Array.from(videos.find(v=>v.video_id===id)?.title?.trim()||'');
+   return '<option value="'+esc(id)+'">'+esc(title.length?title.slice(0,16).join('')+(title.length>16?'…':''):'视频 …'+id.slice(-6))+'</option>';
+  }).join('');
   $('#commentsVideo').value='';$('#commentsSort').value='likes';$('#commentsSearch').value='';$('#commentsControls').hidden=false;
   renderCommentsList();
   $('#commentsDetailNote').textContent='共 '+data.total+' 条'+(data.truncated?' · 仅展示前 2000 条，请下载 CSV 查看全部。':'');

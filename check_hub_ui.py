@@ -959,8 +959,8 @@ def run(output=None):
                 assert '示例评论一' in rows.nth(0).inner_text()
                 assert '示例回复二' in rows.nth(1).inner_text()
                 assert '示例独立回复三' in rows.nth(2).inner_text()
-                assert rows.nth(1).locator('.status').inner_text() == '回复 @测试用户甲'
-                assert rows.nth(2).locator('.status').inner_text() == '回复'
+                assert rows.locator('.status').count() == 0
+                assert '—' in rows.nth(2).locator('.tiny').inner_text()
                 assert rows.nth(1).evaluate('(node)=>getComputedStyle(node).marginLeft') == '24px'
                 assert '测试属地甲' in rows.nth(0).inner_text() and '点赞 5' in rows.nth(0).inner_text()
                 assert '<img' in rows.nth(0).inner_text() and '<script>' in rows.nth(0).inner_text()
@@ -988,14 +988,23 @@ def run(output=None):
                 assert '另一条虚构视频' in page.locator('#commentsList .cm-thread').first.inner_text()
                 assert '虚构视频标题' in page.locator('#commentsVideoSummary').inner_text()
                 assert '不可展示的虚构用户编号' not in page.locator('#commentsList').inner_text()
+                assert page.locator('#commentsVideo option[value="100"]').inner_text() == '视频 …100'
+                assert page.locator('#commentsVideo option[value="7300000000000000002"]').inner_text() == '虚构视频标题'
                 page.locator('#commentsSort').select_option('time')
                 assert '虚构的长评论' in page.locator('#commentsList .cm-thread').first.inner_text()
                 long_text = page.locator('#commentsList .cm-text')
+                assert '2026-11-14 09:00' in page.locator('#commentsList .cm-thread').first.inner_text()
                 assert not long_text.locator('p').is_visible()
+                assert long_text.locator('summary').evaluate('(node)=>getComputedStyle(node).listStyleType') == 'none'
+                assert long_text.locator('.cm-expand').is_visible()
+                assert not long_text.locator('.cm-close').is_visible()
                 long_text.locator('summary').click()
                 assert long_text.locator('p').is_visible()
+                assert long_text.locator('.cm-close').is_visible()
+                assert not long_text.locator('.cm-expand').is_visible()
                 long_text.locator('summary').click()
                 assert not long_text.locator('p').is_visible()
+                assert long_text.locator('.cm-expand').is_visible()
                 page.locator('#commentsSearch').fill('示例回复二')
                 assert page.locator('#commentsList .cm-thread').count() == 1
                 assert '示例评论一' in page.locator('#commentsList .cm-thread').inner_text()

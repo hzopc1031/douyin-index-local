@@ -16,6 +16,8 @@ function fixture(){
 }
 (async()=>{
  const f=fixture();await new Promise(setImmediate);
+ assert.equal(f.run("commentsTime('2026-11-12T01:30:59Z')"),'2026-11-12 09:30');
+ for(const value of [undefined,null,'','invalid'])assert.equal(f.run(`commentsTime(${JSON.stringify(value)})`),'—');
  assert.equal(f.run("commentsName('short_link_unresolved')"),'短链未能解析');
  assert.equal(f.run("commentsName('untrusted_video_redirect')"),'短链跳转到非抖音页面');
  assert.equal(f.run("commentsName('deduplicated')"),'重复视频，已跳过');
@@ -49,24 +51,28 @@ function fixture(){
  f.status={running:false,paused:true,pause_reason:'user'};await f.run('loadComments()');await new Promise(setImmediate);
  assert.equal(f.notices.at(-1),'采集已暂停：手动暂停');assert(f.$('#commentsList').innerHTML.includes('这次没有采到评论'));assert.equal(f.$('#commentsDownload').href,'/api/v1/comments/runs/20261113T101112/comments.csv');
  f.details['20261113T101112']={total:2001,truncated:true,comments:[{video_id:'100',level:'2',root_comment_id:'1',text:'示例回复',reply_to_nickname:'测试用户甲'},{video_id:'100',level:'1',comment_id:'1',text:'<img src=x onerror=alert(1)>',nickname:'测试用户甲'}]};
- await f.run("loadCommentsRun('20261113T101112')");assert(f.$('#commentsList').innerHTML.includes('&lt;img'));assert(!f.$('#commentsList').innerHTML.includes('<img'));assert(f.$('#commentsList').innerHTML.includes('comment-reply'));assert(f.$('#commentsList').innerHTML.indexOf('&lt;img')<f.$('#commentsList').innerHTML.indexOf('示例回复'));assert(f.$('#commentsList').innerHTML.includes('回复 @测试用户甲'));assert(f.$('#commentsDetailNote').textContent.includes('前 2000 条'));
+ await f.run("loadCommentsRun('20261113T101112')");assert(f.$('#commentsList').innerHTML.includes('&lt;img'));assert(!f.$('#commentsList').innerHTML.includes('<img'));assert(f.$('#commentsList').innerHTML.includes('comment-reply'));assert(f.$('#commentsList').innerHTML.indexOf('&lt;img')<f.$('#commentsList').innerHTML.indexOf('示例回复'));assert(!f.$('#commentsList').innerHTML.includes('class="status"'));assert(f.$('#commentsDetailNote').textContent.includes('前 2000 条'));
  await f.run('commentsOutput=null;loadCommentsRuns()');f.status={running:false};await f.run('loadComments()');assert(f.$('#commentsLatest').innerHTML.includes('20261113T101112'));
  f.usage={today_used:19,daily_limit:900,batch_limit:77};await f.run('loadCommentsRuns()');
  assert.equal(f.$('#commentsUsage').textContent,'今日已用 19 / 900 · 每批最多 77');
  f.usage={today_used:17,daily_limit:3000,batch_limit:1500};await f.run('loadCommentsRuns()');
  assert.equal(f.$('#commentsUsage').textContent,'今日已用 17 / 3000 · 每批最多 1500');
- f.runs[0].videos=[{video_id:'7300000000000000001',title:'虚构视频甲',reported:165,top_count:2,reply_count:1,pages:13,status:'partial',reason:'video_page_budget'},{video_id:'7300000000000000002',top_count:1,reply_count:0,pages:1,status:'complete',reason:'exhausted'}];
+ f.runs[0].videos=[{video_id:'7300000000000000001',title:'虚构视频甲'.repeat(4),reported:165,top_count:2,reply_count:1,pages:13,status:'partial',reason:'video_page_budget'},{video_id:'7300000000000000002',top_count:1,reply_count:0,pages:1,status:'complete',reason:'exhausted'}];
  f.details['20261113T101112']={total:4,truncated:false,comments:[
   {video_id:'7300000000000000001',comment_id:'1',level:'1',text:'旧评论',nickname:'虚构小竹',like_count:'100',created_at:'2026-11-12T10:00:00+08:00',user_id:'不应展示的用户编号'},
   {video_id:'7300000000000000001',comment_id:'2',level:'1',text:'新评论'+('很长的虚构内容'.repeat(30)),nickname:'虚构小云',like_count:'2',created_at:'2026-11-13T10:00:00+08:00'},
   {video_id:'7300000000000000001',comment_id:'3',root_comment_id:'1',level:'2',text:'藏在回复里的关键词纸鹤',nickname:'虚构小鹤',like_count:'3'},
-  {video_id:'7300000000000000002',comment_id:'4',level:'1',text:'另一条视频正文',nickname:'虚构小雨',like_count:'0'}]};
+  {video_id:'7300000000000000002',comment_id:'4',level:'1',text:'另一条视频正文',nickname:'虚构小雨',like_count:'0',created_at:'invalid'}]};
  await f.run('loadCommentsRuns()');await f.run("loadCommentsRun('20261113T101112')");
  let rows=f.$('#commentsList').innerHTML;
  assert(rows.indexOf('旧评论')<rows.indexOf('新评论'));assert(rows.includes('<details class="cm-replies"><summary>展开 1 条回复'));
  assert(rows.includes('<details class="cm-text">'));assert(!rows.includes('<details class="cm-text" open'));assert(!rows.includes('不应展示的用户编号'));
  assert(f.$('#commentsVideoSummary').innerHTML.includes('虚构视频甲'));assert(f.$('#commentsVideoSummary').innerHTML.includes('165'));assert(f.$('#commentsVideoSummary').innerHTML.includes('请求 13 次'));assert(f.$('#commentsVideoSummary').innerHTML.includes('达到本批上限，可继续采集'));
- assert(f.$('#commentsVideo').innerHTML.includes('7300000000000000002'));
+ assert(f.$('#commentsVideo').innerHTML.includes('<option value="7300000000000000001">虚构视频甲虚构视频甲虚构视频甲虚…</option>'));
+ assert(f.$('#commentsVideo').innerHTML.includes('<option value="7300000000000000002">视频 …000002</option>'));
+ assert(f.$('#commentsVideoSummary').innerHTML.includes('7300000000000000001'));
+ assert(rows.includes('2026-11-12 10:00'));assert(!rows.includes('2026-11-12T'));
+ assert(rows.includes('虚构小雨 · 属地未知 · — · 点赞 0'));assert(!rows.includes('class="status"'));
  f.$('#commentsSort').value='time';f.$('#commentsSort').onchange();rows=f.$('#commentsList').innerHTML;assert(rows.indexOf('新评论')<rows.indexOf('旧评论'));
  f.$('#commentsSearch').value='纸鹤';f.$('#commentsSearch').oninput();rows=f.$('#commentsList').innerHTML;assert(rows.includes('旧评论'));assert(rows.includes('纸鹤'));assert(!rows.includes('新评论'));assert(!rows.includes('另一条视频正文'));
  f.$('#commentsSearch').value='虚构小云';f.$('#commentsSearch').oninput();assert(f.$('#commentsList').innerHTML.includes('新评论'));assert(!f.$('#commentsList').innerHTML.includes('旧评论'));
