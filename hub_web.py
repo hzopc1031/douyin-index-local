@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import socket
+import stat
 import time
 from pathlib import Path
 from hub_paths import state_dir
@@ -708,6 +709,59 @@ def reply(value, status=200):
     return web.json_response(value, status=status, dumps=lambda x: json.dumps(x, ensure_ascii=False, allow_nan=False))
 
 
+COMMENTS_FILE_LIMIT = 20 * 1024 * 1024
+COMMENTS_VIDEO_FIELDS = ('video_id', 'status', 'reason', 'top_count', 'reply_count')
+COMMENTS_FIELDS = ('video_id', 'comment_id', 'level', 'root_comment_id', 'parent_comment_id',
+                   'text', 'created_at', 'like_count', 'reply_count_reported', 'nickname',
+                   'reply_to_nickname', 'ip_label', 'thread_status')
+
+
+@contextlib.contextmanager
+def comments_runs_dir(root):
+    # Open each component without following links, including a replaced parent directory.
+    with contextlib.ExitStack() as stack:
+        fd = None
+        for part in (state_dir(root), 'comments', 'runs'):
+            fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            stack.callback(os.close, fd)
+        yield fd
+
+
+def comments_run_time(run_id):
+    if not re.fullmatch(r'\d{8}T\d{6}', run_id, flags=re.ASCII):
+        raise HubError('invalid_parameters', '运行编号格式无效。', 400)
+    try:
+        return dt.datetime.strptime(run_id, '%Y%m%dT%H%M%S').replace(tzinfo=TZ).isoformat()
+    except ValueError:
+        raise HubError('invalid_parameters', '运行编号格式无效。', 400) from None
+
+
+def comments_run_bytes(root, runs_fd, run_id, filename):
+    runs = state_dir(root) / 'comments' / 'runs'
+    if not (runs / run_id / filename).resolve().is_relative_to(runs.resolve()):
+        raise OSError
+    with contextlib.ExitStack() as stack:
+        folder = os.open(run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=runs_fd)
+        stack.callback(os.close, folder)
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        with os.fdopen(fd, 'rb') as stream:
+            details = os.fstat(stream.fileno())
+            if not stat.S_ISREG(details.st_mode):
+                raise FileNotFoundError
+            if details.st_size > COMMENTS_FILE_LIMIT:
+                raise HubError('file_too_large', '评论运行文件过大。', 413)
+            content = stream.read(COMMENTS_FILE_LIMIT + 1)
+            if len(content) > COMMENTS_FILE_LIMIT:
+                raise HubError('file_too_large', '评论运行文件过大。', 413)
+            return content
+
+
+def comments_projection(value, fields):
+    if not isinstance(value, dict) or any(type(value.get(key)) not in (str, int, type(None)) for key in fields):
+        raise ValueError
+    return {key: value.get(key) for key in fields}
+
+
 async def read_json(request):
     if request.content_type != 'application/json':
         raise HubError('json_required', '请使用 Content-Type: application/json。', 415)
@@ -831,6 +885,9 @@ def openapi():
                                'responses': {'200': {'description': '成功'}, '403': error, '409': error, '429': error, '503': error}}}
     for path, method, summary in (
         ('/api/v1/comments/status', 'get', '评论主站登录探测与采集状态（不触发评论请求）'),
+        ('/api/v1/comments/runs', 'get', '最近二十次评论运行与今日额度（仅管理员，只读）'),
+        ('/api/v1/comments/runs/{run_id}', 'get', '评论内容白名单，最多二千条（仅管理员，只读）'),
+        ('/api/v1/comments/runs/{run_id}/comments.csv', 'get', '下载原始评论 CSV（仅管理员，只读）'),
         ('/api/v1/comments/probe', 'post', '只读探测 www.douyin.com 登录状态'),
         ('/api/v1/comments/start', 'post', '探测通过后开始分批评论采集'),
         ('/api/v1/comments/pause', 'post', '暂停评论采集，不自动重试'),
@@ -1344,6 +1401,95 @@ def mount(app, hub):
         result = await asyncio.to_thread(hub.bridge, 'comments_status', None, hub_bridge.BRIDGE_TIMEOUT)
         return web.json_response(result, headers={'Cache-Control': 'no-store'})
 
+    def read_comments_runs():
+        used = None
+        try:
+            with contextlib.ExitStack() as stack:
+                fd = None
+                for part in (state_dir(hub.root), 'comments'):
+                    fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    stack.callback(os.close, fd)
+                usage_fd = os.open('usage.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                with os.fdopen(usage_fd, 'rb') as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError
+                    usage = json.loads(stream.read(4097))
+                day = _iso_day(usage.get('day'))
+                today = dt.datetime.now(TZ).date()
+                if set(usage) != {'day', 'count'} or day is None or day > today or type(usage['count']) is not int or usage['count'] < 0:
+                    raise ValueError
+                used = usage['count'] if day == today else 0
+        except FileNotFoundError:
+            used = 0
+        except Exception:
+            pass
+        runs = []
+        try:
+            with comments_runs_dir(hub.root) as fd:
+                for run_id in sorted(os.listdir(fd), reverse=True):
+                    if not re.fullmatch(r'\d{8}T\d{6}', run_id, flags=re.ASCII):
+                        continue
+                    try:
+                        finished = comments_run_time(run_id)
+                        data = json.loads(comments_run_bytes(hub.root, fd, run_id, 'run.json'))
+                        item = comments_projection(data, ('exit_code', 'exit_reason', 'requests'))
+                        item.update(run_id=run_id, finished_at=finished,
+                                    videos=[comments_projection(v, COMMENTS_VIDEO_FIELDS) for v in data['videos']])
+                    except Exception:
+                        # One unreadable or invalid export must not hide other runs.
+                        continue
+                    runs.append(item)
+                    if len(runs) == 20:
+                        break
+        except FileNotFoundError:
+            pass
+        except HubError:
+            raise
+        except OSError:
+            raise HubError('not_found', '评论运行文件不存在或不可读取。', 404) from None
+        except Exception:
+            raise HubError('invalid_comments_run', '评论运行文件格式无效。', 422) from None
+        return {'runs': runs, 'usage': {'today_used': used, 'daily_limit': 150, 'batch_limit': 25}}
+
+    async def comments_runs(request):
+        require(request, admin=True)
+        return web.json_response(await asyncio.to_thread(read_comments_runs), headers={'Cache-Control': 'no-store'})
+
+    def read_comments_detail(run_id, download):
+        comments_run_time(run_id)
+        try:
+            with comments_runs_dir(hub.root) as fd:
+                content = comments_run_bytes(hub.root, fd, run_id, 'comments.csv')
+            if download:
+                return content
+            rows, total = [], 0
+            reader = csv.DictReader(io.StringIO(content.decode('utf-8-sig'), newline=''))
+            if not reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames) or not set(COMMENTS_FIELDS) <= set(reader.fieldnames):
+                raise ValueError
+            for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError
+                total += 1
+                if total <= 2000:
+                    rows.append(comments_projection(row, COMMENTS_FIELDS))
+            return {'run_id': run_id, 'total': total, 'truncated': total > 2000, 'comments': rows}
+        except HubError:
+            raise
+        except OSError:
+            raise HubError('not_found', '评论运行文件不存在或不可读取。', 404) from None
+        except Exception:
+            raise HubError('invalid_comments_run', '评论运行文件格式无效。', 422) from None
+
+    async def comments_detail(request):
+        require(request, admin=True)
+        run_id = request.match_info['run_id']
+        download = request.path.endswith('/comments.csv')
+        result = await asyncio.to_thread(read_comments_detail, run_id, download)
+        if download:
+            return web.Response(body=result, content_type='text/csv', charset='utf-8', headers={
+                'Content-Disposition': f'attachment; filename="comments-{run_id}.csv"', 'Cache-Control': 'no-store'})
+        return web.json_response(result, headers={'Cache-Control': 'no-store'})
+
     async def comments_action(request):
         require(request, admin=True)
         action = request.match_info.get('action')
@@ -1409,6 +1555,9 @@ def mount(app, hub):
     app.router.add_post('/api/v1/topics/collect-once', topic_once)
     app.router.add_post('/api/v1/topics/resume', topic_resume)
     app.router.add_get('/api/v1/comments/status', comments_status)
+    app.router.add_get('/api/v1/comments/runs', comments_runs)
+    app.router.add_get('/api/v1/comments/runs/{run_id}', comments_detail)
+    app.router.add_get('/api/v1/comments/runs/{run_id}/comments.csv', comments_detail)
     app.router.add_post('/api/v1/comments/{action:probe|start|pause|resume}', comments_action)
     app.router.add_post('/api/v1/hot/resume', hot_resume)
     app.router.add_get('/api/v1/openapi.json', schema)

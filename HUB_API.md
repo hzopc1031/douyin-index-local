@@ -8,9 +8,9 @@
 ## 当前接入范围
 
 - 抖音：全国、aweme、关键词搜索指数，1—5 个词、连续 最近两年内的自定义日期。
-- 百度指数：独立浏览器取数已接入，真实登录与逐日核对待验收；Google Trends 待接入。
+- 百度指数：独立浏览器取数已接入，真实登录与逐日核对待验收。
 - 搜索指数不等于搜索次数；综合指数分列。跨平台数值不能直接横比。
-- Google Trends 将来接入时必须保留地区、查询窗口和相对归一化上下文，不能直接覆写成同一绝对日序列。
+- 网页的平台切换、查询选项、接入卡片和统计仅展示 `available=true` 的平台；API 仍保留不可用平台的描述。
 
 ## 给 WorkBuddy 等调用方使用
 
@@ -148,6 +148,8 @@ Hub 在线任务仍在完成时直接入库，不依赖历史页面刷新。
 | GET `/hot/word?sentence_id=` 或 `?word=` | read | 该话题实际上榜记录；两者只能填一个 |
 | POST `/hot/resume` | 仅管理登录 | 解除热榜暂停，不消耗搜索指数额度 |
 
+网页抖音热搜榜及飙升空态区分服务端未开启、等待首次快照和抓取暂停；暂停时保留人工恢复按钮，均无需登录。已有快照仍可读取，百度热搜行为不变。默认开启后每小时抓取一次，实际间隔以服务端配置为准。
+
 `GET /status` 增加 `hotlist`：`enabled`、`paused`、`interval_seconds`、`daily_success_limit`、`daily_successes`。搜索指数的 `daily_online_attempts` 与此无关。
 
 ## 飙升词（第二期）
@@ -200,7 +202,7 @@ sudo -u douyin-svc env INDEX_HUB_STATE_DIR=/var/lib/douyin-index INDEX_HUB_LOG_D
 
 融合分：搜索分和热榜分都有值时为 `search_weight × 搜索分 + hot_weight × 热榜分`，否则 null。默认权重 0.7 和 0.3。环境变量 `INDEX_HUB_GROUP_SEARCH_WEIGHT`、`INDEX_HUB_GROUP_HOT_WEIGHT` 取 0 到 1 的有限数；settings 键 `group_score_weights` 的合法字段再覆盖。页面显示实际权重。文案固定为工作台热度分，不是搜索次数，也不是抖音综合指数。
 
-关键词组的新建、编辑、删除和查看分数在趋势总览里完成，侧栏不再单开一页。
+关键词组的新建、编辑、删除和查看分数在趋势总览的「关键词组与评分」折叠区完成，默认收起。热搜榜口径、调度状态、飙升阈值和单个话题历史也默认收起；展开后保留全部操作。页面采集诊断统一放在「平台连接」，已登录且未暂停时不重复显示查询登录提示。评论页宽屏并列展示采集表单、最近运行与评论内容，窄屏纵向排列。
 
 ## 热点宝·话题（待联调）
 
@@ -215,6 +217,7 @@ GET /api/v1/insights?keyword=酵素&kind=related&start_date=2026-10-21&end_date=
 ## 内部网页完整查询
 网页“查询全部模块”会调用现有独立接口：1 个指数批次 + 每词 related/audience 各 1 个任务。1—5 个关键词对应 3—11 个任务，共享全局队列、日配额和请求间隔。对外 /queries 行为不变，不自动附带扩展采集。
 网页在当前标签页 sessionStorage 保存本次查询参数、幂等标识、已确认任务 ID；不保存凭据。提交中断时停止继续提交，通过“继续提交未确认任务”手动沿用原幂等标识确认；已确认任务不重复提交。已执行失败的任务不会自动重试。该浏览器标签页之外不提供批次恢复记录，服务器保留独立任务。
+平台明确以 `collection_paused/platform_unavailable/unauthorized/forbidden/csrf_rejected/authentication_throttled` 拒绝首次提交时，该批尚未提交的模块均标为「未创建」。所有条目已有任务 ID 或已被拒绝后，再提交相同查询也会创建新批次和新幂等键。只有存在网络错误、5xx 等结果不明的条目才拦截新查询，并展开「本次完整查询」、定位「继续提交未确认任务」按钮；继续提交保留原幂等键，后续认证拒绝不能消除先前的未知状态。
 报告共用关键词和日期：趋势、搜索/内容关联词、分维度画像分别显示。读取失败仅影响对应模块；空结果、缺失和未采集均明确提示。刷新仅 GET 读取，各模块采集时间独立保留。
 前端验证：node test_report_ui.cjs；无需抖音会话或在线请求。
 
@@ -358,10 +361,15 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 管理员 Basic 认证；POST 须带 `X-Hub-Request: 1`，有 Origin 时须同源。
 
 - `GET /api/v1/comments/status`：主站登录探测结果与采集状态（`logged_in`、`not_logged_in`、`verification_required`）。未登录时 `login_entry` 为 `index_sms`，入口 `/api/v1/login/sms`。不触发评论请求。
+- `GET /api/v1/comments/runs`：网关直接只读 `state_dir/comments/runs`，返回 `{runs, usage}`。按运行编号倒序，最多 20 次；无目录时 `runs=[]`。每项仅含 `run_id`、`finished_at`（编号解析出的上海本地 ISO 时间）、`exit_code`、`exit_reason`、`requests` 及 `videos`；视频仅含 `video_id/status/reason/top_count/reply_count`。不返回 `out` 或其他内部字段。`usage={today_used,daily_limit:150,batch_limit:25}`，上海当日计数只读、不加锁，读取失败为 null，缺少计数文件或旧日计数为 0。
+- `GET /api/v1/comments/runs/{run_id}`：返回 `{run_id,total,truncated,comments}`；`total` 为 CSV 全部记录数，最多展示前 2000 条，超出时 `truncated=true`。评论字段仅有 `video_id/comment_id/level/root_comment_id/parent_comment_id/text/created_at/like_count/reply_count_reported/nickname/reply_to_nickname/ip_label/thread_status`，保留 CSV 字符串和空值，不下发用户 ID、视频 URL 或原始字段。
+- `GET /api/v1/comments/runs/{run_id}/comments.csv`：原样下载带 BOM 的 UTF-8 CSV，保留原文件全部列（包括昵称、用户 ID、IP 属地）。响应 `Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="comments-<run_id>.csv"`、`Cache-Control: no-store`。
 - `POST /api/v1/comments/probe`：只读再探测一次，请求体为空对象。
 - `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每次请求短时间持锁，请求之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 25 次、上海自然日最多 150 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
 - `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
 - `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
+
+三个运行读取接口均仅管理员可用，响应不缓存，不经桌面 bridge、不触发采集；部署这些接口只需重启网关。运行编号须严格为 `YYYYMMDDTHHMMSS` 且日期时间有效，否则 400；路径始终限制在 runs 目录内，逐级拒绝符号链接。固定文件不存在或不可读取返回 404 `not_found`，单文件超过 20 MiB 返回 413 `file_too_large`，导出格式损坏返回 422 `invalid_comments_run`。错误不包含本地路径或文件正文。历史列表只读取已有 `run.json` 的运行，未导出摘要的目录不作为完成记录；单个运行读取或校验失败时跳过该运行，其余正常返回，不记录路径或内容。runs 目录不存在仍返回空列表，目录本身不可打开仍报错。网页在评论页展示额度、最近运行和评论，支持手动选择及 CSV 下载；采集期间每 5 秒读取状态，结束后刷新历史并打开最近运行。桌面当前没有持续更新的请求计数时，只显示采集中。
 
 独立的 Playwright `dyc login-web` / CLI 仍保留作退路。主站是否接受已有 `.douyin.com` 会话，须在部署后先做一次只读探测。离线测试不代表线上验收。
 

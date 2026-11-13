@@ -28,6 +28,7 @@ for(const platform of ['baidu','douyin']){
  assert(!f.$('#submitButton').disabled);
  f.run(`renderLoginHints('${platform}',true,false)`);
  assert(f.$('#'+platform+'QueryNote').hidden);
+ assert(f.$('#indexLoginStatus').hidden);
  assert.equal(f.$('#indexLoginStatus').innerHTML,'实时查询需登录 · '+name+'已登录');
  assert(!f.$('#indexLoginStatus').innerHTML.includes('data-login-platform'));
  f.run(`renderLoginHints('${platform}',false,false)`);

@@ -27,7 +27,7 @@ AUDIENCE = [dict(dimension=key, name=key, labels=[dict(name=name, value=620-i*67
            for i, name in enumerate(names + ([f'其他分组 {j}' for j in range(20)] if key in ('province','city','interest') else []))]) for key,names in DIMENSIONS]
 META = dict(start_date=START, end_date=END, source='离线合成样例', fetched_at='2026-11-01T10:00:00+08:00',
             keywords=['杭州'], complete=True, verification='pending')
-PLATFORMS = [dict(id=key, name=name, available=key=='douyin', metric_name='搜索指数', description='离线合成数据',
+PLATFORMS = [dict(id=key, name=name, available=key!='google_trends', metric_name='搜索指数', description='离线合成数据',
                     modules=(['related','audience'] if key=='douyin' else []))
              for key,name in [('douyin','抖音'),('baidu','百度指数'),('google_trends','Google Trends')]]
 
@@ -61,6 +61,10 @@ def run(output=None):
                         writes.append((path, request.post_data_json))
                         if path in ('queries','insights/queries'):
                             data = dict(job=dict(id=f'mock-{len(writes)}',status='queued',cache_hit=False))
+                        elif path in ('comments/start', 'comments/pause', 'comments/resume'):
+                            fixture['comments_running'] = path == 'comments/start'
+                            fixture['comments_paused'] = path == 'comments/pause'
+                            data = dict(ok=True)
                         elif path == 'comments/probe':
                             data = dict(ok=True, probe=fixture['comments_probe'])
                         elif path == 'desktop/ticket':
@@ -93,7 +97,7 @@ def run(output=None):
                     elif path == 'status':
                         status_reads.append(request.url)
                         data = dict(browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',login_state=fixture['login'],login_mode=fixture.get('login_mode', 'desktop'),counts=dict(keywords=1,points=7),
-                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None)
+                                    daily_online_attempts=0,limits=dict(online_attempts_per_day=50),cooldown_remaining_seconds=0,paused=fixture['paused'],last_result=None, hotlist=dict(enabled=fixture.get('hot_enabled', True), paused=fixture.get('hot_paused'), interval_seconds=3600, daily_success_limit=48, daily_successes=0))
                     elif path == 'login/qr':
                         data = dict(state=fixture['qr_state'],
                                     browser='browser_ready' if fixture['login'] in ('cookie_present', 'qr_session') else 'login_required',
@@ -103,7 +107,12 @@ def run(output=None):
                     elif path == 'jobs': data = dict(jobs=fixture.get('jobs', []))
                     elif path == 'jobs/synthetic-douyin-login-failure': data = dict(job=fixture['jobs'][0])
                     elif path == 'keys': data = dict(keys=[])
-                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=False, paused=False)
+                    elif path == 'comments/status': data = dict(probe=fixture['comments_probe'], running=fixture.get('comments_running', False), paused=fixture.get('comments_paused', False), pause_reason='user' if fixture.get('comments_paused') else None, output=fixture.get('comments_output'))
+                    elif path == 'comments/runs': data = dict(runs=fixture.get('comments_runs', []), usage=dict(today_used=fixture.get('comments_used'), daily_limit=150, batch_limit=25))
+                    elif path.startswith('comments/runs/'):
+                        run_id = path.split('/')[2]
+                        comments = fixture.get('comments_rows', []) if run_id == '20261113T101112' else []
+                        data = dict(run_id=run_id, total=len(comments), truncated=False, comments=comments)
                     elif path == 'insights/ranges': data = dict(ranges=[], attempts=[], live_request=False)
                     elif path == 'series':
                         data = dict(keyword='杭州',points=[dict(date=f'2026-10-{25+i}', value=None if fixture['all_missing'] or fixture['missing_latest'] and i==6 else 12000+i*900,
@@ -116,6 +125,10 @@ def run(output=None):
                                     note='热榜热度不是搜索指数，也不是创作者中心综合指数。',
                                     items=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00'),
                                            dict(position=2, word='合成话题乙', hot_value=None, fetched_at='2026-11-04T12:00:00+08:00')])
+                        if fixture.get('hot_empty') and 'board' not in query:
+                            data.update(items=[], fetched_at=None)
+                        if 'board' in query:
+                            data.update(board=query['board'][0], items=[dict(position=1, word='合成百度话题甲', hot_value=654321, fetched_at=data['fetched_at'])])
                     elif path == 'hot/word':
                         data = dict(points=[dict(position=1, word='合成话题甲', hot_value=12083012, fetched_at='2026-11-04T12:00:00+08:00')], live_request=False)
                     elif path == 'groups' and request.method == 'GET':
@@ -158,6 +171,8 @@ def run(output=None):
                                     items=[dict(word='合成话题甲', position=1, new_entry=True, rank_rise=None,
                                                 rank_rise_hit=None, heat_pct=None, heat_hit=None, z_score=None,
                                                 z_hit=None, search_index_ratio=None)])
+                        if fixture.get('hot_empty') and 'board' not in query:
+                            data.update(items=[], current_fetched_at=None)
                     elif path.startswith('jobs/mock-'): data = dict(job=dict(id=path[5:], status='queued',cache_hit=False))
                     if data is None:
                         unexpected.append(request.method+' '+request.url)
@@ -168,6 +183,14 @@ def run(output=None):
                 context.route('**/*', route)
                 page.goto('http://hub-ui.invalid/')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
+                assert page.locator('#platformChips [data-platform]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.platform)') == ['douyin', 'baidu']
+                assert page.locator('#queryPlatform option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['douyin', 'baidu']
+                page.wait_for_function("document.querySelector('#statPlatforms').textContent==='2'")
+                assert page.locator('#statPlatforms').text_content() == '2'
+                for selector in ('body', '#platformList', '#connectionCards', '#queryPlatform'):
+                    text = page.locator(selector).inner_text() if selector == 'body' else page.locator(selector).text_content()
+                    assert all(name not in text for name in ('Google Trends', '谷歌趋势', '待接入'))
+                assert 'google_trends' not in (ROOT/'hub.html').read_text()
                 assert page.locator('#queryStart').input_value() == DEFAULT_START
                 assert page.locator('#queryEnd').input_value() == END
                 assert page.locator('#insightRangeLabel').inner_text().endswith('30 天')
@@ -334,11 +357,19 @@ def run(output=None):
                     assert '不同的关键词' in page.locator('#queryError').inner_text()
                     assert len(writes)==0
                 page.locator('#queryWords').fill('杭州')
-                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed')")
+                page.evaluate("reportBatch=makeReportBatch({platform:'douyin',keywords:['其他词'],start_date:'2026-10-25',end_date:'2026-10-31'},'unconfirmed');reportBatch.entries[0].error='合成网络错误'")
                 page.locator('#submitButton').click()
-                assert '上一批' in page.locator('#queryError').inner_text()
+                assert '上一批' in page.locator('#toast').inner_text()
+                assert '「本次完整查询」' in page.locator('#toast').inner_text()
+                assert not page.locator('#queryDialog').is_visible()
+                assert page.locator('#reportProgress').evaluate('(node)=>node.open')
+                assert page.locator('#retryBundle').is_visible()
+                assert page.locator('#retryBundle').evaluate('(node)=>node===document.activeElement')
+                retry_box = page.locator('#retryBundle').bounding_box()
+                assert 0 <= retry_box['y'] and retry_box['y']+retry_box['height'] <= 700
                 assert len(writes)==0
                 page.evaluate('reportBatch=null;saveBatch()')
+                page.locator('#openQuery').click()
                 page.set_viewport_size(dict(width=width,height=height))
                 page.keyboard.press('Escape')
                 assert not page.locator('#queryDialog').is_visible()
@@ -365,8 +396,9 @@ def run(output=None):
                 page.evaluate('loadInsights()')
                 assert '人群状态待确认' in page.locator('#audienceSummary').inner_text()
                 page.locator('#platformChips [data-platform=baidu]').click()
-                page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('尚未接入')")
-                assert '尚未接入' in page.locator('#trendSummary').inner_text()
+                page.wait_for_function("document.querySelector('#relatedSummary').textContent.includes('不支持此模块')")
+                page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('暂无趋势数据')")
+                assert '尚未接入' not in page.locator('#trendSummary').inner_text()
                 assert page.locator('#viewChips').is_visible()
                 assert '搜索指数' in page.locator('#viewChips').inner_text()
                 assert '热搜榜' in page.locator('#viewChips').inner_text()
@@ -375,7 +407,7 @@ def run(output=None):
                 with page.expect_request(lambda req: 'hot/latest?board=baidu_realtime' in req.url):
                     page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotIntro').textContent.includes('百度热搜')")
-                assert '不是百度搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '不是百度搜索指数' in page.locator('#hotIntro').text_content()
                 assert page.locator('#groupPanel').is_hidden()
                 page.locator('#platformChips [data-platform=douyin]').click()
                 assert page.locator('#viewChips').is_visible()
@@ -385,22 +417,50 @@ def run(output=None):
                 assert '热榜' not in page.locator('.nav').inner_text()
                 page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
-                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
-                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
-                assert '热点宝' in page.locator('#hotIntro').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').text_content()
+                assert '不是搜索指数' in page.locator('#hotIntro').text_content()
+                assert '热点宝' in page.locator('#hotIntro').text_content()
                 assert page.locator('#hotResume').is_hidden()
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(0).inner_text() == '1'
                 assert page.locator('#hotRows tr').nth(0).locator('td').nth(2).inner_text() == '12083012'
                 assert page.locator('#hotRows tr').nth(1).locator('td').nth(0).inner_text() == '2'
                 assert page.locator('#hotRows tr').nth(1).locator('td').nth(2).inner_text() == '—'
+                fixture['hot_empty'] = True
+                for enabled, paused, expected in (
+                    (False, None, '抖音热榜自动抓取未开启（服务端配置），暂无快照。开启后每小时抓取一次，无需登录。'),
+                    (True, None, '尚未抓到热榜快照，首次抓取完成后显示。'),
+                    (True, dict(code='rate_limited', message='合成限频 <img src=x>'), '热榜抓取已暂停：合成限频 <img src=x>'),
+                    (False, dict(code='access_denied'), '热榜抓取已暂停：access_denied'),
+                ):
+                    fixture.update(hot_enabled=enabled, hot_paused=paused)
+                    page.evaluate('loadHot()')
+                    assert expected in page.locator('#hotRows').inner_text()
+                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('#hotResume').is_visible() == bool(paused)
+                    page.evaluate("$('#hotRisingButton').onclick()")
+                    page.wait_for_function("document.querySelector('#hotRisingBaseline').textContent.includes('当前快照 —')")
+                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('#overviewHot [data-login-platform]').count() == 0
+                    assert page.locator('#hotRows img, #hotRisingRows img').count() == 0
+                    assert page.locator('table:has(#hotRows) thead').is_hidden()
+                    assert page.locator('table:has(#hotRisingRows) thead').is_hidden()
+                    empty_cell = page.locator('#hotRisingRows td')
+                    assert empty_cell.is_visible(), empty_cell.evaluate('(n)=>n.parentElement.parentElement.outerHTML')
+                    assert empty_cell.bounding_box()['width'] <= width
+                fixture.update(hot_empty=False, hot_enabled=True, hot_paused=None)
+                page.evaluate('loadHot()')
+                page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
+                assert page.locator('#hotSentence').is_hidden()
+                page.locator('#overviewHot > details.card > summary').click()
+                assert page.locator('#hotSentence').is_visible()
                 page.locator('#hotSentence').fill('s1')
                 page.locator('#hotWordButton').click()
                 page.wait_for_function("document.querySelector('#hotHistory').textContent.includes('合成话题甲')")
                 page.locator('#hotRisingButton').click()
                 page.wait_for_function("document.querySelector('#hotRisingRows').textContent.includes('合成话题甲')")
-                assert '本库热榜快照' in page.locator('#hotRisingNote').inner_text()
-                assert '不是搜索指数' in page.locator('#hotRisingNote').inner_text()
-                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').inner_text()
+                assert '本库热榜快照' in page.locator('#hotRisingNote').text_content()
+                assert '不是搜索指数' in page.locator('#hotRisingNote').text_content()
+                assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').text_content()
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
                 assert page.locator('#topicCategory').is_hidden()
@@ -411,10 +471,14 @@ def run(output=None):
                 assert '关键词组' not in page.locator('.nav').inner_text()
                 page.locator('[data-tab=overview]').click()
                 page.wait_for_function("document.querySelector('#groupSelect').textContent.includes('合成组')")
-                assert '工作台热度分' in page.locator('#groupIntro').inner_text()
-                assert '不是搜索次数' in page.locator('#groupIntro').inner_text()
-                assert '名称只用于显示' in page.locator('#groupIntro').inner_text()
-                assert '不会触发搜索查询' in page.locator('#groupIntro').inner_text()
+                assert '工作台热度分' in page.locator('#groupIntro').text_content()
+                assert '不是搜索次数' in page.locator('#groupIntro').text_content()
+                assert '名称只用于显示' in page.locator('#groupIntro').text_content()
+                assert '不会触发搜索查询' in page.locator('#groupIntro').text_content()
+                assert not page.locator('#groupPanel').evaluate('(node)=>node.open')
+                assert page.locator('#groupScoreButton').is_hidden()
+                page.locator('#groupPanel > summary').click()
+                assert page.locator('#groupScoreButton').is_visible()
                 assert page.locator('#groupEdit').inner_text() == '编辑这组'
                 page.locator('#groupScoreButton').click()
                 page.wait_for_function("document.querySelector('#groupMembers').textContent.includes('未上榜')")
@@ -442,8 +506,8 @@ def run(output=None):
                 page.locator('[data-source=hot_search]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
                 assert '—' in page.locator('#hotRows').inner_text()
-                assert '搜索页热榜' in page.locator('#hotIntro').inner_text()
-                assert '不是搜索指数' in page.locator('#hotIntro').inner_text()
+                assert '搜索页热榜' in page.locator('#hotIntro').text_content()
+                assert '不是搜索指数' in page.locator('#hotIntro').text_content()
                 assert page.locator('#keywordSelect').is_hidden()
                 assert page.locator('#resultTab-summary').is_hidden()
                 assert page.locator('#groupPanel').is_hidden()
@@ -715,6 +779,7 @@ def run(output=None):
                 assert writes[before_qr_success:] == [('comments/probe', {})]
                 fixture.update(login='expired', qr_state='verification_required')
                 page.evaluate('refresh()')
+                page.wait_for_function('!qrLoading')
                 page.evaluate('loadQr()')
                 assert page.locator('#qrDesktop').is_visible()
                 assert page.locator('#desktopLogin').is_hidden()
@@ -746,6 +811,107 @@ def run(output=None):
                 assert page.evaluate('window.syntheticDesktop.opened && !window.syntheticDesktop.closed')
                 assert writes[-1] == ('desktop/ticket', {})
                 assert writes[writes_before_navigation:] == [('comments/probe', {})] * 7 + [('desktop/ticket', {})]
+                # Saved comments, progress and every displayed string use offline synthetic exports.
+                page.evaluate("async () => {tab('comments');await loadCommentsRuns();await loadComments()}")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：空闲'
+                assert page.locator('#commentsRuns').inner_text() == '还没有评论运行记录。填写视频链接后点击开始采集。'
+                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 · 每批最多 25'
+                fixture['comments_used'] = 17
+                fixture['comments_output'] = dict(run_id='20261113T101112', requests=3, videos=[dict(
+                    video_id='100', top_count=1, reply_count=2, status='complete', reason='exhausted')])
+                fixture['comments_rows'] = [dict(video_id='100', comment_id='2', level='2', root_comment_id='1',
+                    text='示例回复二', nickname='测试用户乙', reply_to_nickname='测试用户甲', ip_label='测试属地乙', like_count='0', created_at='2026-11-13 10:00'),
+                    dict(video_id='100', comment_id='1', level='1', text='示例评论一 <img src=x onerror="window.commentXss=1">',
+                         nickname='测试用户甲 <script>window.commentXss=1</script>', ip_label='测试属地甲', like_count='5', created_at='2026-11-13 09:00'),
+                    dict(video_id='100', comment_id='3', level='2', root_comment_id='missing', text='示例独立回复三', nickname='测试用户丙')]
+                fixture['comments_runs'] = [dict(run_id=run_id, finished_at='2026-11-13T10:11:12+08:00',
+                    exit_reason='complete', requests=3, videos=fixture['comments_output']['videos'])
+                    for run_id in ('20261113T101112', '20261112T101112')]
+                page.locator('#commentsVideoInput').fill('https://synthetic.invalid/video/100')
+                page.locator('#commentsStartButton').click()
+                page.wait_for_function('commentsRunning')
+                assert page.locator('#toast').inner_text() == '已开始采集…'
+                assert page.locator('#commentsMessage').inner_text() == '已开始采集…'
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中 · 已请求 3 次'
+                latest = page.locator('#commentsLatest').inner_text()
+                for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '评论已翻完'):
+                    assert expected in latest
+                fixture['comments_running'] = False
+                page.clock.fast_forward(5000)
+                page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：已完成'
+                assert page.locator('#toast').inner_text() == '采集完成'
+                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 150 · 每批最多 25'
+                assert page.locator('#commentsRuns [data-comments-run]').count() == 2
+                rows = page.locator('#commentsList .comment-row')
+                assert '示例评论一' in rows.nth(0).inner_text()
+                assert '示例回复二' in rows.nth(1).inner_text()
+                assert '示例独立回复三' in rows.nth(2).inner_text()
+                assert rows.nth(1).locator('.status').inner_text() == '回复 @测试用户甲'
+                assert rows.nth(2).locator('.status').inner_text() == '回复'
+                assert rows.nth(1).evaluate('(node)=>getComputedStyle(node).marginLeft') == '24px'
+                assert '测试属地甲' in rows.nth(0).inner_text() and '点赞 5' in rows.nth(0).inner_text()
+                assert '<img' in rows.nth(0).inner_text() and '<script>' in rows.nth(0).inner_text()
+                assert page.locator('#commentsList img, #commentsList script').count() == 0
+                assert page.evaluate('window.commentXss === undefined')
+                assert page.locator('#commentsList').evaluate('(node)=>getComputedStyle(node).maxHeight') == '480px'
+                assert page.locator('#commentsDownload').get_attribute('href') == '/api/v1/comments/runs/20261113T101112/comments.csv'
+                page.locator('[data-comments-run="20261112T101112"]').click()
+                page.wait_for_function("document.querySelector('#commentsList').textContent==='这次没有采到评论'")
+                assert page.locator('#commentsDownload').get_attribute('href') == '/api/v1/comments/runs/20261112T101112/comments.csv'
+                fixture['comments_output'] = None
+                page.evaluate('async () => {commentsOutput=null;await loadCommentsRuns();await loadComments()}')
+                assert '20261113T101112' in page.locator('#commentsLatest').inner_text()
+                page.locator('[data-comments-run="20261113T101112"]').click()
+                page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
+                page.evaluate("renderComments({probe:'verification_required',paused:true,pause_reason:'verification_required'})")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：已暂停'
+                assert page.locator('#commentsPauseReason').inner_text() == '暂停原因：需要验证'
+                assert page.locator('#commentsProbeState').inner_text() == '主站登录：需要验证'
+                page.evaluate("renderComments({running:true,waiting_for_index:true})")
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：等待指数采集'
+                page.evaluate("renderComments({running:false,paused:true,pause_reason:'user'})")
+                assert page.locator('#toast').inner_text() == '采集已暂停：手动暂停'
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                # Check the six primary surfaces at 360px as well; all requests remain routed above.
+                fixture.update(login='cookie_present', login_mode='desktop', comments_probe='logged_in', hot_empty=True, hot_enabled=False, hot_paused=None, history=True, related='available', audience='available', missing_latest=False, all_missing=False)
+                page.evaluate("async () => {reportBatch=null;await refresh();renderBaiduLogin({browser:'browser_ready'});closeInfo();$('#toast').hidden=true;$('#groupPanel').open=false}")
+                fixture['comments_rows'] = [dict(row, text='示例评论一' if row['level']=='1' else '示例回复二', nickname='测试用户甲' if row['level']=='1' else '测试用户乙') for row in fixture['comments_rows']]
+                fixture['comments_output'] = fixture['comments_runs'][0]
+                page.evaluate("async () => {tab('comments');$('#commentsMessage').textContent='';await loadComments();await loadCommentsRuns();await loadCommentsRun('20261113T101112')}")
+                # Capture only fictional comments; the malicious strings were checked above.
+                if output:
+                    page.evaluate('scrollTo(0,0)')
+                    page.screenshot(path=str(output/f'hub-1113-comments-{width}.png'), full_page=True)
+                for view in ('comments', 'overview', 'hot-empty', 'baidu-hot', 'connections', 'query'):
+                    if view == 'overview':
+                        page.evaluate("async () => {tab('overview');chosenPlatform='douyin';chosenSource='index';drawPlatforms();$('#keywordSelect').value='杭州';$('#insightStart').value='2026-10-02';$('#insightEnd').value='2026-10-31';updateRange('insight');resultTab('summary');await showSource()}")
+                        assert page.locator('#indexLoginStatus').is_hidden()
+                    elif view in ('hot-empty', 'baidu-hot'):
+                        platform = 'douyin' if view == 'hot-empty' else 'baidu'
+                        page.evaluate("async platform => {chosenPlatform=platform;chosenSource='hot_search';drawPlatforms();document.querySelector('#overviewHot > details.card').open=false;await loadHot();await loadHotRising()}", platform)
+                        assert page.locator('#overviewHot [data-login-platform]').count() == 0
+                        if platform == 'baidu':
+                            assert '合成百度话题甲' in page.locator('#hotRows').inner_text()
+                            assert page.locator('#hotRows td').nth(2).inner_text() == '654321'
+                    elif view == 'connections':
+                        page.evaluate("tab('connections')")
+                        assert page.locator('#sessionDetail').is_visible()
+                        assert page.locator('#douyinLoginCard #sessionDetail').count() == 1
+                    elif view == 'query':
+                        page.evaluate("tab('overview');chosenPlatform='douyin';chosenSource='index';drawPlatforms();$('#openQuery').click();$('#queryWords').value='合成关键词';$('#queryStart').value='2026-10-25';$('#queryEnd').value='2026-10-31';updateRange('query');$('#queryRange').open=false")
+                    if output and view != 'comments':
+                        page.evaluate('scrollTo(0,0)')
+                        page.screenshot(path=str(output/f'hub-1113-{view}-{width}.png'), full_page=True)
+                    page.set_viewport_size(dict(width=360, height=932))
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), view
+                    if view == 'query':
+                        assert page.locator('#queryDialog').evaluate('(n)=>n.scrollWidth<=n.clientWidth')
+                        page.locator('#closeQuery').click()
+                    if view == 'comments':
+                        for selector in ('#commentsStartButton', '#commentsPauseButton', '#commentsResumeButton'):
+                            assert page.locator(selector).evaluate('(n)=>n.getBoundingClientRect().height<50')
+                    page.set_viewport_size(dict(width=width, height=height))
                 assert not unexpected, unexpected
                 assert not errors, errors
                 print(f'PASS {width}px: defaults, all presets, leap/month ends, 731-day guard, tabs/keyboard/popovers, login notice, full data, missing values, offline submit, comments navigation/login')

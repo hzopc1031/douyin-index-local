@@ -263,7 +263,7 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.hub.run_one())
 
     async def test_related_date_uses_latest_available_point_and_is_saved(self):
-        q = b.validate_insight({**query(), 'kind': 'related', 'end_date': '2026-11-04'})
+        q = b.validate_insight({**query(), 'kind': 'related', 'start_date': '2026-10-29', 'end_date': '2026-11-04'})
         self.s.ingest(result())
         with self.s.db:
             self.s.db.execute("DELETE FROM baidu_points WHERE day<>(SELECT max(day) FROM baidu_points)")

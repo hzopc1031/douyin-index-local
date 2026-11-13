@@ -198,7 +198,7 @@ def run(output=None):
                 assert page.locator('#audienceData h3').inner_text().removesuffix('ⓘ').strip() == '趋势无数据已跳过'
                 page.locator('#platformChips [data-platform=baidu]').click()
                 assert page.locator('#audienceRanges').inner_text() == ''
-                assert '尚未接入' in page.locator('#audienceData').inner_text()
+                assert '不支持此模块' in page.locator('#audienceData').inner_text()
                 assert not errors, errors
                 assert not unexpected, unexpected
                 assert not writes, writes

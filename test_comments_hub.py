@@ -923,3 +923,209 @@ class PageCaptureTests(unittest.IsolatedAsyncioTestCase):
                                app_module_comments.REENTER_JS):
                     self.assertNotIn(script, window.scripts)
                 self.assertIn(app_module_comments.CLOSE_JS, window.scripts)
+
+
+class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
+    """Gateway-only reads from synthetic exports; no desktop or upstream calls."""
+
+    async def asyncSetUp(self):
+        import contextlib
+        from types import SimpleNamespace
+        from aiohttp import web
+        from aiohttp.test_utils import TestClient, TestServer
+        from unittest.mock import AsyncMock
+        from hub_web import mount, PRINCIPAL_KEY
+        from hub_store import HubError
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'state'
+        self.state.mkdir()
+        self.env = patch.dict('os.environ', {'INDEX_HUB_STATE_DIR': str(self.state)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.runs = self.state / 'comments' / 'runs'
+
+        @web.middleware
+        async def authenticated(request, handler):
+            request[PRINCIPAL_KEY] = {'admin': request.headers.get('X-Test-Role', 'admin') == 'admin', 'scopes': ['read']}
+            try:
+                return await handler(request)
+            except HubError as exc:
+                return web.json_response({'error': {'code': exc.code, 'message': str(exc)}}, status=exc.status)
+
+        self.bridge = Mock(side_effect=AssertionError('No bridge calls for saved runs'))
+        app = web.Application(middlewares=[authenticated])
+        hub = SimpleNamespace(root=self.root, store=Mock(), bridge=self.bridge,
+                              start=AsyncMock(), close=AsyncMock())
+        mount(app, hub)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    def export(self, run_id='20261113T101112', count=2):
+        import csv
+        from dyc.output import COLUMNS
+        folder = self.runs / run_id
+        folder.mkdir(parents=True)
+        data = dict(run_id=run_id, out='/synthetic/private/path', exit_code=0, exit_reason='complete', requests=3,
+                    user_id='synthetic-private-id', metadata={'out': 'private'}, videos=[dict(
+                        video_id='100', status='complete', reason='exhausted', top_count=1, reply_count=max(0, count-1),
+                        user_id='synthetic-private-id', out='private', pages=3)])
+        (folder / 'run.json').write_text(json.dumps(data), encoding='utf-8')
+        with (folder / 'comments.csv').open('w', encoding='utf-8-sig', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=COLUMNS)
+            writer.writeheader()
+            for i in range(count):
+                writer.writerow(dict(video_id='100', comment_id=str(i), level=1 if i == 0 else 2,
+                                     root_comment_id='0', parent_comment_id='0', text=f'示例评论{i+1}',
+                                     nickname='测试用户甲', reply_to_nickname='测试用户乙', like_count=0,
+                                     user_id='synthetic-private-id', video_url='synthetic-private-video', raw_reply_id='private'))
+        return folder
+
+    async def get(self, suffix='', status=200, **kwargs):
+        response = await self.client.get('/api/v1/comments/runs' + suffix, **kwargs)
+        self.assertEqual(response.status, status)
+        return response
+
+    async def test_empty_and_usage_failures_are_read_only(self):
+        from hub_store import TZ
+        import datetime as dt
+        self.assertEqual((await (await self.get()).json())['runs'], [])
+        self.assertFalse((self.state / 'comments').exists())
+        (self.state / 'comments').mkdir()
+        usage = self.state / 'comments' / 'usage.json'
+        for value, expected in [({'day': dt.datetime.now(TZ).date().isoformat(), 'count': 17}, 17),
+                                ({'day': '2020-01-01', 'count': 9}, 0), ({'day': 'broken', 'count': 4}, None),
+                                ({'day': '2020-01-01', 'count': -1}, None), ({'day': '2020-01-01', 'count': True}, None)]:
+            usage.write_text(json.dumps(value))
+            before = usage.stat()
+            data = await (await self.get()).json()
+            self.assertEqual(data['usage'], {'today_used': expected, 'daily_limit': 150, 'batch_limit': 25})
+            self.assertEqual(usage.stat().st_mtime_ns, before.st_mtime_ns)
+        usage.write_text('{')
+        self.assertIsNone((await (await self.get()).json())['usage']['today_used'])
+        self.assertFalse((usage.parent / '.usage.lock').exists())
+        self.bridge.assert_not_called()
+
+    async def test_list_sorted_limited_and_projected(self):
+        for hour in range(22):
+            self.export(f'20261113T{hour:02d}1112')
+        data = await (await self.get()).json()
+        self.assertEqual(len(data['runs']), 20)
+        self.assertEqual([r['run_id'] for r in data['runs']], [f'20261113T{h:02d}1112' for h in range(21, 1, -1)])
+        self.assertEqual(data['runs'][0]['finished_at'], '2026-11-13T21:11:12+08:00')
+        self.assertEqual(set(data['runs'][0]), {'run_id', 'finished_at', 'exit_code', 'exit_reason', 'requests', 'videos'})
+        self.assertEqual(set(data['runs'][0]['videos'][0]), {'video_id', 'status', 'reason', 'top_count', 'reply_count'})
+        self.assertNotIn('private', json.dumps(data))
+        self.bridge.assert_not_called()
+
+    async def test_list_skips_invalid_runs_and_keeps_valid_run(self):
+        self.export()
+        broken = self.export('20261113T111112') / 'run.json'
+        original = json.loads(broken.read_text())
+        for content in ('{', json.dumps(dict(original, requests=[])),
+                        json.dumps(dict(original, videos=None)),
+                        json.dumps(dict(original, videos=[{'top_count': []}]))):
+            with self.subTest(content=content):
+                broken.write_text(content, encoding='utf-8')
+                data = await (await self.get()).json()
+                self.assertEqual([r['run_id'] for r in data['runs']], ['20261113T101112'])
+        self.bridge.assert_not_called()
+
+    async def test_list_skips_unreadable_run_but_not_unreadable_runs_directory(self):
+        from hub_web import comments_run_bytes
+        self.export()
+        self.export('20261113T111112')
+
+        def read(root, fd, run_id, filename):
+            if run_id == '20261113T111112':
+                raise PermissionError
+            return comments_run_bytes(root, fd, run_id, filename)
+
+        with patch('hub_web.comments_run_bytes', side_effect=read):
+            data = await (await self.get()).json()
+        self.assertEqual([r['run_id'] for r in data['runs']], ['20261113T101112'])
+        with patch('hub_web.comments_runs_dir', side_effect=PermissionError):
+            response = await self.get(status=404)
+        self.assertEqual((await response.json())['error']['code'], 'not_found')
+        self.bridge.assert_not_called()
+
+    async def test_detail_truncation_projection_and_csv_headers(self):
+        from hub_web import COMMENTS_FIELDS
+        folder = self.export(count=2001)
+        response = await self.get('/20261113T101112')
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        data = await response.json()
+        self.assertEqual((data['total'], data['truncated'], len(data['comments'])), (2001, True, 2000))
+        self.assertEqual(set(data['comments'][0]), set(COMMENTS_FIELDS))
+        self.assertEqual(data['comments'][0]['like_count'], '0')
+        self.assertNotIn('private', json.dumps(data))
+        response = await self.get('/20261113T101112/comments.csv')
+        self.assertEqual(response.headers['Content-Type'], 'text/csv; charset=utf-8')
+        self.assertEqual(response.headers['Content-Disposition'], 'attachment; filename="comments-20261113T101112.csv"')
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(await response.read(), (folder / 'comments.csv').read_bytes())
+        self.assertIn('user_id', (await response.read()).decode('utf-8-sig'))
+        self.export('20261113T111112', count=0)
+        self.assertEqual((await (await self.get('/20261113T111112')).json())['comments'], [])
+
+    async def test_auth_invalid_ids_traversal_and_missing(self):
+        self.export()
+        for suffix in ('', '/20261113T101112', '/20261113T101112/comments.csv'):
+            await self.get(suffix, 403, headers={'X-Test-Role': 'reader'})
+        for suffix in ('/bad', '/20261313T101112', '/20261113T101112extra', '/%2e%2e%2foutside'):
+            response = await self.get(suffix, 400)
+            self.assertEqual((await response.json())['error']['code'], 'invalid_parameters')
+        for suffix in ('/20261112T101112', '/20261112T101112/comments.csv'):
+            response = await self.get(suffix, 404)
+            self.assertEqual((await response.json())['error']['code'], 'not_found')
+
+    async def test_symlinks_are_refused_at_each_component(self):
+        folder = self.export()
+        for name, suffix in [('run.json', ''), ('comments.csv', '/20261113T101112'),
+                             ('comments.csv', '/20261113T101112/comments.csv')]:
+            path = folder / name
+            target = self.root / ('outside-' + name)
+            path.rename(target)
+            path.symlink_to(target)
+            response = await self.get(suffix, 200 if name == 'run.json' else 404)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
+            self.assertNotIn(str(self.root), await response.text())
+            path.unlink()
+            target.rename(path)
+        for path in (folder, self.runs, self.runs.parent, self.state):
+            target = path.with_name(path.name + '-saved')
+            path.rename(target)
+            path.symlink_to(target, target_is_directory=True)
+            await self.get('/20261113T101112', 404)
+            response = await self.get('', 200 if path == folder else 404)
+            if path == folder:
+                self.assertEqual((await response.json())['runs'], [])
+            path.unlink()
+            target.rename(path)
+
+    async def test_size_and_corruption_errors_do_not_expose_content(self):
+        from hub_web import COMMENTS_FILE_LIMIT
+        folder = self.export()
+        for name, suffix in [('run.json', ''), ('comments.csv', '/20261113T101112'),
+                             ('comments.csv', '/20261113T101112/comments.csv')]:
+            path = folder / name
+            original = path.read_bytes()
+            with path.open('wb') as stream:
+                stream.truncate(COMMENTS_FILE_LIMIT + 1)
+            response = await self.get(suffix, 200 if name == 'run.json' else 413)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
+            path.write_bytes(original)
+        for name, suffix in [('run.json', ''), ('comments.csv', '/20261113T101112')]:
+            path = folder / name
+            original = path.read_bytes()
+            path.write_text('synthetic-private-malformed')
+            response = await self.get(suffix, 200 if name == 'run.json' else 422)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
+            self.assertNotIn('synthetic-private', await response.text())
+            path.write_bytes(original)
