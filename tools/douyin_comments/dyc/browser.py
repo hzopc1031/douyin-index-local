@@ -492,12 +492,7 @@ class Browser:
         try:
             return site.parse_url(self.page.url, fake=self.backend is not None)
         except Stop:
-            parsed = urlsplit(self.page.url)
-            hosts = site.HOSTS | {site.SHORT_HOST}
-            if self.backend:
-                hosts = {urlsplit(site.FAKE_ORIGIN).hostname}
-            if (parsed.scheme == 'https' and parsed.hostname in hosts
-                    and parsed.port in (None, 443) and not parsed.username and not parsed.password):
+            if site.trusted_video_landing(self.page.url, fake=bool(self.backend)):
                 return None
             raise Stop(3, 'untrusted_video_redirect') from None
 

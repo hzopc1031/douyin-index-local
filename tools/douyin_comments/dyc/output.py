@@ -95,6 +95,8 @@ def export(out, run_id, videos, code, reason, requests, top=30, metadata=None):
     writer = csv.DictWriter(buffer, fieldnames=COLUMNS, lineterminator="\n")
     writer.writeheader()
     for video in videos:
+        if not video.video_id:
+            continue
         for item in video.comments.values():
             row = dict(asdict(item), run_id=run_id, video_id=video.video_id,
                        video_url=video.video_url, video_title=video.title)

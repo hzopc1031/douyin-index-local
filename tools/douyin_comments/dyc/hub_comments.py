@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from . import site
 from .errors import Stop
@@ -26,6 +27,7 @@ LOGIN_URL = "https://www.douyin.com/"
 LOGIN_ENTRY = {"login_entry": "index_sms", "login_path": "/api/v1/login/sms"}
 LOCK_TIMEOUT = 30
 PROBE_TIMEOUT = 10
+SHORT_LINK_TIMEOUT = 15
 BATCH_LIMIT = 25
 DAILY_LIMIT = 150
 PAUSE_STOPS = {
@@ -54,6 +56,9 @@ PROBE_JS = """JSON.stringify((() => {
       || ['安全验证', '身份验证', '使用原设备'].some(t => text.includes(t))
   };
 })())"""
+
+MARK_RESOLVE_JS = "(token => (window.__dycResolveToken = token) === token)"
+RESOLVE_JS = "(token => window.__dycResolveToken === token ? null : " + PROBE_JS + ")"
 
 # One page request is admitted per scheduler slice; only its non-secret ticket survives navigation.
 GUARD_JS = r"""(function(){
@@ -313,6 +318,10 @@ def pause_reason(stop_reason):
     return PAUSE_STOPS.get(stop_reason, stop_reason)
 
 
+class InvalidVideoLines(ValueError):
+    pass
+
+
 class QtCommentTransport:
     """Capture one page-originated request per locked slice."""
     no_retry = True
@@ -322,6 +331,30 @@ class QtCommentTransport:
         self._evaluate = evaluate or (lambda js, arg=None: _eval(window, js, arg))
         self.calls = 0
         self.video_id = None
+
+    async def resolve(self, video):
+        token = secrets.token_hex(16)
+        if self._evaluate(MARK_RESOLVE_JS, token) is not True:
+            raise Stop(2, "short_link_unresolved")
+        self.window.load_url(video.video_url)
+        deadline = time.monotonic() + SHORT_LINK_TIMEOUT
+        while time.monotonic() < deadline:
+            page = parse_probe_js(self._evaluate(RESOLVE_JS, token))
+            if page and page.get("host"):
+                url = f"{'https' if page.get('https') else 'http'}://{page.get('host', '')}{page.get('path', '/')}"
+                if not site.trusted_video_landing(url):
+                    raise Stop(2, "untrusted_video_redirect")
+                if page.get("modal_id") is not None:
+                    url += "?" + urlencode({site.MODAL_PARAM: page["modal_id"]})
+                try:
+                    target = site.parse_url(url)
+                except Stop:
+                    target = None
+                if target and target.video_id and page.get("ready") == "complete":
+                    video.video_id, video.video_url = target.video_id, target.url
+                    return
+            await asyncio.sleep(0.1)
+        raise Stop(2, "short_link_unresolved")
 
     async def fetch(self, video_id, root, cursor):
         if self.video_id != video_id:
@@ -660,6 +693,11 @@ class CommentsHub:
     def start(self, payload, *, budget=None, pacer=None):
         try:
             videos = self._videos(payload)
+        except InvalidVideoLines as error:
+            lines = error.args[0]
+            return {"ok": False, "code": "invalid_parameters", "invalid_lines": lines,
+                    "message": "第 " + "、".join(map(str, lines)) + " 行无法识别为抖音视频链接。"
+                    "支持：视频页链接、v.douyin.com 短链、App 分享口令、iesdouyin 分享页；不支持纯数字 ID 和图文。"}
         except ValueError:
             return {"ok": False, "code": "invalid_parameters", "message": "请提供有效的视频链接列表。"}
         probed = self.probe()
@@ -725,6 +763,7 @@ class CommentsHub:
     def _run(self, videos, budget, pacer):
         summaries = []
         job = None
+        known_ids = {video.video_id for video in videos if video.video_id}
         try:
             for index, video in enumerate(videos):
                 if self._stop.is_set():
@@ -735,9 +774,22 @@ class CommentsHub:
                     except Exception:
                         pass
                 transport = self._make_transport(budget, pacer)
+                locked = self._locked_transport(transport, pacer)
+                if not video.video_id:
+                    try:
+                        asyncio.run(locked.resolve(video))
+                    except Stop as error:
+                        video.status, video.reason = "partial", error.reason
+                        summaries.append(video.summary())
+                        continue
+                    if video.video_id in known_ids:
+                        video.status, video.reason = "duplicate", "deduplicated"
+                        summaries.append(video.summary())
+                        continue
+                    known_ids.add(video.video_id)
                 transport.video_url = video.video_url
                 transport.video = video
-                job = CollectJob(video, self._locked_transport(transport, pacer), BATCH_LIMIT)
+                job = CollectJob(video, locked, BATCH_LIMIT)
                 try:
                     while not job.done and not self._stop.is_set():
                         more = asyncio.run(job.run_slice(1))
@@ -780,6 +832,12 @@ class CommentsHub:
 
             async def fetch(self, video_id, root, cursor):
                 await pacer.before()
+                return await self._call(lambda: transport.fetch(video_id, root, cursor))
+
+            async def resolve(self, video):
+                return await self._call(lambda: transport.resolve(video))
+
+            async def _call(self, action):
                 acquired = hub._acquire is None
                 try:
                     while not acquired and not hub._stop.is_set():
@@ -792,7 +850,7 @@ class CommentsHub:
                         raise Stop(2, "user")
                     with hub._guard:
                         hub._snapshot.update(waiting_for_index=False, busy=True)
-                    return await hub._timed(transport.fetch(video_id, root, cursor))
+                    return await hub._timed(action())
                 finally:
                     with hub._guard:
                         hub._snapshot.update(waiting_for_index=False, busy=False)
@@ -838,6 +896,7 @@ class CommentsHub:
         run_id = time.strftime("%Y%m%dT%H%M%S", time.localtime())
         out = self.state_dir / "runs" / run_id
         requests = sum(getattr(video, "pages", 0) for video in videos)
+        videos = [video for video in videos if video.status != "duplicate"]
         result = export(out, run_id, videos, code, reason, requests, metadata=metadata)
         with self._guard:
             self._snapshot["output"] = {"run_id": run_id, "requests": requests,
@@ -862,16 +921,19 @@ class CommentsHub:
         if not isinstance(raw, list) or not raw or len(raw) > 20:
             raise ValueError("invalid_parameters")
         videos = []
-        for item in raw:
+        invalid_lines = []
+        for line, item in enumerate(raw, 1):
             if not isinstance(item, str):
-                raise ValueError("invalid_parameters")
+                invalid_lines.append(line)
+                continue
             try:
-                target = site.parse_url(item)
+                target = site.parse_url(site.extract_share_url(item))
             except Stop:
-                raise ValueError("invalid_parameters") from None
-            if not target.video_id:
-                raise ValueError("invalid_parameters")
-            videos.append(Video(target.video_id, target.url))
+                invalid_lines.append(line)
+                continue
+            videos.append(Video(target.video_id or "", target.url))
+        if invalid_lines:
+            raise InvalidVideoLines(invalid_lines)
         return videos
 
     def _limit(self, payload, key, default):
