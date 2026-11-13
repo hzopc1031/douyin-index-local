@@ -1021,6 +1021,37 @@ class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private', json.dumps(data))
         self.bridge.assert_not_called()
 
+    async def test_list_skips_invalid_runs_and_keeps_valid_run(self):
+        self.export()
+        broken = self.export('20261113T111112') / 'run.json'
+        original = json.loads(broken.read_text())
+        for content in ('{', json.dumps(dict(original, requests=[])),
+                        json.dumps(dict(original, videos=None)),
+                        json.dumps(dict(original, videos=[{'top_count': []}]))):
+            with self.subTest(content=content):
+                broken.write_text(content, encoding='utf-8')
+                data = await (await self.get()).json()
+                self.assertEqual([r['run_id'] for r in data['runs']], ['20261113T101112'])
+        self.bridge.assert_not_called()
+
+    async def test_list_skips_unreadable_run_but_not_unreadable_runs_directory(self):
+        from hub_web import comments_run_bytes
+        self.export()
+        self.export('20261113T111112')
+
+        def read(root, fd, run_id, filename):
+            if run_id == '20261113T111112':
+                raise PermissionError
+            return comments_run_bytes(root, fd, run_id, filename)
+
+        with patch('hub_web.comments_run_bytes', side_effect=read):
+            data = await (await self.get()).json()
+        self.assertEqual([r['run_id'] for r in data['runs']], ['20261113T101112'])
+        with patch('hub_web.comments_runs_dir', side_effect=PermissionError):
+            response = await self.get(status=404)
+        self.assertEqual((await response.json())['error']['code'], 'not_found')
+        self.bridge.assert_not_called()
+
     async def test_detail_truncation_projection_and_csv_headers(self):
         from hub_web import COMMENTS_FIELDS
         folder = self.export(count=2001)
@@ -1059,7 +1090,9 @@ class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
             target = self.root / ('outside-' + name)
             path.rename(target)
             path.symlink_to(target)
-            response = await self.get(suffix, 404)
+            response = await self.get(suffix, 200 if name == 'run.json' else 404)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
             self.assertNotIn(str(self.root), await response.text())
             path.unlink()
             target.rename(path)
@@ -1068,7 +1101,9 @@ class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
             path.rename(target)
             path.symlink_to(target, target_is_directory=True)
             await self.get('/20261113T101112', 404)
-            await self.get('', 404)
+            response = await self.get('', 200 if path == folder else 404)
+            if path == folder:
+                self.assertEqual((await response.json())['runs'], [])
             path.unlink()
             target.rename(path)
 
@@ -1081,12 +1116,16 @@ class CommentsRunsApiTests(unittest.IsolatedAsyncioTestCase):
             original = path.read_bytes()
             with path.open('wb') as stream:
                 stream.truncate(COMMENTS_FILE_LIMIT + 1)
-            await self.get(suffix, 413)
+            response = await self.get(suffix, 200 if name == 'run.json' else 413)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
             path.write_bytes(original)
         for name, suffix in [('run.json', ''), ('comments.csv', '/20261113T101112')]:
             path = folder / name
             original = path.read_bytes()
             path.write_text('synthetic-private-malformed')
-            response = await self.get(suffix, 422)
+            response = await self.get(suffix, 200 if name == 'run.json' else 422)
+            if name == 'run.json':
+                self.assertEqual((await response.json())['runs'], [])
             self.assertNotIn('synthetic-private', await response.text())
             path.write_bytes(original)

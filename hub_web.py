@@ -1429,14 +1429,15 @@ def mount(app, hub):
                 for run_id in sorted(os.listdir(fd), reverse=True):
                     if not re.fullmatch(r'\d{8}T\d{6}', run_id, flags=re.ASCII):
                         continue
-                    finished = comments_run_time(run_id)
                     try:
+                        finished = comments_run_time(run_id)
                         data = json.loads(comments_run_bytes(hub.root, fd, run_id, 'run.json'))
-                    except FileNotFoundError:
+                        item = comments_projection(data, ('exit_code', 'exit_reason', 'requests'))
+                        item.update(run_id=run_id, finished_at=finished,
+                                    videos=[comments_projection(v, COMMENTS_VIDEO_FIELDS) for v in data['videos']])
+                    except Exception:
+                        # One unreadable or invalid export must not hide other runs.
                         continue
-                    item = comments_projection(data, ('exit_code', 'exit_reason', 'requests'))
-                    item.update(run_id=run_id, finished_at=finished,
-                                videos=[comments_projection(v, COMMENTS_VIDEO_FIELDS) for v in data['videos']])
                     runs.append(item)
                     if len(runs) == 20:
                         break
