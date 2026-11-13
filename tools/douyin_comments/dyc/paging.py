@@ -59,14 +59,17 @@ async def collect(video, transport, page_budget=1500):
             if used >= page_budget:
                 raise Stop(2, "video_page_budget")
             used += 1
-            video.pages += 1
+            video.record_request(root, retry=attempt > 0)
             take_seed = getattr(transport, "take_seed", None)
             seed = take_seed(video.video_id, root, cursor) if take_seed else None
             if seed is not None:
+                video.record_page(root, seed)
                 return seed
             result = await transport.fetch(video.video_id, root, cursor)
             try:
-                return site.decode_page(result)
+                decoded = site.decode_page(result)
+                video.record_page(root, decoded)
+                return decoded
             except Stop as error:
                 if error.reason in ("timeout", "network"):
                     if attempt == 0:

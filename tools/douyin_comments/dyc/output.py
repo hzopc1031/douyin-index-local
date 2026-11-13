@@ -111,6 +111,7 @@ def export(out, run_id, videos, code, reason, requests, top=30, metadata=None):
     # Only the summary's whitelisted fields, never templates, headers or raw JSON.
     for entry in result["videos"]:
         entry["displayed"] = clean(entry["displayed"])
+        entry["title"] = clean(entry["title"])
     atomic_text(out / "run.json", json.dumps(result, ensure_ascii=False, indent=2) + "\n")
     return result
 

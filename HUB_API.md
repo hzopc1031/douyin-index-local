@@ -361,11 +361,11 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 管理员 Basic 认证；POST 须带 `X-Hub-Request: 1`，有 Origin 时须同源。
 
 - `GET /api/v1/comments/status`：主站登录探测结果与采集状态（`logged_in`、`not_logged_in`、`verification_required`）。未登录时 `login_entry` 为 `index_sms`，入口 `/api/v1/login/sms`。不触发评论请求。
-- `GET /api/v1/comments/runs`：网关直接只读 `state_dir/comments/runs`，返回 `{runs, usage}`。按运行编号倒序，最多 20 次；无目录时 `runs=[]`。每项仅含 `run_id`、`finished_at`（编号解析出的上海本地 ISO 时间）、`exit_code`、`exit_reason`、`requests` 及 `videos`；视频仅含 `video_id/status/reason/top_count/reply_count`。不返回 `out` 或其他内部字段。`usage={today_used,daily_limit:150,batch_limit:25}`，上海当日计数只读、不加锁，读取失败为 null，缺少计数文件或旧日计数为 0。
+- `GET /api/v1/comments/runs`：网关直接只读 `state_dir/comments/runs`，返回 `{runs, usage}`。按运行编号倒序，最多 20 次；无目录时 `runs=[]`。每项仅含 `run_id`、`finished_at`（编号解析出的上海本地 ISO 时间）、`exit_code`、`exit_reason`、`requests` 及 `videos`；视频仅含 `video_id/status/reason/top_count/reply_count/title/reported/displayed/pages/top_requests/top_items/reply_requests/reply_items/retries/empty_pages`。不返回 `out` 或其他内部字段。`usage={today_used,daily_limit:3000,batch_limit:1500}`，上海当日计数只读、不加锁，读取失败为 null，缺少计数文件或旧日计数为 0。
 - `GET /api/v1/comments/runs/{run_id}`：返回 `{run_id,total,truncated,comments}`；`total` 为 CSV 全部记录数，最多展示前 2000 条，超出时 `truncated=true`。评论字段仅有 `video_id/comment_id/level/root_comment_id/parent_comment_id/text/created_at/like_count/reply_count_reported/nickname/reply_to_nickname/ip_label/thread_status`，保留 CSV 字符串和空值，不下发用户 ID、视频 URL 或原始字段。
 - `GET /api/v1/comments/runs/{run_id}/comments.csv`：原样下载带 BOM 的 UTF-8 CSV，保留原文件全部列（包括昵称、用户 ID、IP 属地）。响应 `Content-Type: text/csv; charset=utf-8`、`Content-Disposition: attachment; filename="comments-<run_id>.csv"`、`Cache-Control: no-store`。
 - `POST /api/v1/comments/probe`：只读再探测一次，请求体为空对象。
-- `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每次请求短时间持锁，请求之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 25 次、上海自然日最多 150 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
+- `POST /api/v1/comments/start`：探测为 `logged_in` 后开始分批评论采集。请求体为 `{"videos":["https://www.douyin.com/video/..."]}`。每次请求短时间持锁，请求之间释放；前台指数查询优先。评论持锁时指数返回 `comments_busy`，提示「正在采集评论，稍后重试」。评论默认每批最多 1500 次、上海自然日最多 3000 次请求。热点宝 15 秒间隔和每天 30 次上限不变。
 - `POST /api/v1/comments/pause`：暂停，不自动重试。请求体为空对象。
 - `POST /api/v1/comments/resume`：重新探测并清除暂停，不会自动继续采集，需再次 `start`。遇到验证码、限频或登出时采集会自行暂停。
 
@@ -374,6 +374,18 @@ Store.latest_available_date() 仍只反映本地已存全国抖音搜索日值�
 输入校验不访问短链。点击开始并通过原有登录探测后，worker 处理该视频时才在采集用的同一个 Qt 窗口中持锁导航，最多等待约 15 秒；只读取主机、路径及 `modal_id`，不返回带参原始地址。解析成功统一为 `https://www.douyin.com/video/<id>`，与本批已知 ID 重复时标记 `duplicate/deduplicated` 并跳过。官方中间页继续等待；超时标记该条 `partial/short_link_unresolved`，外域标记 `partial/untrusted_video_redirect`，继续下一条且不暂停整批。导航不调用评论接口、不计评论请求额度；后续采集沿用原有请求、额度和暂停规则。
 
 三个运行读取接口均仅管理员可用，响应不缓存，不经桌面 bridge、不触发采集；部署这些接口只需重启网关。运行编号须严格为 `YYYYMMDDTHHMMSS` 且日期时间有效，否则 400；路径始终限制在 runs 目录内，逐级拒绝符号链接。固定文件不存在或不可读取返回 404 `not_found`，单文件超过 20 MiB 返回 413 `file_too_large`，导出格式损坏返回 422 `invalid_comments_run`。错误不包含本地路径或文件正文。历史列表只读取已有 `run.json` 的运行，未导出摘要的目录不作为完成记录；单个运行读取或校验失败时跳过该运行，其余正常返回，不记录路径或内容。runs 目录不存在仍返回空列表，目录本身不可打开仍报错。网页在评论页展示额度、最近运行和评论，支持手动选择及 CSV 下载；采集期间每 5 秒读取状态，结束后刷新历史并打开最近运行。桌面当前没有持续更新的请求计数时，只显示采集中。
+
+每批额度在尚未处理的视频之间平分，余数按输入顺序分给前面的视频；每条结束后按剩余额度重算，提前完成、短链失败、去重或非暂停类错误省下的请求可供后面视频使用。复用同一个 Budget 的单视频限制，限速和暂停规则保持不变。一级分页优先，随后采楼中楼；达到额度仅表示本次停止，再次开始会从头采集，并非断点续采。
+
+`pages` 为该视频已发请求总数，含失败请求；`top_requests/reply_requests` 区分一级/回复请求，`retries` 为实际发出的重试次数（Qt 路径不重试）。`top_items/reply_items` 为有效响应中对应 comments 数组条目之和，含重复条目；一级内嵌回复不计入 reply_items，但计入去重后的 reply_count。`empty_pages` 为有效响应中 comments 为空的页数。与去重后的 top_count/reply_count 对比可辨认小页和重复数据；旧运行缺少的新字段返回 null，不能当成零。标题仅在已有数据提供时展示。
+
+选中运行后逐视频显示汇总，评论默认按点赞降序，可切换时间新到旧，支持视频切换、正文/昵称搜索。楼中楼按根评论归组并默认折叠，超过 120 字的正文可展开；网页不展示用户 ID，CSV 保留原列。网页用量读取 usage 的 daily_limit/batch_limit，不硬编码。评论最多展示前 2000 条，搜索和排序只针对该展示范围，完整数据需下载 CSV。
+
+本次额度、调度和统计改动运行在 `douyin-index-desktop` 的 app.py / hub-comments 工作线程；运行白名单和 usage 在 `douyin-index-gateway`。部署完整改动需要重启这两个服务，网页刷新。独立 CLI 默认仍为每批 25 次、每天 150 次，与 Hub 显式额度分开；CLI Pacer 保持请求后 2–4 秒、每 15 次额外 8–15 秒、换视频 20–40 秒。
+
+2026-11-13 经用户授权，Hub 改用请求开始间随机 0.6–1.0 秒（响应耗时计入），每 50 次额外 1–2 秒，换视频 1–2 秒；请求释放锁后让步 0.05 秒，指数仍可在请求间拿锁。Qt 重放只把模板中已有 count 改为 20，楼中楼原值大于 20 原样保留，缺少 count 不新增；网页自发的首次请求原样。其余参数、去旧签名/msToken 刷新与重放路径不变。实际返回不足 20 条但 has_more 为真且游标前进时继续翻页。验证码、限频、失效登录及拒绝访问仍自动暂停，无自动重试。
+
+目标为 1000 条、约 50 次请求端到端 ≤60 秒，用户已接受加速带来的风控风险。`test_comments_hub.HubTimingTests` 使用生产 QtCommentTransport、锁、分页和 Pacer，以及合成页面适配器和假时钟，每次响应 0.3 秒、每页 20 条：固定种子 40.858 秒，间隔全上限 49.35 秒，均 50 次。开页、找到评论区、捕获模板、Qt 调用、磁盘导出、网络抖动和指数占锁仍有额外耗时，离线测试不构成线上时限保证。Qt 已有 0.1 秒轮询保留；仅换视频或偏离目标页才导航，无模板首屏 5 秒后最多重载一次，20/28 秒发现截止和暂停逻辑不变。
 
 独立的 Playwright `dyc login-web` / CLI 仍保留作退路。主站是否接受已有 `.douyin.com` 会话，须在部署后先做一次只读探测。离线测试不代表线上验收。
 
