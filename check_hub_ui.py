@@ -183,8 +183,25 @@ def run(output=None):
                     else: request_route.fulfill(content_type='application/json',body=json.dumps(data))
 
                 context.route('**/*', route)
-                page.goto('http://hub-ui.invalid/')
+                page.goto('http://hub-ui.invalid/#api')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
+                # The removed API module cannot be reached by navigation, hash or tab().
+                assert page.locator('.nav [data-tab]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.tab)') == ['overview', 'comments', 'tasks', 'connections']
+                assert page.locator('[data-tab=api], a[href="#api"]').count() == 0
+                assert 'API 与密钥' not in page.locator('.nav').inner_text()
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('[data-section=overview]').is_visible()
+                page.evaluate("tab('connections');tab('api')")
+                assert page.locator('[data-section=connections]').is_visible()
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('#pageTitle').inner_text() == '平台连接'
+                assert page.locator('.nav .active').get_attribute('data-tab') == 'connections'
+                page.evaluate("location.hash='';location.hash='api'")
+                assert page.locator('[data-section=api]').is_hidden()
+                assert page.locator('[data-section=connections]').is_visible()
+                page.evaluate("location.hash='';tab('overview')")
+                if output and width == 1280:
+                    page.screenshot(path=str(output/'hub-1113-nav-no-api-1280.png'), full_page=True)
                 assert page.locator('#platformChips [data-platform]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.platform)') == ['douyin', 'baidu']
                 assert page.locator('#queryPlatform option').evaluate_all('(nodes)=>nodes.map(n=>n.value)') == ['douyin', 'baidu']
                 page.wait_for_function("document.querySelector('#statPlatforms').textContent==='2'")
