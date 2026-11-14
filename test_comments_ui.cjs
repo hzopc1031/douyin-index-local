@@ -6,7 +6,7 @@ const start=script.indexOf('// Comments collection:'),end=script.indexOf('// End
 assert(start>=0&&end>start);
 for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsConnectionState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsProbeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
 assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
-assert(html.includes('<button data-tab="comments">抖音评论采集</button>'));
+assert(/<button data-tab="comments">[\s\S]*?<span class="nav-label">抖音评论采集<\/span><\/button>/.test(html));
 assert(!/[◈☰☷⊞]/.test(html));
 assert(html.includes('placeholder="每行一个：视频链接、短链或 App 分享口令"'));
 function fixture(){
