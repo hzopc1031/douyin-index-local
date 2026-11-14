@@ -51,6 +51,8 @@ def run(output=None):
                     elif path == 'history': data = dict(datasets=[dict(metadata={**META, 'keywords':['酵素','akg']}, fetched=1793498400)], latest_available_date=END)
                     elif path == 'jobs': data = dict(jobs=fixture['jobs'])
                     elif path == 'keys': data = dict(keys=[])
+                    elif path == 'comments/runs': data = dict(runs=[], usage={})
+                    elif path == 'hot/latest': data = dict(items=[])
                     elif path == 'comments/status': data = dict(probe='not_logged_in', running=False, paused=False)
                     elif path == 'groups': data = dict(groups=[], live_request=False)
                     elif path == 'series': data = dict(points=[])
@@ -79,6 +81,7 @@ def run(output=None):
 
                 context.route('**/*', route)
                 page.goto('http://audience-ui.invalid/')
+                page.locator('.nav [data-tab=overview]').click()
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.startsWith('未采集')")
                 page.get_by_role('tab', name='人群特征', exact=True).click()
                 assert '酵素' in page.locator('#audienceData').inner_text()

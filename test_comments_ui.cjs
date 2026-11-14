@@ -6,14 +6,14 @@ const start=script.indexOf('// Comments collection:'),end=script.indexOf('// End
 assert(start>=0&&end>start);
 for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsConnectionState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsProbeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
 assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
-assert(html.includes('<button data-tab="comments">抖音评论采集</button>'));
+assert(/<button data-tab="comments">[\s\S]*?<span class="nav-label">抖音评论采集<\/span><\/button>/.test(html));
 assert(!/[◈☰☷⊞]/.test(html));
 assert(html.includes('placeholder="每行一个：视频链接、短链或 App 分享口令"'));
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
  const $=id=>nodes[id]??={hidden:false,value:'',textContent:'',scrollIntoView(){this.scrolled=true},setAttribute(){},focus(){this.focused=true}};
  const f={$,calls,timers,status:{probe:null,running:false},tab:null,error:null,readError:null,usage:{today_used:null,daily_limit:3000,batch_limit:1500},runs:[],details:{},notices:[]};
- const ctx=vm.createContext({$,encodeURIComponent,document:{querySelectorAll:()=>[]},esc:s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),toast:message=>f.notices.push(message),renderDouyinLoginActions(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:path==='comments/runs'?{runs:f.runs,usage:f.usage}:path.startsWith('comments/runs/')?f.details[path.split('/')[2]]:{ok:true}}});
+ const ctx=vm.createContext({$,encodeURIComponent,document:{querySelectorAll:()=>[]},esc:s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),toast:message=>f.notices.push(message),renderDouyinLoginActions(){},renderHomeComments(){},renderHomeUsage(){},homeError(){},tab(name){f.tab=name},setTimeout(fn,delay){timers.set(++timer,{fn,delay});return timer},clearTimeout(id){timers.delete(id)},async api(path,options){calls.push({path,body:options?.body});if(options&&f.error){const e=f.error;f.error=null;throw e}if(path==='comments/status'&&f.readError)throw f.readError;return path==='comments/status'?f.status:path==='comments/runs'?{runs:f.runs,usage:f.usage}:path.startsWith('comments/runs/')?f.details[path.split('/')[2]]:{ok:true}}});
  vm.runInContext(script.slice(start,end),ctx);f.run=code=>vm.runInContext(code,ctx);return f;
 }
 (async()=>{
