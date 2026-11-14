@@ -17,6 +17,10 @@ jobs:
       - run: python -m pip install -r requirements-core.txt
       - run: python -m unittest -v test_local_cli test_local_comments test_client test_local_startup test_app.DesktopImportTests
       - run: node test_local_ui.cjs
+      - run: node test_home_ui.cjs
+      - run: node test_comments_ui.cjs
+      - run: node test_sms_ui.cjs
+      - run: node test_date_ui.cjs
       - run: python -m unittest -v tests.test_file_lock
         working-directory: tools/douyin_comments
   mac-comments:
