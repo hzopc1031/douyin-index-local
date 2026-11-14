@@ -2,7 +2,7 @@
 
 ## macOS 本地试验入口
 
-在主项目已创建 `.venv` 的情况下，先在主项目目录运行：
+在主项目已创建 `.venv` 的情况下，可以双击主目录的 `setup-comments.command` 安装依赖和 Chromium；它需要联网下载浏览器。也可以在主项目目录运行：
 
 ```sh
 .venv/bin/python -m pip install -r tools/douyin_comments/requirements.txt

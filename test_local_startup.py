@@ -11,6 +11,23 @@ ROOT = Path(__file__).resolve().parent
 
 @unittest.skipUnless(shutil.which('zsh'), 'zsh is required for the macOS launcher')
 class StartupTests(unittest.TestCase):
+    def test_comment_setup_invokes_only_declared_installers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copyfile(ROOT / 'setup-comments.command', root / 'setup-comments.command')
+            executable = root / '.venv/bin/python'
+            executable.parent.mkdir(parents=True)
+            executable.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', encoding='utf-8')
+            executable.chmod(0o700)
+            env = {**os.environ, 'CALLS': str(root / 'calls')}
+            result = subprocess.run([shutil.which('zsh'), str(root / 'setup-comments.command')],
+                                    env=env, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual((root / 'calls').read_text().splitlines(), [
+                '-m pip install -r tools/douyin_comments/requirements.txt',
+                '-m playwright install chromium',
+            ])
+
     def test_failed_dependency_install_is_retried_and_then_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
