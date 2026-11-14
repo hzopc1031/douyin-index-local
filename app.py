@@ -126,6 +126,28 @@ class Api:
         self._lock_owner = None
         self._comments = None
         self._dyc_window = None
+        self._local_comment_job = None
+
+    def local_comments_start(self, urls):
+        if not self._acquire_lock('comments'):
+            return self._busy()
+        try:
+            from local_comments import LocalCommentJob
+            if self._local_comment_job is None:
+                self._local_comment_job = LocalCommentJob(ROOT, on_finished=self._release_lock)
+            result = self._local_comment_job.start(urls)
+            if not result.get('ok'):
+                self._release_lock()
+            return result
+        except Exception:
+            self._release_lock()
+            return {'ok': False, 'code': 'start_failed', 'message': '无法启动本地评论任务。'}
+
+    def local_comments_status(self):
+        return self._local_comment_job.status() if self._local_comment_job else {'state': 'idle'}
+
+    def local_comments_stop(self):
+        return self._local_comment_job.stop() if self._local_comment_job else {'ok': False, 'code': 'not_running'}
 
     def fetch_hotlist(self):
         """Fetch a public hot-list snapshot without touching login state."""
@@ -139,9 +161,11 @@ class Api:
         except HotListError as exc:
             return {'ok': False, **exc.as_dict()}
         finally:
-            if client is not None:
-                client.close()
-            self._release_lock()
+            try:
+                if client is not None:
+                    client.close()
+            finally:
+                self._release_lock()
 
     def _topic_window(self):
         window = getattr(self, '_douhot', None)
@@ -628,6 +652,8 @@ def main():
         webview.start(**kwargs)
     finally:
         try:
+            if api._local_comment_job is not None:
+                api._local_comment_job.close()
             if shutdown is not None:
                 shutdown.finish()
         finally:

@@ -21,6 +21,7 @@ sys.path.insert(0, str(root))
 # Expose helpers used by the dynamically loaded app to PyInstaller analysis.
 import browser_login
 import hotlist_client
+import local_comments
 import webview_cookies
 import webview_shutdown
 

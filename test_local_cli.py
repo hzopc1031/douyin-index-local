@@ -24,6 +24,19 @@ class FakeClient:
 
 
 class LocalCliTests(unittest.TestCase):
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows subprocess check')
+    def test_windows_comments_entrypoint_reports_unsupported(self):
+        import os
+        from pathlib import Path
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parent
+        env = dict(os.environ, PYTHONPATH=str(root / 'tools/douyin_comments'))
+        result = subprocess.run([sys.executable, '-m', 'dyc', 'fetch-local'], cwd=root,
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 5)
+        self.assertEqual(json.loads(result.stdout)['exit_reason'], 'windows_comments_not_supported')
+
     def test_success_preserves_missing_values_and_closes_client(self):
         client = FakeClient({'items': [{'word': '合成话题', 'hot_value': None}]})
         out, err = io.StringIO(), io.StringIO()
@@ -80,6 +93,16 @@ class LocalCliTests(unittest.TestCase):
         with patch('hotlist_client.HotListClient', return_value=client):
             self.assertEqual(api.fetch_hotlist()['code'], 'rate_limited')
         self.assertTrue(client.closed)
+        self.assertFalse(api._lock.locked())
+
+    def test_desktop_hotlist_releases_lock_even_if_close_fails(self):
+        import app
+        client = FakeClient({'items': []})
+        api = app.Api()
+        with patch('hotlist_client.HotListClient', return_value=client), \
+                patch.object(client, 'close', side_effect=OSError('synthetic')):
+            with self.assertRaises(OSError):
+                api.fetch_hotlist()
         self.assertFalse(api._lock.locked())
 
     def test_atomic_write_without_unix_fchmod(self):

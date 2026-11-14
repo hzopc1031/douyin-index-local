@@ -1,5 +1,9 @@
 """Offline checks for nonpersistent local login and its failure boundaries."""
 import asyncio
+import contextlib
+import io
+import json
+import runpy
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -17,6 +21,14 @@ class Control:
 
 
 class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_windows_entrypoint_fails_closed_before_unix_import(self):
+        output = io.StringIO()
+        with patch('sys.platform', 'win32'), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as caught:
+                runpy.run_module('dyc', run_name='__main__')
+        self.assertEqual(caught.exception.code, 5)
+        self.assertEqual(json.loads(output.getvalue())['exit_reason'], 'windows_comments_not_supported')
+
     async def test_login_waits_for_positive_signal(self):
         browser = Mock()
         browser.control = Control()

@@ -16,6 +16,8 @@ Windows 上的原有搜索指数桌面入口现有实验性启动脚本 `start-w
 
 独立评论工具已加入实验性的 macOS 原生显示与同一进程临时会话入口 `python -m dyc fetch-local 视频链接`（从 `tools/douyin_comments` 目录运行，需另装该目录的依赖和 Playwright Chromium）。它打开临时浏览器窗口供用户登录，结束后关闭会话；真实登录、数据获取及浏览器资料清理仍待实测。原有跨进程持久登录命令在 Mac 上禁用，Windows 评论尚未适配。默认可用内存低于 2 GiB 时工具会按原有要求停止。
 
+Mac 本地窗口也提供「视频评论」实验入口；安装方法见[评论工具说明](tools/douyin_comments/README.md)。粘贴链接并主动启动后，程序打开独立浏览器供扫码；每批最多 10 个链接，使用独立 CLI 原有的请求与速率限制。任务与指数查询互斥，停止时保留已接收的数据。此界面及真实取数尚待图形环境验收。
+
 新增腾讯云运行版本：**指数工作台 / Index Atlas**，提供自用网页、SQLite 历史库、第三方 Bearer API Key、异步任务和 OpenAPI 文档。当前已接入抖音搜索指数；百度已接入独立浏览器取数，真实登录与逐日核对待验收；Google Trends 待接入。百度范围与限额见 [BAIDU.md](BAIDU.md)，操作和接口说明见 [HUB_API.md](HUB_API.md)。
 
 新增实验入口：[外部设备登录、EC2 无浏览器单次查询](CLOUD_POC.md)。
