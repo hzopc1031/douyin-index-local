@@ -83,7 +83,7 @@ def main(output=None):
             assert '626' in page.locator('#homeCommentsUsage').inner_text()
             assert page.locator('#homeBaiduMeter').is_hidden()
             assert page.locator('.mobile-more').is_visible()==mobile
-            assert page.locator('.nav-icon').first.is_visible()==mobile
+            assert page.locator('.nav-icon').first.is_visible()
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             if output and width in (1280,430):
                 page.screenshot(path=str(output/f'hub-home-{width}.png'),full_page=True)
