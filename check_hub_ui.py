@@ -32,6 +32,14 @@ PLATFORMS = [dict(id=key, name=name, available=key!='google_trends', metric_name
              for key,name in [('douyin','抖音'),('baidu','百度指数'),('google_trends','Google Trends')]]
 
 
+def navigate(page, name, width):
+    if width <= 768 and name in ('tasks', 'connections'):
+        page.locator('[data-tab=more]').click()
+        page.locator(f'[data-section=more] [data-home-tab={name}]').click()
+    else:
+        page.locator(f'.nav [data-tab={name}]').click()
+
+
 def run(output=None):
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
@@ -186,16 +194,17 @@ def run(output=None):
                 page.goto('http://hub-ui.invalid/#api')
                 page.wait_for_function("document.querySelector('#audienceSummary').textContent.includes('浙江')", timeout=10000)
                 # The removed API module cannot be reached by navigation, hash or tab().
-                assert page.locator('.nav [data-tab]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.tab)') == ['overview', 'comments', 'tasks', 'connections']
+                assert page.locator('.nav [data-tab]').evaluate_all('(nodes)=>nodes.map(n=>n.dataset.tab)') == ['home', 'overview', 'hot', 'comments', 'tasks', 'connections', 'more']
                 assert page.locator('[data-tab=api], a[href="#api"]').count() == 0
                 assert 'API 与密钥' not in page.locator('.nav').inner_text()
                 assert page.locator('[data-section=api]').is_hidden()
-                assert page.locator('[data-section=overview]').is_visible()
+                assert page.locator('[data-section=home]').is_visible()
+                assert page.locator('[data-section=overview]').is_hidden()
                 page.evaluate("tab('connections');tab('api')")
                 assert page.locator('[data-section=connections]').is_visible()
                 assert page.locator('[data-section=api]').is_hidden()
                 assert page.locator('#pageTitle').inner_text() == '平台连接'
-                assert page.locator('.nav .active').get_attribute('data-tab') == 'connections'
+                assert page.locator('.nav .active:visible').get_attribute('data-tab') == ('more' if width <= 768 else 'connections')
                 page.evaluate("location.hash='';location.hash='api'")
                 assert page.locator('[data-section=api]').is_hidden()
                 assert page.locator('[data-section=connections]').is_visible()
@@ -430,21 +439,22 @@ def run(output=None):
                 assert '尚未接入' not in page.locator('#trendSummary').inner_text()
                 assert page.locator('#viewChips').is_visible()
                 assert '搜索指数' in page.locator('#viewChips').inner_text()
-                assert '热搜榜' in page.locator('#viewChips').inner_text()
+                assert '热搜榜' not in page.locator('#viewChips').inner_text()
+                assert page.locator('.nav [data-tab=hot]').count() == 1
                 assert page.locator('#groupPanel').is_hidden()
                 assert page.locator('#overviewHot').is_hidden()
                 with page.expect_request(lambda req: 'hot/latest?board=baidu_realtime' in req.url):
-                    page.locator('[data-source=hot_search]').click()
+                    page.locator('.nav [data-tab=hot]').click()
                 page.wait_for_function("document.querySelector('#hotIntro').textContent.includes('百度热搜')")
                 assert '不是百度搜索指数' in page.locator('#hotIntro').text_content()
                 assert page.locator('#groupPanel').is_hidden()
                 page.locator('#platformChips [data-platform=douyin]').click()
                 assert page.locator('#viewChips').is_visible()
-                assert '搜索指数' in page.locator('#viewChips').inner_text()
+                assert '热搜榜' in page.locator('#viewChips').inner_text()
                 assert '热搜榜' not in page.locator('#platformChips').inner_text()
-                assert page.locator('[data-tab=hot]').count() == 0
-                assert '热榜' not in page.locator('.nav').inner_text()
-                page.locator('[data-source=hot_search]').click()
+                assert page.locator('[data-tab=hot]').count() == 1
+                assert '热榜' in page.locator('.nav').inner_text()
+                page.locator('.nav [data-tab=hot]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
                 assert '搜索页热榜' in page.locator('#hotIntro').text_content()
                 assert '不是搜索指数' in page.locator('#hotIntro').text_content()
@@ -464,18 +474,20 @@ def run(output=None):
                     fixture.update(hot_enabled=enabled, hot_paused=paused)
                     page.evaluate('loadHot()')
                     assert expected in page.locator('#hotRows').inner_text()
-                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('.rising-panel').is_hidden()
+                    assert page.locator('#hotRows').inner_text().count(expected) == 1
                     assert page.locator('#hotResume').is_visible() == bool(paused)
                     page.evaluate("$('#hotRisingButton').onclick()")
                     page.wait_for_function("document.querySelector('#hotRisingBaseline').textContent.includes('当前快照 —')")
-                    assert expected in page.locator('#hotRisingRows').inner_text()
+                    assert page.locator('.rising-panel').is_hidden()
+                    assert page.locator('#hotRows').inner_text().count(expected) == 1
                     assert page.locator('#overviewHot [data-login-platform]').count() == 0
                     assert page.locator('#hotRows img, #hotRisingRows img').count() == 0
                     assert page.locator('table:has(#hotRows) thead').is_hidden()
-                    assert page.locator('table:has(#hotRisingRows) thead').is_hidden()
+                    assert page.locator('.rising-panel').is_hidden()
                     empty_cell = page.locator('#hotRisingRows td')
-                    assert empty_cell.is_visible(), empty_cell.evaluate('(n)=>n.parentElement.parentElement.outerHTML')
-                    assert empty_cell.bounding_box()['width'] <= width
+                    assert empty_cell.is_hidden()
+                    assert page.locator('#hotRows td').bounding_box()['width'] <= width
                 fixture.update(hot_empty=False, hot_enabled=True, hot_paused=None)
                 page.evaluate('loadHot()')
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
@@ -490,17 +502,20 @@ def run(output=None):
                 assert '本库热榜快照' in page.locator('#hotRisingNote').text_content()
                 assert '不是搜索指数' in page.locator('#hotRisingNote').text_content()
                 assert '名次上升 ≥ 10' in page.locator('#hotRisingThresholds').text_content()
+                assert page.locator('[data-rising-key]:visible').count() == 4
+                page.locator('#hotRisingDetails').check()
+                assert page.locator('[data-rising-key]:visible').count() == 11
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(7).inner_text() == '—'
                 assert page.locator('#hotRisingRows tr').nth(0).locator('td').nth(9).inner_text() == '—'
                 # Sorting changes only the Douyin rising view; all values below are fictional.
                 fixture['hot_rising_items'] = [
-                    dict(word='示例词甲', position=10, new_entry=False, rank_rise=2, rank_rise_hit=False,
+                    dict(word='示例词甲', position=10, hot_value=100, new_entry=False, rank_rise=2, rank_rise_hit=False,
                          heat_pct=0.2, heat_hit=True, z_score=0, z_hit=False, search_index_ratio=0),
-                    dict(word='示例词丙', position=None, new_entry=None, rank_rise=None, rank_rise_hit=None,
+                    dict(word='示例词丙', position=None, hot_value=None, new_entry=None, rank_rise=None, rank_rise_hit=None,
                          heat_pct=None, heat_hit=None, z_score=None, z_hit=None, search_index_ratio=None),
-                    dict(word='示例词乙', position=2, new_entry=True, rank_rise=10, rank_rise_hit=True,
+                    dict(word='示例词乙', position=2, hot_value=300, new_entry=True, rank_rise=10, rank_rise_hit=True,
                          heat_pct=0.05, heat_hit=False, z_score=2, z_hit=True, search_index_ratio=1.2),
-                    dict(word='示例词丁', position=5, new_entry=False,
+                    dict(word='示例词丁', position=5, hot_value=0, new_entry=False,
                          heat_pct=-0.1, heat_hit=False, z_score=-1, z_hit=False, search_index_ratio=0.8),
                 ]
                 default_order = ['示例词甲', '示例词丙', '示例词乙', '示例词丁']
@@ -508,8 +523,8 @@ def run(output=None):
                     return page.locator('#hotRisingRows tr td:first-child').all_text_contents()
                 page.evaluate('loadHotRising()')
                 assert rising_order() == default_order
-                assert page.locator('[data-rising-key] button').count() == 10
-                assert page.locator('[data-rising-key][aria-sort=none]').count() == 10
+                assert page.locator('[data-rising-key] button').count() == 11
+                assert page.locator('[data-rising-key][aria-sort=none]').count() == 11
                 page.evaluate("document.querySelector('#overviewHot > details.card').open=false;scrollTo(0,0)")
                 if output and width == 1280:
                     page.locator('#toast').evaluate('(n)=>n.hidden=true')
@@ -534,6 +549,7 @@ def run(output=None):
                 assert rank_header.get_attribute('aria-sort') == 'none'
                 # Other numeric columns, boolean hits and Chinese collation use their raw values.
                 expected_orders = {
+                    'hot_value': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词丁', '示例词甲', '示例词乙', '示例词丙']),
                     'word': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词丙', '示例词丁', '示例词甲', '示例词乙']),
                     'position': (['示例词甲', '示例词丁', '示例词乙', '示例词丙'], ['示例词乙', '示例词丁', '示例词甲', '示例词丙']),
                     'new_entry': (['示例词乙', '示例词甲', '示例词丁', '示例词丙'], ['示例词甲', '示例词丁', '示例词乙', '示例词丙']),
@@ -558,14 +574,15 @@ def run(output=None):
                 page.evaluate('loadHotRising()')
                 assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
                 assert rank_header.get_attribute('aria-sort') == 'descending'
+                page.evaluate("tab('overview')")
                 page.locator('[data-source=index]').click()
-                page.locator('[data-source=hot_search]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 page.evaluate('loadHotRising()')
                 assert rank_header.get_attribute('aria-sort') == 'descending'
                 assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
-                page.locator('[data-platform=baidu]').click()
+                page.locator('#platformChips [data-platform=baidu]').click()
                 assert page.locator('[data-rising-key] button').count() == 0
-                page.locator('[data-source=hot_search]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 page.evaluate('loadHotRising()')
                 assert rising_order() == default_order
                 assert page.locator('[data-rising-key][aria-sort]').count() == 0
@@ -573,8 +590,8 @@ def run(output=None):
                 rank_header.click()
                 assert rising_order() == default_order
                 assert page.locator('table:has(#hotRows) th button').count() == 0
-                page.locator('[data-platform=douyin]').click()
-                page.locator('[data-source=hot_search]').click()
+                page.locator('#platformChips [data-platform=douyin]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 page.evaluate('loadHotRising()')
                 assert rank_header.get_attribute('aria-sort') == 'descending'
                 assert rising_order() == ['示例词甲', '示例词乙', '示例词丙', '示例词丁']
@@ -585,6 +602,7 @@ def run(output=None):
                 del fixture['hot_rising_items']
                 assert page.locator('#topicCategory').is_hidden()
                 assert page.locator('#groupPanel').is_hidden()
+                page.evaluate("tab('overview')")
                 page.locator('[data-source=index]').click()
                 assert page.locator('#groupPanel').is_visible()
                 assert page.locator('[data-tab=groups]').count() == 0
@@ -623,7 +641,7 @@ def run(output=None):
                 assert page.locator('#groupWords').input_value() == ''
                 assert writes[group_writes] == ('groups/' + 'a' * 32, dict(name='合成组', keywords=['杭州', '灵隐寺']))
                 assert all(item[0] not in ('queries', 'insights/queries') for item in writes[group_writes:])
-                page.locator('[data-source=hot_search]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 page.wait_for_function("document.querySelector('#hotRows').textContent.includes('合成话题甲')")
                 assert '—' in page.locator('#hotRows').inner_text()
                 assert '搜索页热榜' in page.locator('#hotIntro').text_content()
@@ -632,6 +650,7 @@ def run(output=None):
                 assert page.locator('#resultTab-summary').is_hidden()
                 assert page.locator('#groupPanel').is_hidden()
                 assert page.locator('#topicCategory').is_hidden()
+                page.evaluate("tab('overview')")
                 page.locator('[data-source=topic]').click()
                 page.locator('#topicCategory').click()
                 page.wait_for_function("document.querySelector('#topicCategoryList').textContent.includes('美食')")
@@ -686,9 +705,10 @@ def run(output=None):
                 assert '恢复采集' in page.locator('#notice').inner_text()
                 assert not page.locator('#browserBadge .info-button').count()
                 assert '抖音未登录' in page.locator('#indexLoginStatus').inner_text()
-                page.locator('#viewChips [data-source=hot_search]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 assert page.locator('#indexLoginStatus').is_hidden()
                 assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
+                page.evaluate("tab('overview')")
                 page.locator('#viewChips [data-source=index]').click()
                 page.locator('#openQuery').click()
                 assert page.locator('#douyinQueryNote').is_visible()
@@ -712,7 +732,7 @@ def run(output=None):
                         jobId:job.id,status:job.status,error:job.error.message,lastJob:job}]};
                     renderReportProgress();
                 }''', failed_job)
-                page.locator('[data-tab=tasks]').click()
+                navigate(page, 'tasks', width)
                 job_login = page.locator('#jobRows [data-login-platform=douyin]')
                 assert job_login.count() == 1 and job_login.is_hidden()
                 page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
@@ -730,7 +750,7 @@ def run(output=None):
                 fixture.update(login='cookie_present', paused=None)
                 with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
                     page.evaluate('refresh()')
-                page.locator('[data-tab=tasks]').click()
+                navigate(page, 'tasks', width)
                 assert job_login.is_hidden()
                 page.locator('[data-tab=overview]').click()
                 assert progress_login.is_hidden()
@@ -748,6 +768,7 @@ def run(output=None):
                 assert page.locator('#queryEnd').input_value()==''
                 assert len(writes)==8 and writes[-1] == ('comments/probe', {}), writes
                 fixture.update(topic_login='need_scan', topic_categories=False, topic_error=True)
+                page.evaluate("tab('overview')")
                 page.locator('[data-source=topic]').click()
                 page.wait_for_function("!document.querySelector('#topicQrPanel').hidden && document.querySelector('#topicQrImage').naturalWidth > 0")
                 assert page.locator('#topicLoginCard').is_visible()
@@ -838,7 +859,7 @@ def run(output=None):
                     with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
                         comments_nav.click()
                     assert page.locator('#commentsVideoInput').input_value() == '合成草稿，不提交'
-                page.locator('[data-tab=connections]').click()
+                navigate(page, 'connections', width)
                 fixture['comments_probe'] = 'logged_in'
                 with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
                     comments_nav.click()
@@ -849,7 +870,7 @@ def run(output=None):
                 assert page.locator('#overviewComments').is_hidden()
                 assert writes[writes_before_navigation:] == [('comments/probe', {})] * 4
                 # Login checks and the existing ticketed desktop action stay in platform connections.
-                page.locator('[data-tab=connections]').click()
+                navigate(page, 'connections', width)
                 assert page.locator('#commentsProbeButton').is_hidden()
                 assert page.locator('#desktopLogin').is_hidden()
                 fixture['comments_probe'] = 'verification_required'
@@ -1067,13 +1088,13 @@ def run(output=None):
                         assert page.locator('#indexLoginStatus').is_hidden()
                     elif view in ('hot-empty', 'baidu-hot'):
                         platform = 'douyin' if view == 'hot-empty' else 'baidu'
-                        page.evaluate("async platform => {chosenPlatform=platform;chosenSource='hot_search';drawPlatforms();document.querySelector('#overviewHot > details.card').open=false;await loadHot();await loadHotRising()}", platform)
+                        page.evaluate("async platform => {tab('hot');chosenPlatform=platform;chosenSource='hot_search';drawPlatforms();document.querySelector('#overviewHot > details.card').open=false;await loadHot();await loadHotRising()}", platform)
                         assert page.locator('#overviewHot [data-login-platform]').count() == 0
                         if platform == 'baidu':
                             assert '合成百度话题甲' in page.locator('#hotRows').inner_text()
                             assert page.locator('#hotRows td').nth(2).inner_text() == '654321'
                     elif view == 'connections':
-                        page.evaluate("tab('connections')")
+                        navigate(page, 'connections', width)
                         assert page.locator('#sessionDetail').is_visible()
                         assert page.locator('#douyinLoginCard #sessionDetail').count() == 1
                     elif view == 'query':

@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright
+from check_hub_ui import navigate
 from hub_store import PLATFORMS
 from test_baidu_adapter import query
 import baidu_adapter as b
@@ -86,6 +87,8 @@ def run(output=None):
                             {'metadata': {**metadata, 'keywords': [f'合成旧词{i}' for i in range(1, 10)]}, 'fetched': 1},
                         ], 'latest_available_date': None}
                     elif path == 'keys': data = {'keys': []}
+                    elif path == 'comments/runs': data = {'runs': [], 'usage': {}}
+                    elif path == 'hot/rising': data = {'items': []}
                     elif path == 'comments/status': data = {'probe': 'not_logged_in', 'running': False, 'paused': False}
                     elif path == 'insights/ranges': data = {'ranges': [], 'attempts': [], 'live_request': False}
                     elif path == 'insights':
@@ -118,10 +121,11 @@ def run(output=None):
                     r.fulfill(content_type='application/json', body=json.dumps(data, ensure_ascii=False))
                 page.route('**/*', route)
                 page.goto('http://baidu-ui.invalid/')
+                page.locator('.nav [data-tab=overview]').click()
                 page.wait_for_function('!refreshing && platforms.length===3')
                 assert page.locator('#keywordSelect option').all_text_contents() == ['grok', 'ai', '金华']
                 assert '登录中' in page.locator('#baiduBudgetStatus').inner_text()
-                page.locator('[data-tab=connections]').click()
+                navigate(page, 'connections', width)
                 assert page.locator('[data-section=connections] #baiduLoginCard').is_visible()
                 assert page.locator('#baiduLoginCard #baiduLoginButton').is_visible()
                 assert page.locator('#baiduLoginButton').count() == 1
@@ -182,10 +186,11 @@ def run(output=None):
                 page.locator('#platformChips [data-platform=baidu]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 assert not login_opens and not writes
-                page.locator('#viewChips [data-source=hot_search]').click()
+                page.locator('.nav [data-tab=hot]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 assert page.locator('#indexLoginStatus').is_hidden()
                 assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
+                page.locator('.nav [data-tab=overview]').click()
                 page.locator('#viewChips [data-source=index]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 baidu_state[0] = 'browser_ready'
@@ -426,7 +431,7 @@ def run(output=None):
                         jobId:job.id,status:job.status,error:job.error.message,lastJob:job}]};
                     renderReportProgress();
                 }''', failed_job)
-                page.locator('[data-tab=tasks]').click()
+                navigate(page, 'tasks', width)
                 job_login = page.locator('#jobRows [data-login-platform=baidu]')
                 assert job_login.count() == 1 and job_login.is_hidden()
                 page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
@@ -450,7 +455,7 @@ def run(output=None):
                         assert page.locator('#baiduQrPanel').is_hidden()
                         assert '采集已暂停' in page.locator('#baiduLoginStatus').inner_text()
                         assert '需要登录' not in page.locator('#baiduLoginStatus').inner_text()
-                        page.locator('[data-tab=tasks]').click()
+                        navigate(page, 'tasks', width)
                         assert job_login.is_hidden()
                         assert page.locator('#baiduResumeButton').is_visible()
                         page.locator('[data-tab=overview]').click()
@@ -463,13 +468,13 @@ def run(output=None):
                         assert page.locator('#submitButton').is_enabled()
                         assert query_login.is_hidden()
                         page.locator('#closeQuery').click()
-                        page.locator('[data-tab=connections]').click()
+                        navigate(page, 'connections', width)
                 # Rendering history after login must not recreate login actions.
                 page.evaluate('renderJobs();renderReportProgress()')
                 assert job_login.count() == 0 and progress_login.count() == 0
                 page.evaluate("renderBaiduLogin({browser:'login_required'});renderJobs();renderReportProgress()")
                 assert page.locator('#baiduLoginButton').is_visible()
-                page.locator('[data-tab=tasks]').click()
+                navigate(page, 'tasks', width)
                 assert job_login.count() == 1 and job_login.is_hidden()
                 assert page.locator('#connectionBaidu').is_enabled()
                 page.locator('[data-tab=overview]').click()
@@ -545,12 +550,14 @@ def run(output=None):
                     assert page.evaluate('reportBatch.entries[0].idem') != original_key
                     original_key = page.evaluate('reportBatch.entries[0].idem')
                 writes.clear()
+                page.wait_for_function('!refreshing')
                 baidu_state[0] = 'login_required'
                 page.evaluate('refresh()')
+                assert page.evaluate('baiduLoginState.browser') == 'login_required'
                 # Opening login keeps the existing pause even before a status poll.
                 baidu_paused[0] = {'code': 'login_required'}
                 page.evaluate('refresh()')
-                page.locator('[data-tab=connections]').click()
+                navigate(page, 'connections', width)
                 held_opens.clear()
                 open_failed[0] = True
                 page.locator('#baiduLoginButton').click()
@@ -569,7 +576,7 @@ def run(output=None):
                 # Leaving the connection card cancels a delayed retry and hides its panel.
                 page.clock.fast_forward(7000)
                 page.wait_for_function('!refreshing')
-                page.locator('[data-tab=connections]').click()
+                navigate(page, 'connections', width)
                 qr_failed[0] = True
                 qr_requests.clear()
                 page.locator('#baiduLoginButton').click()

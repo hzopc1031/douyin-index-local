@@ -41,6 +41,7 @@ with sync_playwright() as pw:
         r.fulfill(content_type='application/json', body=json.dumps(data))
     page.route('**/*', route)
     page.goto('http://hub-ui.invalid/')
+    page.locator('.nav [data-tab=overview]').click()
     page.locator('#platformChips [data-platform="synthetic"]').click()
     page.wait_for_function("document.querySelector('#trendSummary').textContent.includes('合成指数')")
     assert page.locator('#resultTab-related').is_visible()
