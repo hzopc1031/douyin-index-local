@@ -2,7 +2,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const html=fs.readFileSync('hub.html','utf8'),script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
 new vm.Script(script);
-const nodes={},$=id=>nodes[id]??={innerHTML:'',hidden:false,classList:{toggle(){}}};
+const nodes={},$=id=>nodes[id]??={innerHTML:'',hidden:false,querySelector:()=>null,classList:{toggle(){}}};
 const ctx=vm.createContext({$,esc:s=>String(s??'').replaceAll('<','&lt;'),hotText:v=>v==null?'—':String(v).replaceAll('<','&lt;'),hotTime:String,hotEmptyText:()=> '暂无快照',commentsName:String});
 vm.runInContext(script.slice(script.indexOf('let homeHubState='),script.indexOf("$('#homeRefresh').onclick")),ctx);
 ctx.renderHomeUsage({today_used:0,daily_limit:3000,batch_limit:1500});assert($('#homeCommentsUsage').innerHTML.includes('>0<'));assert($('#homeCommentsUsage').innerHTML.includes('1500'));
