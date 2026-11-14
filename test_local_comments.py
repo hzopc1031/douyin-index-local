@@ -1,7 +1,11 @@
 """Local comment process lifecycle tests; no browser or network activity."""
 import json
+import importlib.util
+import os
+from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +15,22 @@ from local_comments import LocalCommentJob
 
 
 class LocalCommentTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin' and importlib.util.find_spec('psutil') and
+                         importlib.util.find_spec('playwright'), 'macOS comment dependencies required')
+    def test_real_child_stops_before_browser_on_low_memory(self):
+        with tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve())) as temp:
+            root = Path(temp)
+            (root / 'sitecustomize.py').write_text(
+                'import psutil\nclass LowMemory:\n    available = 1\n'
+                'psutil.virtual_memory = lambda: LowMemory()\n', encoding='utf-8')
+            done = threading.Event()
+            job = LocalCommentJob(app.ROOT, on_finished=done.set)
+            with patch.dict(os.environ, {'HOME': str(root), 'PYTHONPATH': str(root)}):
+                self.assertTrue(job.start('https://www.douyin.com/video/123')['ok'])
+                self.assertTrue(done.wait(10))
+            self.assertEqual(job.status()['code'], 'low_memory')
+            self.assertEqual(job.status()['state'], 'stopped')
+
     def test_invalid_input_and_unsupported_platform_never_spawn(self):
         spawn = Mock()
         job = LocalCommentJob(app.ROOT, platform='win32', frozen=False, popen=spawn)
