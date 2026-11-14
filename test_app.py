@@ -114,7 +114,7 @@ class QrManagerConcurrencyTests(unittest.TestCase):
             def get_manager():
                 barrier.wait(timeout=3)
                 results.append(api._qr_manager())
-            with patch('qr_login.login_mode', return_value='qr'), patch('qr_login.QrLoginManager', side_effect=construct) as constructor:
+            with patch.dict('os.environ', {'INDEX_HUB_ENABLED': '1'}), patch('qr_login.login_mode', return_value='qr'), patch('qr_login.QrLoginManager', side_effect=construct) as constructor:
                 threads = [threading.Thread(target=get_manager) for _ in range(8)]
                 for thread in threads:
                     thread.start()
@@ -310,7 +310,8 @@ class WebviewProfileTests(unittest.TestCase):
         import app
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
-            'INDEX_HUB_ENABLED': '1', 'INDEX_HUB_PERSIST_LOGIN': '1', 'INDEX_HUB_PROFILE_DIR': root}):
+            'INDEX_HUB_ENABLED': '1', 'INDEX_HUB_PERSIST_LOGIN': '1', 'INDEX_HUB_PROFILE_DIR': root}), \
+                patch('webview_profile_patch.install_shared_profile', return_value=True):
             try:
                 kwargs = app._webview_start_kwargs()
                 self.assertFalse(kwargs['private_mode'])
@@ -319,8 +320,19 @@ class WebviewProfileTests(unittest.TestCase):
                     app._webview_start_kwargs()
                 self.assertEqual(caught.exception.code, 2)
             finally:
-                app._profile_lock.release()
+                if app._profile_lock is not None:
+                    app._profile_lock.release()
                 app._profile_lock = None
+
+    def test_unsupported_backend_keeps_private_mode(self):
+        import tempfile
+        import os
+        import app
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {
+            'INDEX_HUB_ENABLED': '1', 'INDEX_HUB_PERSIST_LOGIN': '1', 'INDEX_HUB_PROFILE_DIR': root}), \
+                patch('webview_profile_patch.install_shared_profile', return_value=False):
+            self.assertTrue(app._webview_start_kwargs()['private_mode'])
 
     def test_desktop_and_rollback_remain_private(self):
         import os

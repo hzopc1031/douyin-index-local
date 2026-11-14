@@ -328,6 +328,28 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(Stop):
             check_memory(path=mem)
 
+    def test_macos_memory_probe_preserves_minimum(self):
+        import sys
+        from types import SimpleNamespace
+        fake = SimpleNamespace(virtual_memory=lambda: SimpleNamespace(available=1024), Error=Exception)
+        with patch('dyc.runtime._MACOS', True), patch.dict(sys.modules, {'psutil': fake}):
+            with self.assertRaises(Stop) as ctx:
+                check_memory(minimum=2048)
+        self.assertEqual(ctx.exception.reason, 'low_memory')
+
+    def test_macos_real_commands_reject_persistent_profile(self):
+        import contextlib
+        import io
+        import json
+        from dyc.cli import main
+        for args in (['login'], ['fetch', 'https://www.douyin.com/video/123'],
+                     ['login-web', '--origin', 'https://example.invalid']):
+            output = io.StringIO()
+            with patch('dyc.cli.sys.platform', 'darwin'), contextlib.redirect_stdout(output):
+                code = main(args)
+            self.assertEqual(code, 5)
+            self.assertEqual(json.loads(output.getvalue())['exit_reason'], 'local_session_only_not_ready')
+
     def test_live_singleton_is_never_cleared(self):
         path = private_dir(self.base / "profile")
         lock = path / "SingletonLock"
@@ -398,9 +420,50 @@ class PacingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DisplayCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mac_native_display_does_not_spawn_xvfb(self):
+        display = Display()
+        with patch('dyc.runtime._MACOS', True), patch('dyc.runtime.subprocess.Popen') as spawn:
+            self.assertIsNone(await display.start())
+            self.assertEqual(display.environment(), {})
+            spawn.assert_not_called()
+        await display.close()
+
+    async def test_mac_process_cleanup_rejects_pid_reuse(self):
+        import sys
+        from types import SimpleNamespace
+        from dyc.browser import _processes, _kill_owned
+        child = Mock(pid=22)
+        child.create_time.return_value = 4.0
+        parent = Mock(pid=11)
+        parent.create_time.return_value = 3.0
+        parent.children.return_value = [child]
+        replaced = Mock(pid=22)
+        replaced.create_time.return_value = 5.0
+        processes = {11: parent, 22: replaced}
+        fake = SimpleNamespace(Process=lambda pid: processes[pid], Error=RuntimeError)
+        with patch('dyc.browser._MACOS', True), patch.dict(sys.modules, {'psutil': fake}):
+            records = _processes(11)
+            self.assertEqual(records, {11: 3.0, 22: 4.0})
+            _kill_owned(records)
+        parent.kill.assert_called_once()
+        replaced.kill.assert_not_called()
+
+    async def test_mac_process_collection_tolerates_a_disappeared_child(self):
+        import sys
+        from types import SimpleNamespace
+        from dyc.browser import _processes
+        child = Mock(pid=22)
+        child.create_time.side_effect = ProcessLookupError()
+        parent = Mock(pid=11)
+        parent.create_time.return_value = 3.0
+        parent.children.return_value = [child]
+        fake = SimpleNamespace(Process=lambda _pid: parent, Error=RuntimeError)
+        with patch('dyc.browser._MACOS', True), patch.dict(sys.modules, {'psutil': fake}):
+            self.assertEqual(_processes(11), {11: 3.0})
+
     async def test_start_failure_removes_authority(self):
         display = Display()
-        with patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
+        with patch('dyc.runtime._MACOS', False), patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
                 patch("dyc.runtime.subprocess.Popen", side_effect=OSError):
             with self.assertRaises(OSError):
                 await display.start()
@@ -412,7 +475,7 @@ class DisplayCleanupTests(unittest.IsolatedAsyncioTestCase):
         display = Display()
         process = Mock()
         process.poll.side_effect = [None, None, 0]
-        with patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
+        with patch('dyc.runtime._MACOS', False), patch("dyc.runtime.shutil.which", return_value="synthetic-Xvfb"), \
                 patch("dyc.runtime.subprocess.Popen", return_value=process), \
                 patch("dyc.runtime.asyncio.sleep", side_effect=asyncio.CancelledError):
             with self.assertRaises(asyncio.CancelledError):

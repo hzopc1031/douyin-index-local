@@ -33,12 +33,13 @@ def parser():
         common.add_argument("--" + name, default=argparse.SUPPRESS, help=help_text)
     root = Parser(prog="dyc", description="Private comment collector; site adapter uncalibrated.", parents=[common])
     subs = root.add_subparsers(dest="command", required=True, parser_class=Parser)
-    fetch = subs.add_parser("fetch", parents=[common], help="Fetch a serial batch")
-    fetch.add_argument("urls", metavar="URL", nargs="*")
-    fetch.add_argument("--urls-file", metavar="FILE")
-    fetch.add_argument("--out", metavar="DIR")
-    fetch.add_argument("--top", type=positive, default=30)
-    fetch.add_argument("--max-pages", type=positive, default=25, help="Per-video request budget (at most 25)")
+    for name in ('fetch', 'fetch-local'):
+        fetch = subs.add_parser(name, parents=[common], help="Fetch a serial batch")
+        fetch.add_argument("urls", metavar="URL", nargs="*")
+        fetch.add_argument("--urls-file", metavar="FILE")
+        fetch.add_argument("--out", metavar="DIR")
+        fetch.add_argument("--top", type=positive, default=30)
+        fetch.add_argument("--max-pages", type=positive, default=25, help="Per-video request budget (at most 25)")
     login = subs.add_parser("login", parents=[common], help="Wait for human login; refreshed private QR path on stderr")
     login.add_argument("--wait-seconds", type=positive, default=180, help="Login wait, at most 600 seconds")
     mobile = subs.add_parser("login-web", parents=[common], help="Resident private phone SMS/QR login (loopback only)")
@@ -83,7 +84,7 @@ def check_env(args):
         result["today_requests"] = DailyCounter(args.state_dir).usage()
         if result["today_requests"] >= 150:
             raise Stop(5, "daily_cap_at_start")
-        if not result["xvfb"] and not args.display:
+        if sys.platform != 'darwin' and not result["xvfb"] and not args.display:
             raise Stop(5, "xvfb_missing")
         # Ask the installed package which headed Chromium it will launch. A
         # different cached revision (or headless shell alone) is insufficient.
@@ -110,6 +111,13 @@ def main(argv=None):
     identity = None
     try:
         args = defaults(parser().parse_args(argv))
+        # The existing login/fetch commands persist a browser profile between
+        # processes. Local desktop scope requires memory-only credentials, so
+        # do not enable those paths until a single-session flow exists.
+        if sys.platform == 'darwin' and args.command in ('login', 'login-web', 'fetch'):
+            raise Stop(5, 'local_session_only_not_ready')
+        if args.command == 'fetch-local' and sys.platform != 'darwin':
+            raise Stop(5, 'local_platform_not_ready')
         if args.command == "check-env":
             code, result = check_env(args)
         elif args.command == "login-web":
@@ -117,9 +125,10 @@ def main(argv=None):
             code, result = asyncio.run(serve(args))
         else:
             from . import runner
-            if args.command == "fetch":
+            if args.command in ("fetch", "fetch-local"):
                 identity = runner.run_id()
-                code, result = asyncio.run(runner.fetch(args, identity=identity))
+                code, result = asyncio.run(runner.fetch(args, identity=identity,
+                                                       local_session=args.command == 'fetch-local'))
             else:
                 code, result = asyncio.run(getattr(runner, args.command)(args))
     except Stop as error:
@@ -128,7 +137,7 @@ def main(argv=None):
         code, result = 2, dict(exit_code=2, exit_reason="interrupted")
     except Exception:
         code, result = 1, dict(exit_code=1, exit_reason="internal_error")
-    if args is not None and args.command == "fetch" and "run_id" not in result:
+    if args is not None and args.command in ("fetch", "fetch-local") and identity is not None and "run_id" not in result:
         result.update(run_id=identity,
                       out=str(Path(args.out).expanduser().absolute() if args.out
                               else Path.home() / "dyc-output" / identity),

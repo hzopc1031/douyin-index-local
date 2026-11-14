@@ -1,0 +1,30 @@
+name: Local core portability
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  offline:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements-core.txt
+      - run: python -m unittest -v test_local_cli test_client
+  mac-comments:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r tools/douyin_comments/requirements.txt
+      - run: python -m unittest -v tests.test_core tests.test_local_session
+        working-directory: tools/douyin_comments
+        env:
+          TMPDIR: /private/tmp

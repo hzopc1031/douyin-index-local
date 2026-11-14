@@ -1,5 +1,21 @@
 # 抖音搜索指数本地小批量验证工具
 
+## 本地热榜接口（开发中）
+
+`local_cli.py` 是独立于云服务器的机器接口，目前支持抖音热榜、读取已有的单词七天搜索指数缓存和按运行编号读取本机评论摘要。使用 Python 3.12，在项目目录安装 `requirements-core.txt` 后运行：
+
+```sh
+python local_cli.py hotlist
+python local_cli.py index-cache --keyword 酵素 --end-date 2026-01-07
+python local_cli.py comment-summary --run-id 20261114-120000-abcdef1234
+```
+
+Windows 可用 `py -3.12` 替换 `python`；macOS 可用 `python3.12`。热榜命令请求一次线上数据；缓存命令仅读取此前以相同单个关键词和日期保存的 24 小时内完整结果，未命中不联网。成功时向标准输出写入一行 JSON，失败时向标准错误写入错误 JSON 并返回非零状态；不会自动重试。离线测试：`python -m unittest -v test_local_cli`。Windows 与 macOS 上真实取数及完整桌面工作台尚待分别验证。
+
+Windows 上的原有搜索指数桌面入口现有实验性启动脚本 `start-windows.cmd`：安装 Python 3.12 后运行，首次启动会创建项目内虚拟环境并联网安装依赖。它启动原有小批量搜索指数窗口，尚未在 Windows 真机验证登录或取数；完整工作台、评论与云端登录模式尚不支持此入口。结果文件继承 Windows 文件夹的访问控制，请将项目放在个人用户目录并检查该目录权限。请使用用户自己的官方窗口登录，不要将登录凭据发给开发者。
+
+独立评论工具已加入实验性的 macOS 原生显示与同一进程临时会话入口 `python -m dyc fetch-local 视频链接`（从 `tools/douyin_comments` 目录运行，需另装该目录的依赖和 Playwright Chromium）。它打开临时浏览器窗口供用户登录，结束后关闭会话；真实登录、数据获取及浏览器资料清理仍待实测。原有跨进程持久登录命令在 Mac 上禁用，Windows 评论尚未适配。默认可用内存低于 2 GiB 时工具会按原有要求停止。
+
 新增腾讯云运行版本：**指数工作台 / Index Atlas**，提供自用网页、SQLite 历史库、第三方 Bearer API Key、异步任务和 OpenAPI 文档。当前已接入抖音搜索指数；百度已接入独立浏览器取数，真实登录与逐日核对待验收；Google Trends 待接入。百度范围与限额见 [BAIDU.md](BAIDU.md)，操作和接口说明见 [HUB_API.md](HUB_API.md)。
 
 新增实验入口：[外部设备登录、EC2 无浏览器单次查询](CLOUD_POC.md)。
@@ -19,17 +35,17 @@
 
 ## 启动与使用
 
-源码仓库：[popsunlake/douyin-index-local](https://github.com/popsunlake/douyin-index-local)（私有）。已验证的桌面环境为 macOS、Python 3.12。新克隆不含 `.venv` 或已打包应用，先安装依赖：
+源码仓库：[hzopc1031/douyin-index-local](https://github.com/hzopc1031/douyin-index-local)。已验证的原有桌面环境为 macOS、Python 3.12。新克隆不含 `.venv` 或已打包应用，可手动安装依赖：
 
 ```sh
-git clone git@github.com:popsunlake/douyin-index-local.git
+git clone https://github.com/hzopc1031/douyin-index-local.git
 cd douyin-index-local
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ./start.command
 ```
 
-也可运行 `.venv/bin/python app.py`。`start.command` 优先使用本地已打包应用，没有打包产物时运行源码。已有环境可直接双击 `start.command` 或 `dist/DouyinIndexLocal.app`。应用依赖旁边的 `app.py`、`client.py`、`storage.py`、`ui-batch.html`，请保留整个项目目录结构。
+也可运行 `.venv/bin/python app.py`。`start.command` 优先使用本地已打包应用；没有打包产物和虚拟环境时，会尝试使用 PATH 中的 Python 3.12 创建环境并联网安装依赖。已有环境可直接双击 `start.command` 或 `dist/DouyinIndexLocal.app`。应用依赖项目中的源码和资源，请保留整个项目目录结构。
 
 1. 在「抖音创作者中心 · 官方登录与核对」窗口用抖音 App 扫码登录。
 2. 进入「创作服务 → 抖音指数」，查询关键词，选择「过去7天」，确认全国、抖音与日期。最新可用日期由页面决定，不假定昨天一定可取。

@@ -1,5 +1,18 @@
 # dyc：独立评论采集 CLI（v1）
 
+## macOS 本地试验入口
+
+在主项目已创建 `.venv` 的情况下，先在主项目目录运行：
+
+```sh
+.venv/bin/python -m pip install -r tools/douyin_comments/requirements.txt
+.venv/bin/python -m playwright install chromium
+cd tools/douyin_comments
+../../.venv/bin/python -m dyc fetch-local 'https://www.douyin.com/video/视频ID'
+```
+
+工具打开一个临时浏览器窗口，由使用者完成登录，随后在同一进程采集并导出；验证码、登录失效或平台限制会停止。此入口不使用持久浏览器资料目录，关闭窗口后再次使用需重新登录。结果 CSV 含评论者身份字段，默认保存到个人目录 `~/dyc-output/`；每日请求次数记录在 `~/.local/state/dyc/`。请自行保护这些目录。该入口目前仅通过离线模拟测试，Mac 真机图形登录与真实取数尚未验证；默认需要至少 2 GiB 可用内存。Windows 尚不支持此评论入口。
+
 用独立 Chromium 资料目录，串行采集视频一级评论和楼中楼，导出 CSV 与高赞摘要。
 代码独立实现，未读取或复制无许可证的第三方代码。**2026-11-01 已只读校准公开登录弹窗；账号成功信号、评论字段和接口仍待真实验证。**
 “complete”仅表示所见分页走到末尾且回复数量无已知缺口，不代表拿到平台隐藏或折叠的评论。

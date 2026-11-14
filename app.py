@@ -127,6 +127,22 @@ class Api:
         self._comments = None
         self._dyc_window = None
 
+    def fetch_hotlist(self):
+        """Fetch a public hot-list snapshot without touching login state."""
+        from hotlist_client import HotListClient, HotListError
+        if not self._acquire_lock('hotlist'):
+            return self._busy()
+        client = None
+        try:
+            client = HotListClient()
+            return {'ok': True, 'data': client.fetch()}
+        except HotListError as exc:
+            return {'ok': False, **exc.as_dict()}
+        finally:
+            if client is not None:
+                client.close()
+            self._release_lock()
+
     def _topic_window(self):
         window = getattr(self, '_douhot', None)
         if window is not None:
@@ -247,8 +263,9 @@ class Api:
             self._release_lock()
 
     def _busy(self):
-        from dyc.hub_comments import lock_busy
-        return lock_busy(self._lock_owner)
+        if self._lock_owner == 'comments':
+            return {'ok': False, 'code': 'comments_busy', 'message': '正在采集评论，稍后重试'}
+        return {'ok': False, 'code': 'busy', 'message': '取数或核对正在进行，请等待。'}
 
     def _acquire_lock(self, owner):
         if not self._lock.acquire(blocking=False):
@@ -347,6 +364,8 @@ class Api:
         return {"ok": True}
 
     def _qr_manager(self):
+        if os.environ.get('INDEX_HUB_ENABLED') != '1':
+            return None
         from qr_login import login_mode, QrLoginManager
         if login_mode() != 'qr':
             return None
@@ -357,14 +376,15 @@ class Api:
         return self._qr
 
     def _on_auth_failed(self):
-        from qr_login import login_mode
         # Captured from the cookies used for this fetch, never from a potentially
         # newer login that arrived while the request was in flight.
         if self._fetch_cookie_fingerprint is not None:
             self._browser_login.reject(self._fetch_cookie_fingerprint)
         self._fetch_cookie_fingerprint = None
-        if login_mode() == 'qr' and hasattr(self, '_qr'):
-            self._qr.holder.clear()
+        if os.environ.get('INDEX_HUB_ENABLED') == '1':
+            from qr_login import login_mode
+            if login_mode() == 'qr' and hasattr(self, '_qr'):
+                self._qr.holder.clear()
 
     def _sms_manager(self):
         from login_driver import QtLoginDriver
@@ -551,9 +571,11 @@ _profile_lock = None
 
 def _webview_start_kwargs():
     global _profile_lock
-    from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy
     kwargs = dict(private_mode=True, debug=False, http_server=False)
-    if os.environ.get('INDEX_HUB_ENABLED') == '1' and persist_enabled():
+    if os.environ.get('INDEX_HUB_ENABLED') == '1':
+        from browser_profile import persist_enabled, prepare_profile, ProfileLock, ProfileBusy
+        if not persist_enabled():
+            return kwargs
         from webview_profile_patch import install_shared_profile
         directory = prepare_profile(ROOT, 'webview')
         if not install_shared_profile(directory):

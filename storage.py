@@ -52,7 +52,10 @@ def _atomic_write(path: Path, content: bytes) -> None:
         raise ValueError("不能写入符号链接结果文件。")
     descriptor, temp_name = tempfile.mkstemp(prefix=".writing-", dir=path.parent)
     try:
-        os.fchmod(descriptor, 0o600)
+        # Windows does not expose fchmod; its files inherit the directory ACL.
+        # Callers should keep the result directory in a private user location.
+        if hasattr(os, 'fchmod'):
+            os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(content)
             stream.flush()

@@ -14,12 +14,14 @@ import signal
 import stat
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 
 from .errors import Stop
 from .models import SHANGHAI
 
+_MACOS = sys.platform == 'darwin'
 
 def private_dir(path):
     path = Path(path).expanduser().absolute()
@@ -95,7 +97,18 @@ class Profile:
                 host, _, pid = os.readlink(singleton).rpartition("-")
                 if host != os.uname().nodename or not pid.isdigit():
                     raise Stop(5, "profile_lock_unknown")
-                if Path(f"/proc/{pid}").exists():
+                if _MACOS:
+                    try:
+                        os.kill(int(pid), 0)
+                    except ProcessLookupError:
+                        alive = False
+                    except (PermissionError, OSError):
+                        alive = True
+                    else:
+                        alive = True
+                else:
+                    alive = Path(f"/proc/{pid}").exists()
+                if alive:
                     raise Stop(5, "profile_browser_alive")
             for entry in self.path.glob("Singleton*") if self.clear_stale else ():
                 if entry.is_symlink() or entry.is_file():
@@ -113,6 +126,15 @@ class Profile:
 
 
 def mem_available(path="/proc/meminfo"):
+    if _MACOS and path == '/proc/meminfo':
+        try:
+            import psutil
+        except ImportError:
+            raise Stop(5, "memory_unknown") from None
+        try:
+            return psutil.virtual_memory().available
+        except (psutil.Error, OSError, ValueError):
+            raise Stop(5, "memory_unknown") from None
     try:
         for line in Path(path).read_text().splitlines():
             if line.startswith("MemAvailable:"):
@@ -263,6 +285,8 @@ class Display:
         self._auth_dir = None
 
     def environment(self):
+        if _MACOS and not self.supplied:
+            return {}
         env = {"DISPLAY": self.name}
         if self.authority is not None:
             env["XAUTHORITY"] = str(self.authority)
@@ -271,6 +295,8 @@ class Display:
     async def start(self):
         if self.supplied:
             return self.name
+        if _MACOS:
+            return None
         if not shutil.which("Xvfb"):
             raise Stop(5, "xvfb_missing")
         read_fd = write_fd = None

@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 import uuid
 
@@ -33,7 +34,7 @@ def remove_signals():
         loop.remove_signal_handler(sig)
 
 
-async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
+async def fetch(args, *, backend=None, pacer=None, control=None, identity=None, local_session=False):
     identity = identity or run_id()
     out = private_dir(args.out or Path.home() / "dyc-output" / identity)
     log = Log(out)
@@ -62,8 +63,12 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
         budget = Budget(counter, video_limit=args.max_pages)
         pacing = pacer or Pacer()
         log.event("batch_started")
+        local_options = {'login_mode': True, 'ephemeral': True} if local_session else {}
         async with Browser(args.profile_dir, control, budget, pacing, display=args.display,
-                           backend=backend, skip_video_ids=completed) as browser:
+                           backend=backend, skip_video_ids=completed, **local_options) as browser:
+            if local_session:
+                await local_login(browser, backend=backend)
+                browser.login_mode = False
             await browser.preflight(site.FAKE_ORIGIN + "/" if backend else None)
             for index, (target, video) in enumerate(zip(targets, videos)):
                 control.check()
@@ -118,6 +123,31 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None):
         finally:
             remove_signals()
     return code, result
+
+
+async def local_login(browser, *, backend=None, wait_seconds=180):
+    """Wait for a human to sign in to this nonpersistent browser context."""
+    from .login_ui import prepare, watch_http
+    if not backend:
+        watch_http(browser)
+        print('请在新打开的浏览器中完成扫码登录；出现安全验证时将停止。', file=sys.stderr, flush=True)
+    await browser.control.run(browser.page.goto(site.FAKE_ORIGIN if backend else site.LOGIN_URL,
+                                               wait_until='domcontentloaded'))
+    state = await browser.state()
+    if state['risk']:
+        raise Stop(3, 'verification_widget')
+    if not state['inside'] and not backend:
+        state['inside'] = await browser.control.run(prepare(browser))
+    deadline = asyncio.get_running_loop().time() + min(wait_seconds, 600)
+    while not state['inside']:
+        browser.control.check()
+        if asyncio.get_running_loop().time() >= deadline:
+            raise Stop(4, 'login_timeout')
+        state = await browser.state(deadline=deadline)
+        if state['risk']:
+            raise Stop(3, 'verification_widget')
+        if not state['inside']:
+            await browser.control.run(asyncio.sleep(0.1))
 
 
 async def login(args, *, backend=None, wait_seconds=None, control=None):
@@ -206,9 +236,12 @@ async def selftest(args):
     from argparse import Namespace
     from .fake import FakeSite, FastPacer
     # Never consult or lock the real profile/state, even if overrides were supplied.
-    with tempfile.TemporaryDirectory(prefix="dyc-selftest-") as temp:
+    # macOS commonly exposes its system temporary directory through /var,
+    # which is a symlink; use the resolved path for our own fresh temp dirs.
+    temp_base = os.path.realpath(tempfile.gettempdir()) if sys.platform == 'darwin' else None
+    with tempfile.TemporaryDirectory(prefix="dyc-selftest-", dir=temp_base) as temp:
         root = Path(temp)
-        out = args.out or tempfile.mkdtemp(prefix="dyc-selftest-output-")
+        out = args.out or tempfile.mkdtemp(prefix="dyc-selftest-output-", dir=temp_base)
         fake = FakeSite()
         inner = Namespace(out=out, top=args.top, max_pages=25, urls_file=None,
                           urls=[site.FAKE_ORIGIN + "/video/100", site.FAKE_ORIGIN + "/video/200"],

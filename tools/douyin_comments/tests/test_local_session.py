@@ -1,0 +1,80 @@
+"""Offline checks for nonpersistent local login and its failure boundaries."""
+import asyncio
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+from dyc.browser import Browser
+from dyc.errors import Stop
+from dyc.runner import local_login
+
+
+class Control:
+    async def run(self, awaitable):
+        return await awaitable
+
+    def check(self):
+        pass
+
+
+class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_login_waits_for_positive_signal(self):
+        browser = Mock()
+        browser.control = Control()
+        browser.page.goto = AsyncMock()
+        browser.state = AsyncMock(side_effect=[{'inside': False, 'risk': False},
+                                               {'inside': True, 'risk': False}])
+        with patch('dyc.runner.asyncio.sleep', new=AsyncMock()):
+            await local_login(browser, backend=object())
+        self.assertEqual(browser.state.await_count, 2)
+
+    async def test_verification_stops_without_retry(self):
+        browser = Mock()
+        browser.control = Control()
+        browser.page.goto = AsyncMock()
+        browser.state = AsyncMock(return_value={'inside': False, 'risk': True})
+        with self.assertRaises(Stop) as caught:
+            await local_login(browser, backend=object())
+        self.assertEqual(caught.exception.reason, 'verification_widget')
+        self.assertEqual(browser.state.await_count, 1)
+
+    async def test_nonpersistent_browser_has_no_profile(self):
+        browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
+        self.assertIsNone(browser.profile)
+        self.assertTrue(browser.ephemeral)
+
+    async def test_nonpersistent_browser_uses_new_context_and_closes_it(self):
+        from types import SimpleNamespace
+        page = Mock()
+        context = Mock()
+        context.pages = [page]
+        context.route = AsyncMock()
+        context.route_web_socket = AsyncMock()
+        cdp = Mock()
+        cdp.send = AsyncMock()
+        context.new_cdp_session = AsyncMock(return_value=cdp)
+        context.close = AsyncMock()
+        launched = Mock()
+        launched.new_context = AsyncMock(return_value=context)
+        launched.close = AsyncMock()
+        chromium = Mock()
+        chromium.launch = AsyncMock(return_value=launched)
+        chromium.launch_persistent_context = AsyncMock()
+        playwright = Mock()
+        playwright.chromium = chromium
+        playwright.stop = AsyncMock()
+        playwright._impl_obj = SimpleNamespace(_connection=SimpleNamespace(_transport=SimpleNamespace(_proc=SimpleNamespace(pid=123))))
+        factory = Mock()
+        factory.start = AsyncMock(return_value=playwright)
+        browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
+        browser.display.start = AsyncMock()
+        browser.display.close = AsyncMock()
+        async def watch():
+            await asyncio.Event().wait()
+        with patch('dyc.browser.check_memory'), patch('dyc.browser.browser_defaults'), \
+                patch('playwright.async_api.async_playwright', return_value=factory), \
+                patch('dyc.browser._processes', return_value={}), patch.object(browser, 'watch', watch):
+            async with browser:
+                chromium.launch_persistent_context.assert_not_called()
+                launched.new_context.assert_awaited_once()
+        context.close.assert_awaited_once()
+        launched.close.assert_awaited_once()

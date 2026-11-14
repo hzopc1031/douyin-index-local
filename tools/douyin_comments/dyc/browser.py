@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import sys
 from urllib.parse import parse_qs, urlsplit
 
 from . import site
@@ -17,6 +18,7 @@ from .runtime import Display, Profile, browser_defaults, check_memory
 REPLAY_HEADER = "x-dyc-replay"
 STATE_TIMEOUT_SECONDS = 2
 LOGIN_STATE_TIMEOUT_SECONDS = 15
+_MACOS = sys.platform == 'darwin'
 
 STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
@@ -92,7 +94,24 @@ class Template:
 
 
 def _processes(root):
-    """PID + birth time for descendants of our Playwright driver only (Linux)."""
+    """PID + birth time for descendants of our Playwright driver only."""
+    if _MACOS:
+        try:
+            import psutil
+        except ImportError:
+            return {}
+        try:
+            driver = psutil.Process(root)
+            processes = [driver, *driver.children(recursive=True)]
+        except (psutil.Error, OSError):
+            return {}
+        records = {}
+        for proc in processes:
+            try:
+                records[proc.pid] = proc.create_time()
+            except (psutil.Error, OSError):
+                continue
+        return records
     records = {}
     for item in Path("/proc").glob("[0-9]*/stat"):
         try:
@@ -111,6 +130,16 @@ def _processes(root):
 
 
 def _kill_owned(records):
+    if _MACOS:
+        import psutil
+        for pid, born in records.items():
+            try:
+                proc = psutil.Process(pid)
+                if proc.create_time() == born:
+                    proc.kill()
+            except (psutil.Error, OSError):
+                pass
+        return
     for pid, born in records.items():
         try:
             text = Path(f"/proc/{pid}/stat").read_text()
@@ -123,8 +152,9 @@ def _kill_owned(records):
 class Browser:
     def __init__(self, profile, control, budget, pacer, *, display=None,
                  backend=None, memory_minimum=2 * 1024**3, timeout_ms=20000,
-                 skip_video_ids=(), login_mode=False):
-        self.profile = Profile(profile)
+                 skip_video_ids=(), login_mode=False, ephemeral=False):
+        self.profile = None if ephemeral else Profile(profile)
+        self.ephemeral = ephemeral
         self.control, self.budget, self.pacer = control, budget, pacer
         self.display = Display(display)
         self.backend = backend
@@ -132,7 +162,7 @@ class Browser:
         self.request_timeout = timeout_ms / 1000 + 2
         # Keep the runner's set by reference as it records processed videos.
         self.skip_video_ids = skip_video_ids
-        self.context = self.page = self.playwright = None
+        self.context = self.page = self.playwright = self.browser_process = None
         self.response_session = None
         self.driver_pid = None
         self.gate = asyncio.Lock()
@@ -159,7 +189,8 @@ class Browser:
 
     async def __aenter__(self):
         check_memory(self.memory_minimum)
-        self.profile.__enter__()
+        if self.profile is not None:
+            self.profile.__enter__()
         try:
             await self.control.run(self.display.start())
             browser_defaults()
@@ -167,13 +198,17 @@ class Browser:
             self.playwright = await self.control.run(async_playwright().start())
             # Private driver handle is used only for emergency cleanup, never data acquisition.
             self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
-            self.context = await self.control.run(self.playwright.chromium.launch_persistent_context(
-                str(self.profile.path), headless=False, env={**os.environ, **self.display.environment()},
-                handle_sigint=False, handle_sigterm=False, handle_sighup=False,
-                service_workers="block", accept_downloads=False,
-                args=["--disable-background-networking", "--disable-component-update",
-                      "--disable-sync", "--no-first-run", "--disable-crash-reporter"],
-            ))
+            launch = dict(headless=False, env={**os.environ, **self.display.environment()},
+                          handle_sigint=False, handle_sigterm=False, handle_sighup=False,
+                          args=["--disable-background-networking", "--disable-component-update",
+                                "--disable-sync", "--no-first-run", "--disable-crash-reporter"])
+            if self.ephemeral:
+                self.browser_process = await self.control.run(self.playwright.chromium.launch(**launch))
+                self.context = await self.control.run(self.browser_process.new_context(
+                    service_workers="block", accept_downloads=False))
+            else:
+                self.context = await self.control.run(self.playwright.chromium.launch_persistent_context(
+                    str(self.profile.path), service_workers="block", accept_downloads=False, **launch))
             # Installed before ANY navigation. Test backend fulfils in memory and
             # rejects every other origin. No Python HTTP or local receiver exists.
             await self.context.route("**/*", self.route)
@@ -607,6 +642,11 @@ class Browser:
                 await asyncio.wait_for(self.context.close(), 2.5)
             except Exception:
                 pass
+        if self.browser_process:
+            try:
+                await asyncio.wait_for(self.browser_process.close(), 2.5)
+            except Exception:
+                pass
         if self.playwright:
             try:
                 await asyncio.wait_for(self.playwright.stop(), 1)
@@ -616,6 +656,7 @@ class Browser:
         # Also reap stragglers if a driver reported successful shutdown early.
         _kill_owned(records)
         await self.display.close()
-        self.profile.__exit__(None, None, None)
+        if self.profile is not None:
+            self.profile.__exit__(None, None, None)
         self.templates.clear()
         self.seed_pages.clear()
