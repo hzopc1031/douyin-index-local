@@ -185,7 +185,7 @@ def run(output=None):
                 page.locator('#viewChips [data-source=hot_search]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 assert page.locator('#indexLoginStatus').is_hidden()
-                assert page.locator('[data-login-platform]:visible').count() == 0
+                assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
                 page.locator('#viewChips [data-source=index]').click()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 baidu_state[0] = 'browser_ready'
@@ -194,7 +194,7 @@ def run(output=None):
                 assert page.locator('#indexLoginStatus').is_visible()
                 assert '实时查询需登录 · 百度已登录 · 采集已暂停' in page.locator('#indexLoginStatus').inner_text()
                 assert page.locator('#indexLoginStatus [data-resume-platform=baidu]').inner_text() == '恢复'
-                assert page.locator('[data-login-platform]:visible').count() == 0
+                assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
                 page.locator('#openQuery').click()
                 page.locator('#queryPlatform').select_option('baidu')
                 assert page.locator('#baiduQueryNote').is_visible()
@@ -290,11 +290,13 @@ def run(output=None):
                 assert page.locator('#submitButton').is_enabled()
                 assert page.locator('#baiduQueryNote button').count() == 1
                 query_login = page.locator('#baiduQueryNote [data-login-platform=baidu]')
-                assert query_login.is_visible() and query_login.inner_text() == '去平台连接登录'
+                assert query_login.count() == 1 and query_login.is_hidden()
                 if output:
                     page.screenshot(path=str(output/f'baidu-query-login-{width}.png'))
                     page.screenshot(path=f'/tmp/baiduqr-dialog-{width}.png')
-                query_login.focus()
+                page.locator('#closeQuery').click()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                page.locator('#connectionBaidu').focus()
                 page.keyboard.press('Enter')
                 assert not page.locator('#queryDialog').evaluate('(node)=>node.open')
                 assert page.locator('[data-section=connections]').is_visible()
@@ -426,14 +428,18 @@ def run(output=None):
                 }''', failed_job)
                 page.locator('[data-tab=tasks]').click()
                 job_login = page.locator('#jobRows [data-login-platform=baidu]')
-                assert job_login.is_visible() and job_login.inner_text() == '去平台连接登录'
-                job_login.click()
+                assert job_login.count() == 1 and job_login.is_hidden()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                assert page.locator('#connectionBaidu').is_enabled()
+                page.locator('#connectionBaidu').click()
                 assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
                 page.locator('[data-tab=overview]').click()
                 page.locator('#reportProgress').evaluate('(node)=>node.open=true')
                 progress_login = page.locator('#reportProgressRows [data-login-platform=baidu]')
-                assert progress_login.is_visible() and progress_login.inner_text() == '去平台连接登录'
-                progress_login.click()
+                assert progress_login.count() == 1 and progress_login.is_hidden()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                assert page.locator('#connectionBaidu').is_enabled()
+                page.locator('#connectionBaidu').click()
                 assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
                 # A completed login does not clear the worker's manual-resume pause.
                 for browser_state in ('browser_ready', 'signature_unavailable'):
@@ -464,12 +470,15 @@ def run(output=None):
                 page.evaluate("renderBaiduLogin({browser:'login_required'});renderJobs();renderReportProgress()")
                 assert page.locator('#baiduLoginButton').is_visible()
                 page.locator('[data-tab=tasks]').click()
-                assert job_login.is_visible()
+                assert job_login.count() == 1 and job_login.is_hidden()
+                assert page.locator('#connectionBaidu').is_enabled()
                 page.locator('[data-tab=overview]').click()
-                assert progress_login.is_visible()
+                assert progress_login.count() == 1 and progress_login.is_hidden()
+                assert page.locator('#connectionBaidu').is_enabled()
                 assert page.locator('#baiduLoginNotice').count() == 0
                 page.locator('#openQuery').click()
-                assert query_login.is_visible()
+                assert query_login.count() == 1 and query_login.is_hidden()
+                assert page.locator('#connectionBaidu').is_enabled()
                 page.locator('#closeQuery').click()
                 # A rejected submission has no job and only an explicit resume may write again.
                 writes.clear()
@@ -508,8 +517,10 @@ def run(output=None):
                         assert page.evaluate('reportBatch.entries[0].rejected && !reportBatch.entries[0].jobId')
                         assert page.locator('#retryBundle').is_hidden()
                     else:
-                        assert progress_login.is_visible()
-                        progress_login.click()
+                        assert progress_login.count() == 1 and progress_login.is_hidden()
+                        page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                        assert page.locator('#connectionBaidu').is_enabled()
+                        page.locator('#connectionBaidu').click()
                         assert page.locator('#baiduLoginCard').evaluate('(node)=>node===document.activeElement')
                         page.locator('[data-tab=overview]').click()
                     writes.clear()

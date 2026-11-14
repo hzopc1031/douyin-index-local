@@ -216,7 +216,17 @@ def run(output=None):
                 assert page.locator('#resultPanel-summary').is_visible()
                 assert page.locator('#relatedSummary .rank-row').count() == 3
                 assert page.locator('#audienceSummary .audience-leader').count() == 3
-                assert page.locator('#audienceSummary').bounding_box()['y'] + page.locator('#audienceSummary').bounding_box()['height'] < height
+                # 手机概要采用纵向分区：主读数在首屏，其余分区滚动可读。
+                reading = page.locator('#trendSummary .summary-number').bounding_box()
+                assert reading['y'] + reading['height'] < height
+                if width > 430:
+                    audience = page.locator('#audienceSummary').bounding_box()
+                    assert audience['y'] + audience['height'] < height
+                for selector in ('#trendSummary', '#relatedSummary', '#audienceSummary'):
+                    page.locator(selector).scroll_into_view_if_needed()
+                    assert page.locator(selector).is_visible()
+                    assert page.locator(selector).evaluate('(n)=>n.scrollWidth<=n.clientWidth')
+                page.evaluate('scrollTo(0,0)')
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 if output:
                     page.evaluate("""() => {const n=document.createElement('div');n.textContent='离线合成样例 · 未调用真实查询';n.style='float:right;font-size:9px;font-weight:400;letter-spacing:0;color:#b2c8bc;padding-top:5px';document.querySelector('.brand').append(n)}""")
@@ -678,13 +688,16 @@ def run(output=None):
                 assert '抖音未登录' in page.locator('#indexLoginStatus').inner_text()
                 page.locator('#viewChips [data-source=hot_search]').click()
                 assert page.locator('#indexLoginStatus').is_hidden()
-                assert page.locator('[data-login-platform]:visible').count() == 0
+                assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
                 page.locator('#viewChips [data-source=index]').click()
                 page.locator('#openQuery').click()
                 assert page.locator('#douyinQueryNote').is_visible()
                 assert page.locator('#douyinQueryNote span').inner_text() == '抖音未登录：只能返回已缓存的完整结果，新的在线查询需先登录。'
                 assert page.locator('#submitButton').is_enabled()
-                page.locator('#douyinQueryNote [data-login-platform=douyin]').click()
+                assert page.locator('#douyinQueryNote [data-login-platform=douyin]').is_hidden()
+                page.locator('#closeQuery').click()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                page.locator('#connectionDouyin').click()
                 assert page.locator('#queryDialog').is_hidden()
                 assert page.locator('[data-section=connections]').is_visible()
                 assert page.evaluate("document.activeElement === document.querySelector('#douyinLoginCard')")
@@ -701,14 +714,18 @@ def run(output=None):
                 }''', failed_job)
                 page.locator('[data-tab=tasks]').click()
                 job_login = page.locator('#jobRows [data-login-platform=douyin]')
-                assert job_login.is_visible() and job_login.inner_text() == '去平台连接登录'
-                job_login.click()
+                assert job_login.count() == 1 and job_login.is_hidden()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                assert page.locator('#connectionDouyin').is_enabled()
+                page.locator('#connectionDouyin').click()
                 assert page.locator('#douyinLoginCard').evaluate('(node)=>node===document.activeElement')
                 page.locator('[data-tab=overview]').click()
                 page.locator('#reportProgress').evaluate('(node)=>node.open=true')
                 progress_login = page.locator('#reportProgressRows [data-login-platform=douyin]')
-                assert progress_login.is_visible() and progress_login.inner_text() == '去平台连接登录'
-                progress_login.click()
+                assert progress_login.count() == 1 and progress_login.is_hidden()
+                page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                assert page.locator('#connectionDouyin').is_enabled()
+                page.locator('#connectionDouyin').click()
                 assert page.locator('#douyinLoginCard').evaluate('(node)=>node===document.activeElement')
                 fixture.update(login='cookie_present', paused=None)
                 with page.expect_response(lambda r: urlparse(r.url).path == '/api/v1/comments/probe'):
@@ -718,7 +735,7 @@ def run(output=None):
                 page.locator('[data-tab=overview]').click()
                 assert progress_login.is_hidden()
                 assert page.locator('#indexLoginStatus').inner_text() == '实时查询需登录 · 抖音已登录'
-                assert page.locator('[data-login-platform]:visible').count() == 0
+                assert page.locator('[data-login-platform]:not(.connection-row):visible').count() == 0
                 page.locator('#openQuery').click()
                 assert page.locator('#douyinQueryNote').is_hidden()
                 page.locator('#closeQuery').click()
@@ -806,9 +823,12 @@ def run(output=None):
                     fixture['comments_probe'] = probe
                     page.evaluate('loadComments()')
                     login = page.locator('#commentsLoginButton')
-                    assert login.is_visible()
-                    assert login.inner_text() == '前往平台连接登录'
-                    login.click()
+                    assert login.is_hidden()
+                    page.locator('#connectionDisclosure').evaluate('(node)=>node.open=true')
+                    connection = page.locator('#connectionDouyin')
+                    assert connection.is_enabled()
+                    assert '需登录' in connection.inner_text()
+                    connection.click()
                     assert page.locator('[data-section=connections]').is_visible()
                     assert page.locator('#douyinLoginCard').is_visible()
                     assert page.locator('#douyinLoginCard #commentsProbeButton').is_visible()
@@ -925,7 +945,7 @@ def run(output=None):
                 page.evaluate("async () => {tab('comments');await loadCommentsRuns();await loadComments()}")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：空闲'
                 assert page.locator('#commentsRuns').inner_text() == '还没有评论运行记录。填写视频链接后点击开始采集。'
-                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 / 3000 · 每批最多 1500'
+                assert page.locator('#commentsUsage').inner_text() == '今日用量未知 / 3000；每批最多 1500'
                 fixture['comments_used'] = 17
                 fixture['comments_output'] = dict(run_id='20261113T101112', requests=3, videos=[dict(
                     video_id='100', top_count=1, reply_count=2, status='complete', reason='exhausted')])
@@ -942,7 +962,7 @@ def run(output=None):
                 page.wait_for_function('commentsRunning')
                 assert page.locator('#toast').inner_text() == '已开始采集…'
                 assert page.locator('#commentsMessage').inner_text() == '已开始采集…'
-                assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中 · 已请求 3 次'
+                assert page.locator('#commentsStatus').inner_text() == '采集状态：采集中；已请求 3 次'
                 page.locator('.cm-latest>summary').click()
                 latest = page.locator('#commentsLatest').inner_text()
                 for expected in ('20261113T101112', '视频 100', '一级 1', '回复 2', '请求数：3', '已采完'):
@@ -952,7 +972,7 @@ def run(output=None):
                 page.wait_for_function("document.querySelector('#commentsList').textContent.includes('示例评论一')")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：已完成'
                 assert page.locator('#toast').inner_text() == '采集完成'
-                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 3000 · 每批最多 1500'
+                assert page.locator('#commentsUsage').inner_text() == '今日已用 17 / 3000；每批最多 1500'
                 assert page.locator('#commentsRuns [data-comments-run]').count() == 2
                 assert not page.locator('#commentsList .cm-replies').evaluate('(node)=>node.open')
                 page.locator('#commentsList .cm-replies>summary').click()
@@ -1015,10 +1035,12 @@ def run(output=None):
                 assert page.locator('#commentsList .cm-thread').count() == 1
                 assert '虚构的长评论' in page.locator('#commentsList').inner_text()
                 page.locator('#commentsSearch').fill('')
-                page.locator('#commentsVideo').select_option('7300000000000000002')
+                page.locator('[data-comments-video="7300000000000000002"]').click()
+                assert page.locator('#commentsVideo').input_value() == '7300000000000000002'
                 assert page.locator('#commentsList .cm-thread').count() == 1
                 assert '另一条虚构视频' in page.locator('#commentsList').inner_text()
-                page.locator('#commentsVideo').select_option('')
+                page.locator('[data-comments-video=""]').click()
+                assert page.locator('#commentsVideo').input_value() == ''
                 page.locator('#commentsSort').select_option('likes')
                 page.evaluate("renderComments({probe:'verification_required',paused:true,pause_reason:'verification_required'})")
                 assert page.locator('#commentsStatus').inner_text() == '采集状态：已暂停'
