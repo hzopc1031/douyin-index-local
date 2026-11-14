@@ -60,5 +60,9 @@ with sync_playwright() as pw:
     assert [name for name, _ in writes] == ['queries', 'insights/queries', 'insights/queries'], writes
     assert all(body['platform'] == 'synthetic' for _, body in writes)
     assert [body.get('kind') for _, body in writes[1:]] == ['related', 'audience']
+    page.evaluate("platforms.find(p=>p.id==='synthetic').modules=[];drawPlatforms()")
+    assert page.locator('.summary-card:not([hidden])').count() == 1
+    assert page.locator('#resultTab-related').is_hidden() and page.locator('#resultTab-audience').is_hidden()
+    assert page.locator('.summary-card:not([hidden])').bounding_box()['width'] >= page.locator('.summary-grid').bounding_box()['width'] - 2
     browser.close()
 print('Synthetic second-platform UI passed')

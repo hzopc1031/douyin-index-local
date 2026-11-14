@@ -6,7 +6,8 @@ const start=script.indexOf('// Comments collection:'),end=script.indexOf('// End
 assert(start>=0&&end>start);
 for(const id of ['overviewComments','commentsStatus','commentsProbeState','commentsConnectionState','commentsBusyReason','commentsPauseReason','commentsVideoInput','commentsStartButton','commentsPauseButton','commentsResumeButton','commentsProbeButton','commentsLoginButton'])assert(html.includes(`id="${id}"`),id);
 assert(!/id="comments[^" ]*(?:Phone|Code|Qr)/i.test(html));
-assert(html.includes('<span>☰</span>抖音评论采集'));
+assert(html.includes('<button data-tab="comments">抖音评论采集</button>'));
+assert(!/[◈☰☷⊞]/.test(html));
 assert(html.includes('placeholder="每行一个：视频链接、短链或 App 分享口令"'));
 function fixture(){
  const nodes={},calls=[],timers=new Map();let timer=0;
@@ -37,17 +38,17 @@ function fixture(){
  f.readError=Error('合成状态读取失败');await f.run('loadComments()');
  assert.equal(f.$('#commentsConnectionState').textContent,'评论登录状态读取失败');f.readError=null;
  f.status={probe:'not_logged_in',paused:true,pause_reason:'verification_required',waiting_for_index:false};await f.run('loadComments()');
- assert(!f.$('#commentsLoginButton').hidden);assert(!f.$('#commentsProbeButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('需要验证'));
+ assert(f.$('#commentsLoginButton').hidden);assert(!f.$('#commentsProbeButton').hidden);assert(f.$('#commentsPauseReason').textContent.includes('需要验证'));
  f.$('#commentsLoginButton').onclick();assert.equal(f.tab,'connections');assert(f.$('#douyinLoginCard').focused);assert(f.$('#douyinLoginCard').scrolled);
  f.error=Error('comments_busy：正在采集评论，稍后重试');await f.$('#commentsStartButton').onclick();assert(f.$('#commentsMessage').textContent.includes('comments_busy'));
  f.error=Error('第 2、4 行无法识别为抖音视频链接。');await f.$('#commentsStartButton').onclick();assert.equal(f.$('#commentsMessage').textContent,'第 2、4 行无法识别为抖音视频链接。');
  f.status={probe:'logged_in',running:true,waiting_for_index:true};await f.run('loadComments()');assert(f.$('#commentsStatus').textContent.includes('等待指数采集'));assert(f.$('#commentsBusyReason').textContent.includes('等待指数'));assert.equal(f.timers.size,1);
  f.status={running:false};await f.run('loadComments()');assert.equal(f.timers.size,0);
  assert(f.notices.includes('已开始采集…'));assert(f.notices.includes('采集完成'));
- await f.run('loadCommentsRuns()');assert(f.$('#commentsRuns').innerHTML.includes('还没有评论运行记录'));assert(f.$('#commentsUsage').textContent.includes('今日用量未知'));
- f.status={probe:'custom_probe',paused:true,pause_reason:'custom_reason'};await f.run('loadComments()');assert.equal(f.$('#commentsProbeState').textContent,'主站登录：未知状态');assert.equal(f.$('#commentsPauseReason').textContent,'暂停原因：未知状态');
+ await f.run('loadCommentsRuns()');assert(f.$('#commentsRuns').innerHTML.includes('还没有评论运行记录'));assert(f.$('#commentsUsage').textContent.includes('今日用量未知'));assert(f.$('#commentsUsageBar').hidden);
+ f.status={probe:'custom_probe',paused:true,pause_reason:'custom_reason'};await f.run('loadComments()');assert.equal(f.$('#commentsProbeState').textContent,'主站登录：未知状态');assert.equal(f.$('#commentsPauseReason').textContent,'暂停原因：未知状态');assert(!f.$('#commentsResumeButton').hidden);assert(f.$('#commentsPauseButton').hidden);assert(f.$('#commentsStartButton').disabled);assert(f.$('#commentsActionHint').textContent.includes('先点击'));assert(!f.$('#commentsAttention').hidden);
  f.status={running:true,output:{requests:3,run_id:'20261113T101112',videos:[{video_id:'100',top_count:1,reply_count:1,status:'complete',reason:'exhausted'}]}};await f.run('loadComments()');
- assert(f.$('#commentsStatus').textContent.includes('采集中 · 已请求 3 次'));assert(f.$('#commentsLatest').innerHTML.includes('已采完'));assert.equal([...f.timers.values()][0].delay,2000);
+ assert(f.$('#commentsStatus').textContent.includes('采集中；已请求 3 次'));assert(f.$('#commentsLatest').innerHTML.includes('已采完'));assert.equal([...f.timers.values()][0].delay,2000);
  f.runs=[{run_id:'20261113T101112',finished_at:'2026-11-13T10:11:12+08:00',exit_reason:'complete',videos:[]}];f.details['20261113T101112']={total:0,truncated:false,comments:[]};
  f.status={running:false,paused:true,pause_reason:'user'};await f.run('loadComments()');await new Promise(setImmediate);
  assert.equal(f.notices.at(-1),'采集已暂停：手动暂停');assert(f.$('#commentsList').innerHTML.includes('这次没有采到评论'));assert.equal(f.$('#commentsDownload').href,'/api/v1/comments/runs/20261113T101112/comments.csv');
@@ -55,9 +56,9 @@ function fixture(){
  await f.run("loadCommentsRun('20261113T101112')");assert(f.$('#commentsList').innerHTML.includes('&lt;img'));assert(!f.$('#commentsList').innerHTML.includes('<img'));assert(f.$('#commentsList').innerHTML.includes('comment-reply'));assert(f.$('#commentsList').innerHTML.indexOf('&lt;img')<f.$('#commentsList').innerHTML.indexOf('示例回复'));assert(!f.$('#commentsList').innerHTML.includes('class="status"'));assert(f.$('#commentsDetailNote').textContent.includes('前 2000 条'));
  await f.run('commentsOutput=null;loadCommentsRuns()');f.status={running:false};await f.run('loadComments()');assert(f.$('#commentsLatest').innerHTML.includes('20261113T101112'));
  f.usage={today_used:19,daily_limit:900,batch_limit:77};await f.run('loadCommentsRuns()');
- assert.equal(f.$('#commentsUsage').textContent,'今日已用 19 / 900 · 每批最多 77');
+ assert.equal(f.$('#commentsUsage').textContent,'今日已用 19 / 900；每批最多 77');
  f.usage={today_used:17,daily_limit:3000,batch_limit:1500};await f.run('loadCommentsRuns()');
- assert.equal(f.$('#commentsUsage').textContent,'今日已用 17 / 3000 · 每批最多 1500');
+ assert.equal(f.$('#commentsUsage').textContent,'今日已用 17 / 3000；每批最多 1500');assert.equal(f.$('#commentsUsageBar').value,17);assert.equal(f.$('#commentsUsageBar').max,3000);assert(!f.$('#commentsUsageBar').hidden);
  f.runs[0].videos=[{video_id:'7300000000000000001',title:'虚构视频甲'.repeat(4),reported:165,top_count:2,reply_count:1,pages:13,status:'partial',reason:'video_page_budget'},{video_id:'7300000000000000002',top_count:1,reply_count:0,pages:1,status:'complete',reason:'exhausted'}];
  f.details['20261113T101112']={total:4,truncated:false,comments:[
   {video_id:'7300000000000000001',comment_id:'1',level:'1',text:'旧评论',nickname:'虚构小竹',like_count:'100',created_at:'2026-11-12T10:00:00+08:00',user_id:'不应展示的用户编号'},
@@ -71,7 +72,8 @@ function fixture(){
  assert(f.$('#commentsVideoSummary').innerHTML.includes('虚构视频甲'));assert(f.$('#commentsVideoSummary').innerHTML.includes('165'));assert(f.$('#commentsVideoSummary').innerHTML.includes('请求 13 次'));assert(f.$('#commentsVideoSummary').innerHTML.includes('达到本批上限，可继续采集'));
  assert(f.$('#commentsVideo').innerHTML.includes('<option value="7300000000000000001">虚构视频甲虚构视频甲虚构视频甲虚…</option>'));
  assert(f.$('#commentsVideo').innerHTML.includes('<option value="7300000000000000002">视频 …000002</option>'));
- assert(f.$('#commentsVideoSummary').innerHTML.includes('7300000000000000001'));
+ assert(f.$('#commentsVideoSummary').innerHTML.includes('7300000000000000001'));assert(f.$('#commentsVideoTabs').innerHTML.includes('data-comments-video="7300000000000000001"'));
+ f.$('#commentsVideoTabs').onclick({target:{closest:()=>({dataset:{commentsVideo:'7300000000000000002'}})}});assert.equal(f.$('#commentsVideo').value,'7300000000000000002');assert(f.$('#commentsList').innerHTML.includes('另一条视频正文'));f.$('#commentsVideo').value='';f.$('#commentsVideo').onchange();
  assert(rows.includes('2026-11-12 10:00'));assert(!rows.includes('2026-11-12T'));
  assert(rows.includes('<strong>虚构小雨</strong><span>点赞 0</span><time>—</time><span>IP 属地：未知</span>'));assert(!rows.includes('class="status"'));
  f.$('#commentsSort').value='time';f.$('#commentsSort').onchange();rows=f.$('#commentsList').innerHTML;assert(rows.indexOf('新评论')<rows.indexOf('旧评论'));
@@ -81,14 +83,14 @@ function fixture(){
  f.$('#commentsSearch').value='不存在的词';f.$('#commentsSearch').oninput();assert.equal(f.$('#commentsList').innerHTML,'没有匹配的评论');
  const progress={started_at:new Date(Date.now()-60000).toISOString(),finished_at:null,requests:30,batch_limit:1500,top_items:500,reply_items:60,video_index:2,video_total:4};
  f.status={running:true,progress};await f.run('loadComments()');
- assert(!f.$('#commentsProgress').hidden);assert.equal(f.$('#commentsProgressBar').max,1500);assert.equal(f.$('#commentsProgressBar').value,30);
+ assert(!f.$('#commentsProgress').hidden);assert.equal(f.$('#commentsProgressBar').max,1500);assert.equal(f.$('#commentsProgressBar').value,30);assert(!f.$('#commentsPauseButton').hidden);assert(f.$('#commentsResumeButton').hidden);assert(f.$('#commentsStartButton').disabled);assert(f.$('#commentsPhase').textContent.includes('实时阶段未提供'));
  assert.equal(f.$('#commentsRequests').textContent,'已用请求 30 / 1500');assert.equal(f.$('#commentsTopItems').textContent,'500 条');assert.equal(f.$('#commentsReplyItems').textContent,'60 条');assert.equal(f.$('#commentsVideoProgress').textContent,'2 / 4');
  assert.notEqual(f.$('#commentsRemaining').textContent,'估算中');assert.equal(f.$('#commentsElapsed').textContent,'1 分 0 秒');
  for(const state of [{paused:true,pause_reason:'verification_required'},{waiting_for_index:true}]){f.status={running:true,progress,...state};await f.run('loadComments()');assert.equal(f.$('#commentsRemaining').textContent,'估算中')}
  f.status={running:true,progress:{...progress,requests:1}};await f.run('loadComments()');assert.equal(f.$('#commentsRemaining').textContent,'估算中');
  f.status={running:false,paused:true,pause_reason:'user',progress};await f.run('loadComments()');assert.equal(f.timers.size,1);
  f.status={running:false,progress:{...progress,finished_at:new Date(Date.parse(progress.started_at)+45000).toISOString()}};await f.run('loadComments()');
- assert.equal(f.$('#commentsElapsed').textContent,'45 秒');assert.equal(f.$('#commentsRemaining').textContent,'已结束');assert.equal(f.$('#commentsProgressSummary').textContent,'本次结果：总请求 30 次 · 总条数 560 条 · 用时 45 秒');
+ assert.equal(f.$('#commentsElapsed').textContent,'45 秒');assert.equal(f.$('#commentsRemaining').textContent,'已结束');assert.equal(f.$('#commentsProgressSummary').textContent,'本次结果：总请求 30 次；总条数 560 条；用时 45 秒');
  assert(f.$('#commentsRuns').innerHTML.includes('2026-11-13 10:11'));assert(!f.$('#commentsRuns').innerHTML.includes('2026-11-13T'));
  assert(rows.includes('class="cm-reply-close">收起回复'));assert.equal(f.run('commentsDuration(NaN)'),'—');assert.equal(f.run('commentsDuration(3661)'),'1 小时 1 分 1 秒');
  console.log('comments UI: 1 focused suite passed');
