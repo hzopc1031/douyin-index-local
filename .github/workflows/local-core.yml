@@ -16,6 +16,8 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements-core.txt
       - run: python -m unittest -v test_local_cli test_local_comments test_client test_local_startup test_app.DesktopImportTests
+      - run: python -m unittest -v tests.test_file_lock
+        working-directory: tools/douyin_comments
   mac-comments:
     runs-on: macos-latest
     steps:

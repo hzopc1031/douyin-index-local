@@ -360,6 +360,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, "profile_browser_alive")
         self.assertTrue(lock.is_symlink())
 
+    def test_counter_does_not_unlock_when_acquisition_fails(self):
+        counter = DailyCounter(self.base / 'locked-state')
+        with patch('dyc.runtime.acquire_lock', side_effect=BlockingIOError), \
+                patch('dyc.runtime.release_lock') as unlock:
+            with self.assertRaises(Stop) as error:
+                counter.usage()
+        self.assertEqual(error.exception.reason, 'usage_locked')
+        unlock.assert_not_called()
+
     def test_caps_count_only_and_day_rollover(self):
         day = ["2026-10-31"]
         counter = DailyCounter(self.base / "state", lambda: day[0], limit=3)

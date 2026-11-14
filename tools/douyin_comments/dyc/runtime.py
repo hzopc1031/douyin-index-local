@@ -3,7 +3,6 @@
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,7 @@ import time
 
 from .errors import Stop
 from .models import SHANGHAI
+from .file_lock import acquire as acquire_lock, release as release_lock
 
 _MACOS = sys.platform == 'darwin'
 
@@ -85,7 +85,7 @@ class Profile:
         self.path = private_dir(self.path)
         self.fd = private_open(self.path / ".dyc.lock", os.O_RDWR | os.O_CREAT)
         try:
-            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_lock(self.fd)
         except BlockingIOError:
             os.close(self.fd)
             self.fd = None
@@ -120,9 +120,11 @@ class Profile:
 
     def __exit__(self, *_):
         if self.fd is not None:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
-            os.close(self.fd)
-            self.fd = None
+            try:
+                release_lock(self.fd)
+            finally:
+                os.close(self.fd)
+                self.fd = None
 
 
 def mem_available(path="/proc/meminfo"):
@@ -172,15 +174,20 @@ class DailyCounter:
     @contextmanager
     def locked(self):
         fd = private_open(self.state / ".usage.lock", os.O_RDWR | os.O_CREAT)
+        acquired = False
         try:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquire_lock(fd)
+                acquired = True
             except BlockingIOError:
                 raise Stop(5, "usage_locked") from None
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            try:
+                if acquired:
+                    release_lock(fd)
+            finally:
+                os.close(fd)
 
     def _read(self, day=None):
         day = day or self.today()
