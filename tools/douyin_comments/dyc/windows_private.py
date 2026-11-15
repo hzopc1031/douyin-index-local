@@ -42,7 +42,7 @@ def create_private_empty_directory(path):
         target.mkdir()
         made = True
         stage = 'open'
-        handle = file.CreateFile(str(target), con.READ_CONTROL | con.WRITE_DAC | nt.FILE_READ_ATTRIBUTES,
+        handle = file.CreateFile(str(target), con.READ_CONTROL | con.WRITE_DAC | con.WRITE_OWNER | nt.FILE_READ_ATTRIBUTES,
                                  con.FILE_SHARE_READ | con.FILE_SHARE_WRITE | con.FILE_SHARE_DELETE,
                                  None, con.OPEN_EXISTING,
                                  con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)  # FILE_FLAG_OPEN_REPARSE_POINT
@@ -64,8 +64,9 @@ def create_private_empty_directory(path):
             acl.AddAccessAllowedAceEx(security.ACL_REVISION, inheritance, nt.FILE_ALL_ACCESS, sid)
         stage = 'set_acl'
         security.SetSecurityInfo(handle, security.SE_FILE_OBJECT,
-            security.DACL_SECURITY_INFORMATION | security.PROTECTED_DACL_SECURITY_INFORMATION,
-            None, None, acl, None)
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION |
+            security.PROTECTED_DACL_SECURITY_INFORMATION,
+            user, None, acl, None)
         stage = 'verify_acl'
         descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
             security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
