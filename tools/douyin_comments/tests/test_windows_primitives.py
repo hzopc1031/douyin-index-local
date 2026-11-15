@@ -38,6 +38,18 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_runtime_creates_nested_private_directories_and_reuses_them(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.windows_private import verify_private_directory
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / 'dyc-output' / 'run'
+            self.assertEqual(runtime.private_dir(target), target)
+            verify_private_directory(target.parent)
+            verify_private_directory(target)
+            self.assertEqual(runtime.private_dir(target), target)
+
     def test_runtime_atomic_text_uses_private_windows_replacement(self):
         import tempfile
         from pathlib import Path

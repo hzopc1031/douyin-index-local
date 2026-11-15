@@ -26,6 +26,21 @@ _WINDOWS = sys.platform == 'win32'
 
 def private_dir(path):
     path = Path(path).expanduser().absolute()
+    if _WINDOWS:
+        from .windows_private import create_private_empty_directory, verify_private_directory
+        missing = []
+        current = path
+        while not current.exists() and not current.is_symlink():
+            missing.append(current)
+            if current.parent == current:
+                raise Stop(5, 'directory_unavailable')
+            current = current.parent
+        if not missing:
+            verify_private_directory(path)
+        else:
+            for item in reversed(missing):
+                create_private_empty_directory(item)
+        return path
     # Refuse symlink ancestors as well: a private leaf alone is insufficient.
     for part in (path, *path.parents):
         if part.is_symlink():
