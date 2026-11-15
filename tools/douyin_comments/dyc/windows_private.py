@@ -37,29 +37,36 @@ def create_private_empty_directory(path):
             raise Stop(5, 'directory_symlink')
     made = False
     handle = None
+    stage = 'create'
     try:
         target.mkdir()
         made = True
+        stage = 'open'
         handle = file.CreateFile(str(target), con.READ_CONTROL | con.WRITE_DAC | nt.FILE_READ_ATTRIBUTES,
                                  con.FILE_SHARE_READ | con.FILE_SHARE_WRITE | con.FILE_SHARE_DELETE,
                                  None, con.OPEN_EXISTING,
                                  con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)  # FILE_FLAG_OPEN_REPARSE_POINT
+        stage = 'attributes'
         attributes = file.GetFileInformationByHandle(handle)[0]
         if attributes & con.FILE_ATTRIBUTE_REPARSE_POINT:
             raise Stop(5, 'directory_symlink')
+        stage = 'identity'
         token = security.OpenProcessToken(api.GetCurrentProcess(), con.TOKEN_QUERY)
         try:
             user = security.GetTokenInformation(token, security.TokenUser)[0]
         finally:
             token.Close()
+        stage = 'build_acl'
         system = security.ConvertStringSidToSid('S-1-5-18')
         acl = security.ACL()
         inheritance = security.OBJECT_INHERIT_ACE | security.CONTAINER_INHERIT_ACE
         for sid in (user, system):
             acl.AddAccessAllowedAceEx(security.ACL_REVISION, inheritance, nt.FILE_ALL_ACCESS, sid)
+        stage = 'set_acl'
         security.SetSecurityInfo(handle, security.SE_FILE_OBJECT,
             security.DACL_SECURITY_INFORMATION | security.PROTECTED_DACL_SECURITY_INFORMATION,
             None, None, acl, None)
+        stage = 'verify_acl'
         descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
             security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
         if security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()) != security.ConvertSidToStringSid(user):
@@ -80,7 +87,7 @@ def create_private_empty_directory(path):
     except Stop:
         raise
     except Exception:
-        raise Stop(5, 'directory_permissions') from None
+        raise Stop(5, 'windows_acl_' + stage) from None
     finally:
         if handle is not None:
             handle.Close()
