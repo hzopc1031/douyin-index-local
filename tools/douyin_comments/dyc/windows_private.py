@@ -43,7 +43,7 @@ def create_private_empty_directory(path):
         handle = file.CreateFile(str(target), con.READ_CONTROL | con.WRITE_DAC | nt.FILE_READ_ATTRIBUTES,
                                  con.FILE_SHARE_READ | con.FILE_SHARE_WRITE | con.FILE_SHARE_DELETE,
                                  None, con.OPEN_EXISTING,
-                                 con.FILE_FLAG_BACKUP_SEMANTICS | con.FILE_FLAG_OPEN_REPARSE_POINT, None)
+                                 con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)  # FILE_FLAG_OPEN_REPARSE_POINT
         attributes = file.GetFileInformationByHandle(handle)[0]
         if attributes & con.FILE_ATTRIBUTE_REPARSE_POINT:
             raise Stop(5, 'directory_symlink')
@@ -62,7 +62,7 @@ def create_private_empty_directory(path):
             None, None, acl, None)
         descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
             security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
-        if not security.EqualSid(descriptor.GetSecurityDescriptorOwner(), user):
+        if security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()) != security.ConvertSidToStringSid(user):
             raise Stop(5, 'directory_permissions')
         if not (descriptor.GetSecurityDescriptorControl()[0] & security.SE_DACL_PROTECTED):
             raise Stop(5, 'directory_permissions')
