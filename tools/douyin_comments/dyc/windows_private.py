@@ -85,35 +85,54 @@ def verify_private_directory(path):
             handle.Close()
 
 
-def verify_private_file(path):
-    """Check one existing file; a future reader must retain the validated handle."""
+def _validate_file_handle(handle, user, con, file, security, nt):
+    info = file.GetFileInformationByHandle(handle)
+    if info[0] & (con.FILE_ATTRIBUTE_REPARSE_POINT | con.FILE_ATTRIBUTE_DIRECTORY) or info[7] != 1:
+        raise Stop(5, 'file_permissions')
+    descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
+        security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+    if security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()) != security.ConvertSidToStringSid(user):
+        raise Stop(5, 'file_permissions')
+    acl = descriptor.GetSecurityDescriptorDacl()
+    if acl is None or acl.GetAceCount() != 2:
+        raise Stop(5, 'file_permissions')
+    entries = [acl.GetAce(i) for i in range(acl.GetAceCount())]
+    allowed = {security.ConvertSidToStringSid(user), 'S-1-5-18'}
+    if {security.ConvertSidToStringSid(entry[2]) for entry in entries} != allowed:
+        raise Stop(5, 'file_permissions')
+    if any(entry[0][0] != security.ACCESS_ALLOWED_ACE_TYPE
+           or entry[0][1] & security.INHERIT_ONLY_ACE
+           or entry[1] & nt.FILE_ALL_ACCESS != nt.FILE_ALL_ACCESS for entry in entries):
+        raise Stop(5, 'file_permissions')
+
+
+def read_private_file(path, *, max_bytes=256 * 1024):
+    """Read from the validated Windows handle; never follow a final reparse point."""
     api, con, file, security, nt = _modules()
+    if type(max_bytes) is not int or not 0 <= max_bytes <= 1024 * 1024:
+        raise ValueError('invalid size limit')
     target = Path(path).expanduser().absolute()
     verify_private_directory(target.parent)
-    handle = None
+    parent_handle = handle = None
     try:
-        handle = file.CreateFile(str(target), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
-                                 con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None,
-                                 con.OPEN_EXISTING, 0x00200000, None)
-        info = file.GetFileInformationByHandle(handle)
-        if info[0] & (con.FILE_ATTRIBUTE_REPARSE_POINT | con.FILE_ATTRIBUTE_DIRECTORY) or info[7] != 1:
-            raise Stop(5, 'file_permissions')
-        descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
-            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        # Keep the verified parent open without delete sharing through the read.
+        parent_handle = file.CreateFile(str(target.parent), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                        con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None, con.OPEN_EXISTING,
+                                        con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)
+        attrs = file.GetFileInformationByHandle(parent_handle)[0]
+        if attrs & con.FILE_ATTRIBUTE_REPARSE_POINT or not attrs & con.FILE_ATTRIBUTE_DIRECTORY:
+            raise Stop(5, 'directory_permissions')
         user = _user_sid(api, con, security)
-        if security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()) != security.ConvertSidToStringSid(user):
-            raise Stop(5, 'file_permissions')
-        acl = descriptor.GetSecurityDescriptorDacl()
-        if acl is None or acl.GetAceCount() != 2:
-            raise Stop(5, 'file_permissions')
-        entries = [acl.GetAce(i) for i in range(acl.GetAceCount())]
-        allowed = {security.ConvertSidToStringSid(user), 'S-1-5-18'}
-        if {security.ConvertSidToStringSid(entry[2]) for entry in entries} != allowed:
-            raise Stop(5, 'file_permissions')
-        if any(entry[0][0] != security.ACCESS_ALLOWED_ACE_TYPE
-               or entry[0][1] & security.INHERIT_ONLY_ACE
-               or entry[1] & nt.FILE_ALL_ACCESS != nt.FILE_ALL_ACCESS for entry in entries):
-            raise Stop(5, 'file_permissions')
+        parent_sd = security.GetSecurityInfo(parent_handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        _validate_descriptor(parent_sd, user, security, nt)
+        handle = file.CreateFile(str(target), con.GENERIC_READ | con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                 con.FILE_SHARE_READ, None, con.OPEN_EXISTING, 0x00200000, None)
+        _validate_file_handle(handle, user, con, file, security, nt)
+        _, content = file.ReadFile(handle, max_bytes + 1)
+        if len(content) > max_bytes:
+            raise Stop(5, 'file_too_large')
+        return bytes(content)
     except Stop:
         raise
     except Exception:
@@ -121,6 +140,13 @@ def verify_private_file(path):
     finally:
         if handle is not None:
             handle.Close()
+        if parent_handle is not None:
+            parent_handle.Close()
+
+
+def verify_private_file(path):
+    """Check one existing file, without exposing its content."""
+    read_private_file(path)
 
 
 def create_private_empty_directory(path):

@@ -45,7 +45,7 @@ class WindowsAclTests(unittest.TestCase):
         import win32con
         import win32security
         from dyc.errors import Stop
-        from dyc.windows_private import create_private_empty_directory, verify_private_file
+        from dyc.windows_private import create_private_empty_directory, verify_private_file, read_private_file
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             directory = create_private_empty_directory(root / 'private')
@@ -59,6 +59,10 @@ class WindowsAclTests(unittest.TestCase):
             win32security.SetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
                 win32security.OWNER_SECURITY_INFORMATION, user, None, None, None)
             verify_private_file(target)
+            self.assertEqual(read_private_file(target), b'synthetic')
+            with self.assertRaises(Stop) as oversized:
+                read_private_file(target, max_bytes=1)
+            self.assertEqual(oversized.exception.reason, 'file_too_large')
             other = root / 'another-link.txt'
             os.link(target, other)
             with self.assertRaises(Stop) as caught:
