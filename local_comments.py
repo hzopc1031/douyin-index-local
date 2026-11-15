@@ -11,6 +11,17 @@ from pathlib import Path
 MAX_OUTPUT = 1024 * 1024
 
 
+def _request_stop(process, platform):
+    """Ask an owned Windows child to export before exit; POSIX uses SIGTERM."""
+    if platform == 'win32':
+        if process.stdin is None:
+            raise OSError('stop pipe unavailable')
+        process.stdin.write(b'\x00')
+        process.stdin.flush()
+    else:
+        process.terminate()
+
+
 def _dependencies_available():
     return all(importlib.util.find_spec(name) is not None for name in ('playwright', 'psutil'))
 
@@ -130,7 +141,7 @@ class LocalCommentJob:
             if process is None:
                 return {'ok': False, 'code': 'not_running'}
             try:
-                process.terminate()
+                _request_stop(process, self.platform)
             except OSError:
                 return {'ok': False, 'code': 'stop_failed'}
         return {'ok': True}
@@ -141,7 +152,7 @@ class LocalCommentJob:
         if process is None:
             return
         try:
-            process.terminate()
+            _request_stop(process, self.platform)
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
             # Preserve exact process identities before forced shutdown; never

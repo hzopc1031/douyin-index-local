@@ -11,10 +11,20 @@ import unittest
 from unittest.mock import Mock, patch
 
 import app  # Adds the comment package to the import path.
-from local_comments import LocalCommentJob
+from local_comments import LocalCommentJob, _request_stop
 
 
 class LocalCommentTests(unittest.TestCase):
+    def test_windows_stop_uses_private_pipe(self):
+        process = Mock()
+        _request_stop(process, 'win32')
+        process.stdin.write.assert_called_once_with(b'\x00')
+        process.stdin.flush.assert_called_once_with()
+        process.terminate.assert_not_called()
+        process.stdin = None
+        with self.assertRaises(OSError):
+            _request_stop(process, 'win32')
+
     @unittest.skipUnless(sys.platform == 'darwin' and importlib.util.find_spec('psutil') and
                          importlib.util.find_spec('playwright'), 'macOS comment dependencies required')
     def test_real_child_stops_before_browser_on_low_memory(self):
