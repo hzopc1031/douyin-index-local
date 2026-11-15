@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import sys
@@ -71,8 +72,11 @@ XHR_JS = """cfg => new Promise(resolve => {
     window.__dycAbort = () => abort('cancelled');
     xhr.open('GET', url.href, true);
     xhr.withCredentials = true;
-    for (const [key, value] of Object.entries(cfg.headers)) xhr.setRequestHeader(key, value);
-    xhr.setRequestHeader(cfg.markerHeader, cfg.marker);
+    for (const [key, value] of Object.entries(cfg.headers)) {
+      if (!(cfg.markerInAccept && key.toLowerCase() === 'accept')) xhr.setRequestHeader(key, value);
+    }
+    if (cfg.markerInAccept) xhr.setRequestHeader('Accept', 'application/json;dyc-replay=' + cfg.marker);
+    else xhr.setRequestHeader(cfg.markerHeader, cfg.marker);
     xhr.onload = () => finish({status: xhr.status, text: xhr.responseText});
     xhr.onerror = () => finish({kind: 'network'});
     xhr.onabort = () => finish({kind: 'cancelled'});
@@ -374,6 +378,9 @@ class Browser:
                 return
             actual = self.request_key(request)
             marker = request.headers.get(REPLAY_HEADER)
+            accept_marker = re.fullmatch(r'application/json;dyc-replay=([0-9a-f]{32})', request.headers.get('accept', ''))
+            if marker is None and accept_marker:
+                marker = accept_marker.group(1)
             if actual is None:
                 await route.abort()
                 return
@@ -412,8 +419,12 @@ class Browser:
                     else:
                         # This one-use marker is local admission metadata, never
                         # a header sent to the site or retained in a template.
-                        await route.continue_(headers={key: value for key, value in request.headers.items()
-                                                       if key.lower() != REPLAY_HEADER})
+                        headers = {key: value for key, value in request.headers.items()
+                                   if key.lower() != REPLAY_HEADER}
+                        if admission == 'replay' and accept_marker:
+                            template = self.templates.get(kind) or self.templates.get('top')
+                            headers['accept'] = template.headers.get('accept', '*/*')
+                        await route.continue_(headers=headers)
                     await done.wait()
             except asyncio.TimeoutError:
                 self.control.stop(3, "unsettled_request")
@@ -651,6 +662,9 @@ class Browser:
                 params=site.PARAM, signatures=site.SIGNATURES, storage=site.TOKEN_STORAGE,
                 signals=site.SIGNALS, timeout=self.timeout_ms,
                 markerHeader=REPLAY_HEADER, marker=marker,
+                markerInAccept=(origin.scheme, origin.hostname, origin.port or 443) !=
+                    (urlsplit(self.page.url).scheme, urlsplit(self.page.url).hostname,
+                     urlsplit(self.page.url).port or 443),
             )))
         finally:
             self.expected = None

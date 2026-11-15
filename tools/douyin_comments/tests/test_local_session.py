@@ -90,6 +90,36 @@ class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
         frame.url = 'https://evil.example/video/123'
         self.assertIsNone(key('https://www-hj.douyin.com' + path))
 
+    async def test_cross_origin_replay_removes_internal_marker(self):
+        from types import SimpleNamespace
+        from dyc import site
+        from dyc.browser import Template
+        from dyc.errors import Control as TaskControl
+
+        budget, pacer = Mock(), Mock()
+        pacer.before = AsyncMock()
+        browser = Browser('/unused', TaskControl(), budget, pacer, ephemeral=True)
+        frame = SimpleNamespace(url='https://www.douyin.com/video/123')
+        browser.page = SimpleNamespace(main_frame=frame)
+        browser.video_id = '123'
+        browser.armed = True
+        browser.state = AsyncMock(return_value={'risk': False, 'out': False, 'inside': True})
+        marker = 'a' * 32
+        url = 'https://www-hj.douyin.com' + site.TOP_PATH + '?aweme_id=123&cursor=7'
+        req = Mock(url=url, method='GET', frame=frame, headers={'accept': 'application/json;dyc-replay=' + marker})
+        expected = browser.request_key(req)
+        browser.expected = (expected, marker)
+        browser.templates['top'] = Template(url, {'accept': 'application/json'})
+        route = Mock(request=req)
+        async def forward(**_kwargs):
+            browser.active[req].set()
+        route.continue_ = AsyncMock(side_effect=forward)
+        route.abort = AsyncMock()
+        await browser._route(route)
+        self.assertEqual(route.continue_.await_args.kwargs['headers']['accept'], 'application/json')
+        self.assertNotIn('dyc-replay', str(route.continue_.await_args.kwargs['headers']))
+        budget.reserve.assert_called_once()
+
     async def test_session_fallback_is_scoped_and_fails_closed(self):
         browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
         frame = Mock()
