@@ -65,9 +65,10 @@ class LocalCommentJob:
             try:
                 options = dict(cwd=str(self.root / 'tools' / 'douyin_comments'),
                     stdin=subprocess.PIPE if self.platform == 'win32' else subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
+                    env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
                 if self.platform == 'win32':
-                    options['env'] = {**os.environ, 'DYC_LOCAL_STOP_PIPE': '1'}
+                    options['env']['DYC_LOCAL_STOP_PIPE'] = '1'
                 process = self.popen([sys.executable, '-m', 'dyc', 'fetch-local', *urls], **options)
             except (OSError, ValueError):
                 return {'ok': False, 'code': 'start_failed', 'message': '无法启动评论工具，请检查本地依赖。'}
@@ -154,7 +155,7 @@ class LocalCommentJob:
                 return {'ok': False, 'code': 'not_running'}
             try:
                 _request_stop(process, self.platform)
-            except OSError:
+            except (OSError, ValueError):
                 return {'ok': False, 'code': 'stop_failed'}
         return {'ok': True}
 
@@ -196,5 +197,5 @@ class LocalCommentJob:
                         child.kill()
                 except (OSError, psutil.Error):
                     continue
-        except OSError:
+        except (OSError, ValueError):
             pass

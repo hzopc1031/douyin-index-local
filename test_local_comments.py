@@ -50,6 +50,14 @@ class LocalCommentTests(unittest.TestCase):
         with self.assertRaises(OSError):
             _request_stop(process, 'win32')
 
+    def test_windows_stop_handles_pipe_already_closed(self):
+        process = Mock()
+        process.stdin.write.side_effect = ValueError('closed pipe')
+        job = LocalCommentJob(app.ROOT, platform='win32', frozen=False)
+        job._process = process
+        self.assertEqual(job.stop(), {'ok': False, 'code': 'stop_failed'})
+        job.close()
+
     @unittest.skipUnless(sys.platform == 'darwin' and importlib.util.find_spec('psutil') and
                          importlib.util.find_spec('playwright'), 'macOS comment dependencies required')
     def test_real_child_stops_before_browser_on_low_memory(self):
@@ -81,10 +89,10 @@ class LocalCommentTests(unittest.TestCase):
     def test_windows_job_sends_stop_over_owned_pipe(self):
         done = threading.Event()
         calls = []
-        result = {'exit_code': 2, 'exit_reason': 'interrupted', 'out': '/synthetic/output'}
+        result = {'exit_code': 2, 'exit_reason': 'interrupted', 'out': '/合成/结果'}
         def fake_spawn(args, **options):
             calls.append(options)
-            code = 'import sys; sys.stdin.buffer.read(1); print(' + repr(json.dumps(result)) + '); sys.exit(2)'
+            code = 'import sys; sys.stdin.buffer.read(1); print(' + repr(json.dumps(result, ensure_ascii=False)) + '); sys.exit(2)'
             return subprocess.Popen([sys.executable, '-c', code], stdin=options['stdin'],
                                     stdout=options['stdout'], stderr=options['stderr'], env=options['env'])
         job = LocalCommentJob(app.ROOT, platform='win32', frozen=False, popen=fake_spawn,
@@ -94,6 +102,7 @@ class LocalCommentTests(unittest.TestCase):
         self.assertTrue(job.stop()['ok'])
         self.assertTrue(done.wait(10))
         self.assertEqual(job.status()['code'], 'interrupted')
+        self.assertEqual(job.status()['out'], '/合成/结果')
 
     def test_launch_normalizes_urls_and_collects_safe_result(self):
         done = threading.Event()
