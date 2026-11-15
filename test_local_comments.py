@@ -19,7 +19,7 @@ class LocalCommentTests(unittest.TestCase):
                          for name in ('psutil', 'playwright', 'win32security')),
                          'Windows comment dependencies required')
     def test_windows_real_child_stops_before_browser_on_low_memory(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(prefix='评论 结果 ') as temp:
             root = Path(temp)
             (root / 'sitecustomize.py').write_text(
                 'import psutil\nclass LowMemory:\n    available = 1\n'
@@ -39,6 +39,7 @@ class LocalCommentTests(unittest.TestCase):
             children[0].stderr.close()
             self.assertEqual(job.status()['code'], 'low_memory', diagnostics)
             self.assertEqual(job.status()['state'], 'stopped')
+            self.assertIn('评论 结果 ', job.status()['out'])
 
     def test_windows_stop_uses_private_pipe(self):
         process = Mock()
