@@ -8,6 +8,46 @@ from dyc import browser, runtime
 
 
 class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows signal and pipe integration')
+    async def test_windows_runner_pipe_triggers_graceful_stop(self):
+        import subprocess
+        import sys
+        code = '''import asyncio, sys
+from dyc.errors import Control
+from dyc.runner import install_signals, remove_signals
+async def main():
+    control = Control()
+    previous = install_signals(control)
+    try:
+        await asyncio.wait_for(control.event.wait(), 5)
+        print(control.error.reason)
+    finally:
+        remove_signals(previous)
+asyncio.run(main())
+'''
+        result = subprocess.run([sys.executable, '-c', code], input=b'\x00', capture_output=True,
+                                timeout=10, env={**os.environ, 'DYC_LOCAL_STOP_PIPE': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(), 'interrupted')
+
+    async def test_stop_pipe_notifies_owned_child(self):
+        import subprocess
+        import sys
+        code = '''import asyncio, sys
+from dyc.errors import Control
+from dyc.windows_stop import start_stop_pipe
+async def main():
+    control = Control()
+    start_stop_pipe(control, sys.stdin.buffer)
+    await asyncio.wait_for(control.event.wait(), 5)
+    print(control.error.reason)
+asyncio.run(main())
+'''
+        result = subprocess.run([sys.executable, '-c', code], input=b'\x00',
+                                capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(), 'interrupted')
+
     @unittest.skipIf(os.name == 'nt', 'non-Windows guard')
     async def test_acl_helper_refuses_non_windows(self):
         from dyc.errors import Stop
@@ -38,6 +78,25 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_synthetic_comment_export_stays_private(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.models import Comment, Video
+        from dyc.output import Log, export
+        from dyc.windows_private import read_private_file
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = runtime.private_dir(Path(temporary) / 'result')
+            log = Log(folder)
+            log.event('synthetic')
+            log.close()
+            video = Video('123', 'https://www.douyin.com/video/123')
+            video.comments['1'] = Comment('1', 1, '1', '', text='合成评论')
+            result = export(folder, 'synthetic-run', [video], 0, 'complete', 1)
+            self.assertEqual(result['exit_code'], 0)
+            self.assertIn('合成评论', read_private_file(folder / 'summary.md').decode('utf-8'))
+            self.assertTrue(read_private_file(folder / 'comments.csv').startswith(b'\xef\xbb\xbf'))
+            self.assertEqual(read_private_file(folder / 'run.log'), b'synthetic\r\n')
+
     def test_runtime_counter_round_trip(self):
         import tempfile
         from pathlib import Path

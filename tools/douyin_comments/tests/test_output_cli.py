@@ -36,7 +36,7 @@ class RunnerExportTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(runner, "remove_signals", wraps=runner.remove_signals) as remove:
                 with self.assertRaisesRegex(OSError, "synthetic write failure"):
                     await runner.fetch(args)
-                remove.assert_called_once_with()
+                remove.assert_called_once_with(None)
             self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
             self.assertEqual(signal.getsignal(signal.SIGINT), signal.default_int_handler)
 

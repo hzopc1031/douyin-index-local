@@ -24,11 +24,24 @@ def run_id():
 
 def install_signals(control):
     loop = asyncio.get_running_loop()
+    if sys.platform == 'win32':
+        previous = {}
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.signal(sig, lambda *_: loop.call_soon_threadsafe(control.stop, 2, 'interrupted'))
+        if os.environ.get('DYC_LOCAL_STOP_PIPE') == '1':
+            from .windows_stop import start_stop_pipe
+            start_stop_pipe(control, sys.stdin.buffer)
+        return previous
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, control.stop, 2, "interrupted")
+    return None
 
 
-def remove_signals():
+def remove_signals(previous=None):
+    if previous is not None:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        return
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.remove_signal_handler(sig)
@@ -39,7 +52,7 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None, 
     out = private_dir(args.out or Path.home() / "dyc-output" / identity)
     log = Log(out)
     control = control or Control()
-    install_signals(control)
+    signal_state = install_signals(control)
     videos, targets, seen_inputs, completed = [], [], set(), set()
     budget = None
     code, reason = 0, "complete"
@@ -121,7 +134,7 @@ async def fetch(args, *, backend=None, pacer=None, control=None, identity=None, 
             # late signals must not interrupt export or change its settled result.
             result = export(out, identity, videos, code, reason, budget.used if budget else 0, args.top)
         finally:
-            remove_signals()
+            remove_signals(signal_state)
     return code, result
 
 
@@ -153,7 +166,7 @@ async def local_login(browser, *, backend=None, wait_seconds=180):
 async def login(args, *, backend=None, wait_seconds=None, control=None):
     state = private_dir(args.state_dir)
     control = control or Control()
-    install_signals(control)
+    signal_state = install_signals(control)
     qr = state / ("login-qr-" + uuid.uuid4().hex + ".png")
     log = Log(state)
     code, reason = 4, "login_timeout"
@@ -226,7 +239,7 @@ async def login(args, *, backend=None, wait_seconds=None, control=None):
         qr.unlink(missing_ok=True)
         log.event(reason)
         log.close()
-        remove_signals()
+        remove_signals(signal_state)
     return code, dict(exit_code=code, exit_reason=reason, qr_path=str(qr), qr_deleted=True)
 
 

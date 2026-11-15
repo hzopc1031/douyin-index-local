@@ -111,7 +111,7 @@ def _validate_file_handle(handle, user, con, file, security, nt):
 def read_private_file(path, *, max_bytes=256 * 1024):
     """Read from the validated Windows handle; never follow a final reparse point."""
     api, con, file, security, nt = _modules()
-    if type(max_bytes) is not int or not 0 <= max_bytes <= 1024 * 1024:
+    if type(max_bytes) is not int or not 0 <= max_bytes <= 10 * 1024 * 1024:
         raise ValueError('invalid size limit')
     target = Path(path).expanduser().absolute()
     verify_private_directory(target.parent)
@@ -202,7 +202,7 @@ def write_new_private_file(path, content):
 
 def replace_private_file(path, content):
     """Replace a verified private file using a new private sibling on Windows."""
-    if not isinstance(content, bytes) or len(content) > 1024 * 1024:
+    if not isinstance(content, bytes) or len(content) > 10 * 1024 * 1024:
         raise ValueError('invalid content')
     api, con, file, security, nt = _modules()
     target = Path(path).expanduser().absolute()
@@ -228,12 +228,12 @@ def replace_private_file(path, content):
             pass
         else:
             # Never replace an existing reparse point, hard link or unsafe ACL.
-            read_private_file(target, max_bytes=1024 * 1024)
+            read_private_file(target, max_bytes=10 * 1024 * 1024)
         write_new_private_file(temporary, content)
         created = True
         os.replace(temporary, target)
         created = False
-        read_private_file(target, max_bytes=1024 * 1024)
+        read_private_file(target, max_bytes=10 * 1024 * 1024)
     except Stop:
         raise
     except OSError:
