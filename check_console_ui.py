@@ -1,11 +1,13 @@
 """Console presentation regression and screenshots; synthetic GET routes only."""
 import argparse
+from io import BytesIO
 import json
 import re
 import runpy
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from PIL import Image
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +32,98 @@ def static_checks():
     assert 'env(safe-area-inset-bottom)' in css and 'minmax(0,1fr)' in css
     assert set(re.findall(r'var\((--[\w-]+)', css)) <= set(re.findall(r'(--[\w-]+)\s*:', css))
     print('PASS static: one theme, no hero/gradient/motion, safe area and shrinkable grid')
+
+
+def check_mobile_backdrop(page, width, output):
+    dialog = page.locator('#queryDialog')
+    background = page.locator('.nav [data-tab=hot]')
+    background.evaluate("n=>{window.backdropBackgroundClicks=0;n.addEventListener('click',()=>window.backdropBackgroundClicks++)}")
+    for position in ('top', 'bottom'):
+        page.evaluate("document.querySelector('#queryRange').open=false;scrollTo(0," + ('0' if position == 'top' else 'document.documentElement.scrollHeight') + ")")
+        scroll_y = page.evaluate('scrollY')
+        assert (scroll_y == 0 if position == 'top' else scroll_y > 0 and page.evaluate('Math.abs(scrollY+innerHeight-document.documentElement.scrollHeight)<=1')), (width, position, scroll_y)
+        if position == 'bottom':
+            for selector in ('#homeHot', '.footer'):
+                box = page.locator(selector).bounding_box()
+                assert box['y'] < page.viewport_size['height'] and box['y']+box['height'] > 0, (selector, box)
+        page.evaluate('document.activeElement.blur()')
+        before = page.screenshot(full_page=False)
+        if output:
+            (output/f'hub-console-polish-backdrop-{width}-{position}-before.png').write_bytes(before)
+        if position == 'top':
+            page.locator('#homeQuery').click()
+        else:
+            # Open through the existing handler without scrolling the offscreen trigger into view.
+            page.locator('#homeQuery').evaluate('n=>n.click()')
+        assert dialog.evaluate("n=>n.matches(':modal')")
+        assert page.evaluate('scrollY') == scroll_y
+        backdrop = dialog.evaluate("""n=>{
+            const s=getComputedStyle(n,'::backdrop'),ctx=document.createElement('canvas').getContext('2d');
+            ctx.fillStyle=s.backgroundColor;ctx.fillRect(0,0,1,1);
+            return {position:s.position,inset:[s.top,s.right,s.bottom,s.left],color:s.backgroundColor,rgba:Array.from(ctx.getImageData(0,0,1,1).data)};
+        }""")
+        assert backdrop['position'] == 'fixed' and backdrop['inset'] == ['0px']*4, backdrop
+        assert 0.8 <= backdrop['rgba'][3]/255 < 1, backdrop
+
+        def check_pixels(stage):
+            shot = page.screenshot(full_page=False)
+            original, shaded = (Image.open(BytesIO(data)).convert('RGB') for data in (before, shot))
+            assert original.size == shaded.size == (width, page.viewport_size['height'])
+            box, rgba = dialog.bounding_box(), backdrop['rgba']
+            alpha = rgba[3]/255
+            checked = darkened = 0
+            for y in range(2, shaded.height, 8):
+                for x in range(2, width, 8):
+                    if box['x']-3 <= x <= box['x']+box['width']+3 and box['y']-3 <= y <= box['y']+box['height']+3:
+                        continue
+                    a, b = original.getpixel((x,y)), shaded.getpixel((x,y))
+                    expected = [round(a[i]*(1-alpha)+rgba[i]*alpha) for i in range(3)]
+                    assert max(abs(b[i]-expected[i]) for i in range(3)) <= 4, (width, position, stage, x, y, a, b, expected)
+                    checked += 1
+                    darkened += sum(a)-sum(b) >= 30
+            assert checked >= 200 and darkened >= 10, (checked, darkened)
+            if output:
+                suffix = '' if stage == 'open' else '-scrolled'
+                (output/f'hub-console-polish-backdrop-{width}-{position}{suffix}.png').write_bytes(shot)
+            return checked
+
+        checked = check_pixels('open')
+        box = background.bounding_box()
+        point = dict(x=box['x']+box['width']/2, y=box['y']+box['height']/2)
+        modal_box = dialog.bounding_box()
+        assert point['y'] > modal_box['y']+modal_box['height']
+        page.mouse.click(**point)
+        assert page.evaluate('backdropBackgroundClicks') == 0
+        assert page.locator('[data-section=home]').is_visible()
+        assert dialog.evaluate("n=>n.matches(':modal')")
+        background.evaluate('n=>n.focus()')
+        assert not background.evaluate('n=>n===document.activeElement')
+        focus_states = []
+        for _ in range(8):
+            page.keyboard.press('Tab')
+            # Chromium reports body during the Tab transition through browser chrome.
+            focus_states.append(dialog.evaluate("n=>n.contains(document.activeElement)?'modal':document.activeElement===document.body?'browser':'background'"))
+        assert 'modal' in focus_states and 'background' not in focus_states, focus_states
+        page.locator('#queryRange').evaluate('n=>n.open=true')
+        dialog.evaluate('n=>n.scrollTop=0')
+        assert dialog.evaluate('n=>n.scrollHeight>n.clientHeight')
+        box = dialog.bounding_box()
+        page.mouse.move(box['x']+box['width']/2, box['y']+box['height']/2)
+        page.mouse.wheel(0, 500)
+        page.wait_for_function("document.querySelector('#queryDialog').scrollTop>0")
+        assert page.evaluate('scrollY') == scroll_y
+        assert dialog.evaluate("n=>n.matches(':modal')")
+        check_pixels('scrolled')
+        if position == 'top':
+            page.keyboard.press('Escape')
+        else:
+            page.locator('#closeQuery').click()
+        assert dialog.is_hidden() and not dialog.evaluate("n=>n.matches(':modal')")
+        assert page.evaluate('scrollY') == scroll_y
+        background.focus()
+        assert background.evaluate('n=>n===document.activeElement')
+        print(f'PASS backdrop {width} {position}: {backdrop}, {checked} composited pixels, viewport capture, inert background, focus, inner scroll, close')
+    page.evaluate('scrollTo(0,0)')
 
 
 def main(output=None):
@@ -148,6 +242,8 @@ def main(output=None):
                 assert page.locator('.nav').evaluate('(n)=>getComputedStyle(n).position') == 'static'
                 assert page.locator('.side').bounding_box()['width'] < page.locator('.main').bounding_box()['x']+1
 
+            if width in (375, 430):
+                check_mobile_backdrop(page, width, output)
             page.locator('#homeQuery').click()
             assert page.locator('#queryDialog').is_visible()
             page.locator('#queryRange').evaluate('(n)=>n.open=true')
@@ -200,7 +296,7 @@ def main(output=None):
             assert not errors, errors
             assert not unexpected, unexpected
             assert not sockets, sockets
-            print(f'PASS console {width}: home/trend/chart/comments/query/connection, loading/empty/error, font/focus/nav/filters/numbers, external/write/WebSocket=0')
+            print(f'PASS console {width}: home/trend/chart/comments/query/connection, loading/empty/error, font/focus/nav/filters/numbers, pageerror=0, external/write/WebSocket=0')
             context.close()
         browser.close()
 
