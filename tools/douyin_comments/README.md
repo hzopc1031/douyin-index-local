@@ -15,7 +15,7 @@ cd tools/douyin_comments
 
 ## Windows 本地试验入口
 
-先运行主目录的 `start-windows.cmd` 创建项目环境，再运行 `setup-comments-windows.cmd` 安装评论依赖和 Chromium。然后在主项目目录的命令提示符中运行：
+运行主目录的 `setup-comments-windows.cmd` 创建项目环境并安装评论依赖和 Chromium；需要 Python 3.12 和网络。然后在主项目目录的命令提示符中运行：
 
 ```bat
 cd tools\douyin_comments

@@ -60,6 +60,27 @@ exit 2
 
 @unittest.skipUnless(os.name == 'nt', 'Windows launcher integration')
 class WindowsStartupTests(unittest.TestCase):
+    def test_comment_setup_creates_environment_and_stops_on_install_failure(self):
+        with tempfile.TemporaryDirectory(prefix='评论 安装 ') as directory:
+            root = Path(directory)
+            shutil.copyfile(ROOT / 'setup-comments-windows.cmd', root / 'setup-comments-windows.cmd')
+            (root / 'pip.py').write_text(
+                "import os, sys\nfrom pathlib import Path\n"
+                "Path('calls.txt').open('a').write('pip\\n')\n"
+                "sys.exit(1 if os.getenv('FAKE_PIP_FAIL') == '1' else 0)\n", encoding='utf-8')
+            (root / 'playwright.py').write_text(
+                "from pathlib import Path\nPath('calls.txt').open('a').write('playwright\\n')\n", encoding='utf-8')
+            command = ['cmd.exe', '/d', '/c', str(root / 'setup-comments-windows.cmd')]
+            env = {**os.environ, 'FAKE_PIP_FAIL': '1'}
+            first = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=120)
+            self.assertNotEqual(first.returncode, 0)
+            self.assertTrue((root / '.venv/Scripts/python.exe').is_file())
+            self.assertEqual((root / 'calls.txt').read_text().splitlines(), ['pip'])
+            env['FAKE_PIP_FAIL'] = '0'
+            second = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=45)
+            self.assertEqual(second.returncode, 0, second.stderr.decode(errors='replace'))
+            self.assertEqual((root / 'calls.txt').read_text().splitlines(), ['pip', 'pip', 'playwright'])
+
     def test_existing_environment_launches_from_unicode_path_without_installing(self):
         import sys
         with tempfile.TemporaryDirectory(prefix='指数 启动 ') as directory:
