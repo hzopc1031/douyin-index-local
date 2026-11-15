@@ -58,5 +58,23 @@ exit 2
             self.assertEqual((root / 'calls').read_text().splitlines(), ['install', 'install'])
 
 
+@unittest.skipUnless(os.name == 'nt', 'Windows launcher integration')
+class WindowsStartupTests(unittest.TestCase):
+    def test_existing_environment_launches_from_unicode_path_without_installing(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix='指数 启动 ') as directory:
+            root = Path(directory)
+            shutil.copyfile(ROOT / 'start-windows.cmd', root / 'start-windows.cmd')
+            subprocess.run([sys.executable, '-m', 'venv', str(root / '.venv')],
+                           check=True, capture_output=True, timeout=90)
+            for name in ('requests', 'cryptography', 'webview', 'tzdata'):
+                (root / (name + '.py')).write_text('', encoding='utf-8')
+            (root / 'app.py').write_text("from pathlib import Path\nPath('started.txt').write_text('ok')\n", encoding='utf-8')
+            result = subprocess.run(['cmd.exe', '/d', '/c', str(root / 'start-windows.cmd')],
+                                    cwd=root, capture_output=True, timeout=45)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            self.assertEqual((root / 'started.txt').read_text(), 'ok')
+
+
 if __name__ == '__main__':
     unittest.main()
