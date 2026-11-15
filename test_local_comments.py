@@ -25,11 +25,19 @@ class LocalCommentTests(unittest.TestCase):
                 'import psutil\nclass LowMemory:\n    available = 1\n'
                 'psutil.virtual_memory = lambda: LowMemory()\n', encoding='utf-8')
             done = threading.Event()
-            job = LocalCommentJob(app.ROOT, on_finished=done.set)
+            children = []
+            def spawn(*args, **kwargs):
+                kwargs['stderr'] = subprocess.PIPE
+                child = subprocess.Popen(*args, **kwargs)
+                children.append(child)
+                return child
+            job = LocalCommentJob(app.ROOT, popen=spawn, on_finished=done.set)
             with patch.dict(os.environ, {'USERPROFILE': str(root), 'PYTHONPATH': str(root)}):
                 self.assertTrue(job.start('https://www.douyin.com/video/123')['ok'])
                 self.assertTrue(done.wait(20))
-            self.assertEqual(job.status()['code'], 'low_memory')
+            diagnostics = children[0].stderr.read().decode(errors='replace')
+            children[0].stderr.close()
+            self.assertEqual(job.status()['code'], 'low_memory', diagnostics)
             self.assertEqual(job.status()['state'], 'stopped')
 
     def test_windows_stop_uses_private_pipe(self):
