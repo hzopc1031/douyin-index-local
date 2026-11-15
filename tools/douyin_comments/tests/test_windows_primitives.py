@@ -38,6 +38,41 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_runtime_counter_round_trip(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.windows_private import create_private_empty_directory
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = create_private_empty_directory(Path(temporary) / 'state')
+            counter = runtime.DailyCounter(folder, today=lambda: '2026-11-15', limit=3)
+            self.assertEqual(counter.usage(), 0)
+            counter.reserve()
+            counter.reserve()
+            self.assertEqual(counter.usage(), 2)
+
+    def test_runtime_private_open_checks_before_truncate(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.errors import Stop
+        from dyc.windows_private import create_private_empty_directory, read_private_file
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = create_private_empty_directory(root / 'private')
+            target = folder / 'run.log'
+            fd = runtime.private_open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(b'synthetic')
+            self.assertEqual(read_private_file(target), b'synthetic')
+            link = root / 'hardlink'
+            os.link(target, link)
+            with self.assertRaises(Stop):
+                runtime.private_open(target, os.O_WRONLY | os.O_TRUNC)
+            self.assertEqual(link.read_bytes(), b'synthetic')
+            link.unlink()
+            fd = runtime.private_open(target, os.O_RDONLY)
+            with os.fdopen(fd, 'rb') as stream:
+                self.assertEqual(stream.read(), b'synthetic')
+
     def test_runtime_creates_nested_private_directories_and_reuses_them(self):
         import tempfile
         from pathlib import Path

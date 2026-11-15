@@ -248,6 +248,73 @@ def replace_private_file(path, content):
             parent_handle.Close()
 
 
+def open_private_file_fd(path, flags):
+    """Open a checked private Windows file and return its owned CRT descriptor."""
+    import msvcrt
+    api, con, file, security, nt = _modules()
+    target = Path(path).expanduser().absolute()
+    if not target.name or ':' in target.name:
+        raise Stop(5, 'file_unavailable')
+    verify_private_directory(target.parent)
+    access = flags & (os.O_WRONLY | os.O_RDWR)
+    if access not in (os.O_RDONLY, os.O_WRONLY, os.O_RDWR):
+        raise Stop(5, 'file_unavailable')
+    parent_handle = handle = None
+    fd = None
+    try:
+        parent_handle = file.CreateFile(str(target.parent), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                        con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None, con.OPEN_EXISTING,
+                                        con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)
+        attrs = file.GetFileInformationByHandle(parent_handle)[0]
+        if attrs & con.FILE_ATTRIBUTE_REPARSE_POINT or not attrs & con.FILE_ATTRIBUTE_DIRECTORY:
+            raise Stop(5, 'directory_permissions')
+        user = _user_sid(api, con, security)
+        parent_sd = security.GetSecurityInfo(parent_handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        _validate_descriptor(parent_sd, user, security, nt)
+        try:
+            target.lstat()
+            exists = True
+        except FileNotFoundError:
+            exists = False
+        if exists and flags & os.O_CREAT and flags & os.O_EXCL:
+            raise Stop(5, 'file_unavailable')
+        if not exists:
+            if not flags & os.O_CREAT:
+                raise Stop(5, 'file_unavailable')
+            write_new_private_file(target, b'')
+        desired = con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES
+        if access in (os.O_RDONLY, os.O_RDWR):
+            desired |= con.GENERIC_READ
+        if access in (os.O_WRONLY, os.O_RDWR):
+            desired |= con.GENERIC_WRITE
+        handle = file.CreateFile(str(target), desired, con.FILE_SHARE_READ | con.FILE_SHARE_WRITE,
+                                 None, con.OPEN_EXISTING, 0x00200000, None)
+        _validate_file_handle(handle, user, con, file, security, nt)
+        native = handle.Detach()
+        handle = None
+        try:
+            fd = msvcrt.open_osfhandle(native, access | (flags & os.O_APPEND) | os.O_BINARY | os.O_NOINHERIT)
+        except Exception:
+            api.CloseHandle(native)
+            raise
+        if flags & os.O_TRUNC:
+            os.ftruncate(fd, 0)
+        result, fd = fd, None
+        return result
+    except Stop:
+        raise
+    except Exception:
+        raise Stop(5, 'file_unavailable') from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if handle is not None:
+            handle.Close()
+        if parent_handle is not None:
+            parent_handle.Close()
+
+
 def create_private_empty_directory(path):
     """Create and protect a new empty Windows directory; refuse existing paths."""
     api, con, file, security, nt = _modules()

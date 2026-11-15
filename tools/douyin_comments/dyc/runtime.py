@@ -56,6 +56,9 @@ def private_dir(path):
 
 
 def private_open(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC):
+    if _WINDOWS:
+        from .windows_private import open_private_file_fd
+        return open_private_file_fd(path, flags)
     try:
         fd = os.open(path, (flags & ~os.O_TRUNC) | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError:
