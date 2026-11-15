@@ -26,17 +26,17 @@ class FakeClient:
 
 class LocalCliTests(unittest.TestCase):
     @unittest.skipUnless(__import__('os').name == 'nt', 'Windows subprocess check')
-    def test_windows_comments_entrypoint_reports_unsupported(self):
+    def test_windows_persistent_comments_login_remains_disabled(self):
         import os
         from pathlib import Path
         import subprocess
         import sys
         root = Path(__file__).resolve().parent
         env = dict(os.environ, PYTHONPATH=str(root / 'tools/douyin_comments'))
-        result = subprocess.run([sys.executable, '-m', 'dyc', 'fetch-local'], cwd=root,
+        result = subprocess.run([sys.executable, '-m', 'dyc', 'login'], cwd=root,
                                 env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 5)
-        self.assertEqual(json.loads(result.stdout)['exit_reason'], 'windows_comments_not_supported')
+        self.assertEqual(json.loads(result.stdout)['exit_reason'], 'local_session_only_not_ready')
 
     def test_success_preserves_missing_values_and_closes_client(self):
         client = FakeClient({'items': [{'word': '合成话题', 'hot_value': None}]})
