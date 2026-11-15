@@ -15,7 +15,9 @@ from local_comments import LocalCommentJob, _request_stop
 
 
 class LocalCommentTests(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == 'win32', 'Windows process integration')
+    @unittest.skipUnless(sys.platform == 'win32' and all(importlib.util.find_spec(name)
+                         for name in ('psutil', 'playwright', 'win32security')),
+                         'Windows comment dependencies required')
     def test_windows_real_child_stops_before_browser_on_low_memory(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
