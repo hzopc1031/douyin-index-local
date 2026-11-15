@@ -38,6 +38,17 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_runtime_atomic_text_uses_private_windows_replacement(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.windows_private import create_private_empty_directory, read_private_file
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = create_private_empty_directory(Path(temporary) / 'private')
+            target = folder / 'usage.json'
+            runtime.atomic_text(target, 'first')
+            runtime.atomic_text(target, 'second')
+            self.assertEqual(read_private_file(target), b'second')
+
     def test_private_replace_rejects_hardlinks_and_preserves_original(self):
         import tempfile
         from pathlib import Path

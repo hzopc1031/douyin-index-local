@@ -56,6 +56,10 @@ def private_open(path, flags=os.O_WRONLY | os.O_CREAT | os.O_TRUNC):
 
 
 def atomic_text(path, text):
+    if _WINDOWS:
+        from .windows_private import replace_private_file
+        replace_private_file(path, text.encode('utf-8'))
+        return
     path = Path(path)
     if path.is_symlink():
         raise Stop(5, "file_symlink")
