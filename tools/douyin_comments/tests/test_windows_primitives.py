@@ -78,6 +78,63 @@ asyncio.run(main())
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows runner integration')
+    def test_offline_runner_uses_private_storage_and_exports(self):
+        import asyncio
+        import tempfile
+        from pathlib import Path
+        from dyc import runner, site
+        from dyc.windows_private import read_private_file
+
+        class SyntheticBrowser:
+            def __init__(self, profile, control, budget, pacing, **kwargs):
+                self.budget = budget
+                self.video_id = ''
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def preflight(self, *args):
+                pass
+
+            async def open_video(self, url):
+                self.budget.new_video()
+                self.budget.reserve()
+                target = site.parse_url(url)
+                self.video_id = target.video_id
+                return target, 'synthetic', ''
+
+            def preserve_seeds(self, video):
+                pass
+
+        async def no_login(*args, **kwargs):
+            pass
+
+        async def collect(video, browser, pages):
+            video.status, video.reason = 'complete', 'exhausted'
+
+        class NoWait:
+            async def before(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(out=root / 'output', profile_dir=root / 'profile',
+                state_dir=root / 'state', urls=['https://www.douyin.com/video/123'],
+                urls_file=None, max_pages=1, display=None, top=5)
+            with patch.object(runner, 'Browser', SyntheticBrowser), \
+                 patch.object(runner, 'local_login', no_login), \
+                 patch.object(runner, 'collect', collect), \
+                 patch.dict(os.environ, {'DYC_LOCAL_STOP_PIPE': '0'}):
+                code, result = asyncio.run(runner.fetch(args, local_session=True, pacer=NoWait()))
+            self.assertEqual((code, result['exit_reason'], result['requests']), (0, 'complete', 1))
+            self.assertEqual(runtime.DailyCounter(args.state_dir).usage(), 1)
+            for filename in ('summary.md', 'run.json', 'comments.csv'):
+                self.assertTrue(read_private_file(args.out / filename))
+
     def test_synthetic_comment_export_stays_private(self):
         import tempfile
         from pathlib import Path
