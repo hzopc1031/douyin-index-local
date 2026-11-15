@@ -3,7 +3,6 @@ import asyncio
 import contextlib
 import io
 import json
-import runpy
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -36,13 +35,13 @@ class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['exit_reason'], 'low_memory')
         self.assertEqual(result['browsers_path'], '/user/Library/Caches/ms-playwright')
 
-    async def test_windows_entrypoint_fails_closed_before_unix_import(self):
+    async def test_windows_persistent_login_is_disabled(self):
+        from dyc.cli import main
         output = io.StringIO()
         with patch('sys.platform', 'win32'), contextlib.redirect_stdout(output):
-            with self.assertRaises(SystemExit) as caught:
-                runpy.run_module('dyc', run_name='__main__')
-        self.assertEqual(caught.exception.code, 5)
-        self.assertEqual(json.loads(output.getvalue())['exit_reason'], 'windows_comments_not_supported')
+            code = main(['login'])
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(output.getvalue())['exit_reason'], 'local_session_only_not_ready')
 
     async def test_login_waits_for_positive_signal(self):
         browser = Mock()

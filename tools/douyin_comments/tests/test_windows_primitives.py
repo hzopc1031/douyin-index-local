@@ -78,6 +78,25 @@ asyncio.run(main())
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_windows_cli_stops_before_browser_when_memory_is_low(self):
+        import json
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'sitecustomize.py').write_text(
+                'import psutil\nclass LowMemory:\n    available = 1\n'
+                'psutil.virtual_memory = lambda: LowMemory()\n', encoding='utf-8')
+            args = [sys.executable, '-m', 'dyc', 'fetch-local',
+                    'https://www.douyin.com/video/123', '--state-dir', str(root / 'state'),
+                    '--out', str(root / 'output')]
+            result = subprocess.run(args, capture_output=True, timeout=20,
+                                    env={**os.environ, 'PYTHONPATH': str(root)})
+            self.assertEqual(result.returncode, 5, result.stderr.decode(errors='replace'))
+            self.assertEqual(json.loads(result.stdout)['exit_reason'], 'low_memory')
+
     def test_runner_stop_pipe_exports_interrupted_result(self):
         import subprocess
         import sys

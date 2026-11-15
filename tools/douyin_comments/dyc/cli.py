@@ -116,9 +116,11 @@ def main(argv=None):
         # The existing login/fetch commands persist a browser profile between
         # processes. Local desktop scope requires memory-only credentials, so
         # do not enable those paths until a single-session flow exists.
-        if sys.platform == 'darwin' and args.command in ('login', 'login-web', 'fetch'):
+        if sys.platform in ('darwin', 'win32') and args.command in ('login', 'login-web', 'fetch'):
             raise Stop(5, 'local_session_only_not_ready')
-        if args.command == 'fetch-local' and sys.platform != 'darwin':
+        if sys.platform == 'win32' and args.command != 'fetch-local':
+            raise Stop(5, 'windows_command_not_supported')
+        if args.command == 'fetch-local' and sys.platform not in ('darwin', 'win32'):
             raise Stop(5, 'local_platform_not_ready')
         if args.command == "check-env":
             code, result = check_env(args)
