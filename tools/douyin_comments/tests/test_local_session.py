@@ -69,6 +69,27 @@ class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(browser.profile)
         self.assertTrue(browser.ephemeral)
 
+    async def test_comment_request_allows_only_observed_official_cross_origin(self):
+        from types import SimpleNamespace
+        from dyc import site
+
+        browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
+        frame = SimpleNamespace(url='https://www.douyin.com/video/123')
+        browser.page = SimpleNamespace(main_frame=frame)
+        browser.video_id = '123'
+        def key(url, method='GET'):
+            return browser.request_key(SimpleNamespace(url=url, method=method, frame=frame))
+        path = site.TOP_PATH + '?aweme_id=123&cursor=0'
+        self.assertEqual(key('https://www-hj.douyin.com' + path)[1:], ('123', 'top', None, '0'))
+        for url in ('https://evil.douyin.com' + path, 'http://www-hj.douyin.com' + path,
+                    'https://www-hj.douyin.com:444' + path,
+                    'https://www-hj.douyin.com' + site.TOP_PATH + '?aweme_id=456',
+                    'https://www-hj.douyin.com' + site.TOP_PATH + '?aweme_id=123&aweme_id=456'):
+            self.assertIsNone(key(url))
+        self.assertIsNone(key('https://www-hj.douyin.com' + path, method='POST'))
+        frame.url = 'https://evil.example/video/123'
+        self.assertIsNone(key('https://www-hj.douyin.com' + path))
+
     async def test_session_fallback_is_scoped_and_fails_closed(self):
         browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
         frame = Mock()

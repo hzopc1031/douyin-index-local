@@ -278,15 +278,20 @@ class Browser:
                 pass
 
     def request_key(self, request):
-        """Only unambiguous GETs for the intended video's main-frame origin."""
+        """Only unambiguous GETs for the intended video and approved origins."""
         try:
             if request.method != "GET" or request.frame != self.page.main_frame:
                 return None
             url, frame = urlsplit(request.url), urlsplit(request.frame.url)
             hosts = {urlsplit(site.FAKE_ORIGIN).hostname} if self.backend else site.HOSTS
             origin = (url.scheme, url.hostname, url.port or 443)
-            if (origin != (frame.scheme, frame.hostname, frame.port or 443)
-                    or url.scheme != "https" or url.hostname not in hosts
+            frame_origin = (frame.scheme, frame.hostname, frame.port or 443)
+            approved_cross_origin = (not self.backend and frame.scheme == 'https'
+                                     and frame.hostname in site.HOSTS and frame.port in (None, 443)
+                                     and not frame.username and not frame.password
+                                     and url.hostname == 'www-hj.douyin.com')
+            if ((origin != frame_origin and not approved_cross_origin)
+                    or url.scheme != "https" or (url.hostname not in hosts and not approved_cross_origin)
                     or url.port not in (None, 443) or url.username or url.password):
                 return None
             kind = {site.TOP_PATH: "top", site.REPLY_PATH: "reply"}.get(url.path)
