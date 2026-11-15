@@ -42,15 +42,38 @@ class WindowsAclTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from dyc.errors import Stop
-        from dyc.windows_private import create_private_empty_directory
+        from dyc.windows_private import create_private_empty_directory, verify_private_directory
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / 'private'
             self.assertEqual(create_private_empty_directory(target), target)
             self.assertTrue(target.is_dir())
+            verify_private_directory(target)
             with self.assertRaises(Stop):
                 create_private_empty_directory(target)
             self.assertTrue(target.is_dir())
+
+    def test_rejects_directory_with_extra_reader(self):
+        import tempfile
+        from pathlib import Path
+        import ntsecuritycon
+        import win32security
+        from dyc.errors import Stop
+        from dyc.windows_private import create_private_empty_directory, verify_private_directory
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'private'
+            create_private_empty_directory(target)
+            info = win32security.GetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
+                                                      win32security.DACL_SECURITY_INFORMATION)
+            acl = info.GetSecurityDescriptorDacl()
+            everyone = win32security.ConvertStringSidToSid('S-1-1-0')
+            acl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_GENERIC_READ, everyone)
+            win32security.SetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                None, None, acl, None)
+            with self.assertRaises(Stop) as caught:
+                verify_private_directory(target)
+            self.assertEqual(caught.exception.reason, 'directory_permissions')
 
     def test_reparse_point_ancestor_is_rejected(self):
         import tempfile
