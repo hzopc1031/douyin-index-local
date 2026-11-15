@@ -22,6 +22,7 @@ from .models import SHANGHAI
 from .file_lock import acquire as acquire_lock, release as release_lock
 
 _MACOS = sys.platform == 'darwin'
+_WINDOWS = sys.platform == 'win32'
 
 def private_dir(path):
     path = Path(path).expanduser().absolute()
@@ -128,7 +129,7 @@ class Profile:
 
 
 def mem_available(path="/proc/meminfo"):
-    if _MACOS and path == '/proc/meminfo':
+    if (_MACOS or _WINDOWS) and path == '/proc/meminfo':
         try:
             import psutil
         except ImportError:
@@ -292,7 +293,7 @@ class Display:
         self._auth_dir = None
 
     def environment(self):
-        if _MACOS and not self.supplied:
+        if (_MACOS or _WINDOWS) and not self.supplied:
             return {}
         env = {"DISPLAY": self.name}
         if self.authority is not None:
@@ -302,7 +303,7 @@ class Display:
     async def start(self):
         if self.supplied:
             return self.name
-        if _MACOS:
+        if _MACOS or _WINDOWS:
             return None
         if not shutil.which("Xvfb"):
             raise Stop(5, "xvfb_missing")

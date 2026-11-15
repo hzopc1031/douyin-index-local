@@ -20,6 +20,7 @@ REPLAY_HEADER = "x-dyc-replay"
 STATE_TIMEOUT_SECONDS = 2
 LOGIN_STATE_TIMEOUT_SECONDS = 15
 _MACOS = sys.platform == 'darwin'
+_WINDOWS = sys.platform == 'win32'
 
 STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
@@ -99,7 +100,7 @@ class Template:
 
 def _processes(root):
     """PID + birth time for descendants of our Playwright driver only."""
-    if _MACOS:
+    if _MACOS or _WINDOWS:
         try:
             import psutil
         except ImportError:
@@ -134,7 +135,7 @@ def _processes(root):
 
 
 def _kill_owned(records):
-    if _MACOS:
+    if _MACOS or _WINDOWS:
         import psutil
         for pid, born in records.items():
             try:
