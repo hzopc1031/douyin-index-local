@@ -55,6 +55,19 @@ jobs:
       - run: python -m unittest -v tests.test_windows_primitives tests.test_file_lock
         working-directory: tools/douyin_comments
       - run: python -m unittest -v test_local_cli.WindowsSummaryTests
+  windows-browser-offline:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r tools/douyin_comments/requirements.txt
+      - run: python -m playwright install chromium --only-shell
+      - run: python -m unittest -v tests.test_windows_browser_offline
+        working-directory: tools/douyin_comments
+        env:
+          DYC_WINDOWS_BROWSER_TESTS: '1'
   cross-origin-replay:
     strategy:
       matrix:

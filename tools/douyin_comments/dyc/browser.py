@@ -157,12 +157,14 @@ def _kill_owned(records):
 class Browser:
     def __init__(self, profile, control, budget, pacer, *, display=None,
                  backend=None, memory_minimum=2 * 1024**3, timeout_ms=20000,
-                 skip_video_ids=(), login_mode=False, ephemeral=False):
+                 skip_video_ids=(), login_mode=False, ephemeral=False, _test_headless=False):
         self.profile = None if ephemeral else Profile(profile)
         self.ephemeral = ephemeral
         self.control, self.budget, self.pacer = control, budget, pacer
         self.display = Display(display)
         self.backend = backend
+        # Headless mode is available only to the in-memory test backend.
+        self._test_headless = bool(backend is not None and _test_headless)
         self.memory_minimum, self.timeout_ms = memory_minimum, timeout_ms
         self.request_timeout = timeout_ms / 1000 + 2
         # Keep the runner's set by reference as it records processed videos.
@@ -203,7 +205,7 @@ class Browser:
             self.playwright = await self.control.run(async_playwright().start())
             # Private driver handle is used only for emergency cleanup, never data acquisition.
             self.driver_pid = self.playwright._impl_obj._connection._transport._proc.pid
-            launch = dict(headless=False, env={**os.environ, **self.display.environment()},
+            launch = dict(headless=self._test_headless, env={**os.environ, **self.display.environment()},
                           handle_sigint=False, handle_sigterm=False, handle_sighup=False,
                           args=["--disable-background-networking", "--disable-component-update",
                                 "--disable-sync", "--no-first-run", "--disable-crash-reporter"])
