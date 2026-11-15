@@ -8,6 +8,28 @@ from dyc import browser, runtime
 
 
 class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_idle_stop_pipe_does_not_block_process_exit(self):
+        import subprocess
+        import sys
+        code = '''import asyncio, sys
+from dyc.errors import Control
+from dyc.windows_stop import start_stop_pipe
+async def main():
+    start_stop_pipe(Control(), sys.stdin.buffer)
+asyncio.run(main())
+'''
+        process = subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertEqual(process.wait(timeout=10), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
+
     @unittest.skipUnless(os.name == 'nt', 'Windows signal and pipe integration')
     async def test_windows_runner_pipe_triggers_graceful_stop(self):
         import subprocess

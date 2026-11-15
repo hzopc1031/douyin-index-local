@@ -1,5 +1,6 @@
 """Private stop-pipe groundwork for an owned Windows child process."""
 import asyncio
+import os
 import threading
 
 
@@ -9,7 +10,9 @@ def start_stop_pipe(control, stream):
 
     def watch():
         try:
-            stream.read(1)
+            # Do not hold the buffered stdin lock while the parent is idle:
+            # Python must be able to finalize even if this daemon is blocked.
+            os.read(stream.fileno(), 1)
         except (OSError, ValueError):
             pass
         try:
