@@ -78,6 +78,49 @@ asyncio.run(main())
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_runner_stop_pipe_exports_interrupted_result(self):
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+        from dyc.windows_private import read_private_file
+
+        script = '''import asyncio, json, os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from dyc import runner, site
+class Browser:
+    def __init__(self, profile, control, budget, pacing, **kwargs):
+        self.control, self.video_id = control, ''
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    async def preflight(self, *args): pass
+    async def open_video(self, url):
+        target = site.parse_url(url)
+        self.video_id = target.video_id
+        return target, 'synthetic', ''
+    def preserve_seeds(self, video): pass
+async def login(*args, **kwargs): pass
+async def collect(video, browser, pages):
+    await browser.control.run(asyncio.sleep(10))
+class Pacer:
+    async def before(self): pass
+root = Path(sys.argv[1])
+args = SimpleNamespace(out=root / 'output', profile_dir=root / 'profile', state_dir=root / 'state',
+    urls=['https://www.douyin.com/video/123'], urls_file=None, max_pages=1, display=None, top=5)
+runner.Browser, runner.local_login, runner.collect = Browser, login, collect
+code, result = asyncio.run(runner.fetch(args, local_session=True, pacer=Pacer()))
+print(json.dumps({'code': code, 'reason': result['exit_reason']}))
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run([sys.executable, '-c', script, temporary], input=b'\x00',
+                capture_output=True, timeout=20, env={**os.environ, 'DYC_LOCAL_STOP_PIPE': '1'})
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            import json
+            self.assertEqual(json.loads(result.stdout), {'code': 2, 'reason': 'interrupted'})
+            saved = json.loads(read_private_file(Path(temporary) / 'output' / 'run.json'))
+            self.assertEqual((saved['exit_code'], saved['exit_reason']), (2, 'interrupted'))
+
     @unittest.skipUnless(os.name == 'nt', 'Windows runner integration')
     def test_offline_runner_uses_private_storage_and_exports(self):
         import asyncio
