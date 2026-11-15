@@ -55,6 +55,7 @@ jobs:
       - run: python -m unittest -v tests.test_windows_primitives tests.test_file_lock
         working-directory: tools/douyin_comments
       - run: python -m unittest -v test_local_cli.WindowsSummaryTests
+      - run: python -m unittest -v test_local_comments.LocalCommentTests.test_windows_real_child_stops_before_browser_on_low_memory
   windows-browser-offline:
     runs-on: windows-latest
     steps:

@@ -15,6 +15,21 @@ from local_comments import LocalCommentJob, _request_stop
 
 
 class LocalCommentTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows process integration')
+    def test_windows_real_child_stops_before_browser_on_low_memory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'sitecustomize.py').write_text(
+                'import psutil\nclass LowMemory:\n    available = 1\n'
+                'psutil.virtual_memory = lambda: LowMemory()\n', encoding='utf-8')
+            done = threading.Event()
+            job = LocalCommentJob(app.ROOT, on_finished=done.set)
+            with patch.dict(os.environ, {'USERPROFILE': str(root), 'PYTHONPATH': str(root)}):
+                self.assertTrue(job.start('https://www.douyin.com/video/123')['ok'])
+                self.assertTrue(done.wait(20))
+            self.assertEqual(job.status()['code'], 'low_memory')
+            self.assertEqual(job.status()['state'], 'stopped')
+
     def test_windows_stop_uses_private_pipe(self):
         process = Mock()
         _request_stop(process, 'win32')
