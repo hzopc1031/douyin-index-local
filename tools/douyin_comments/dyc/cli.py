@@ -69,7 +69,9 @@ def defaults(args):
 
 def check_env(args):
     browser_defaults()
-    browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(Path.home() / ".cache/ms-playwright")))
+    default_cache = (Path.home() / "Library/Caches/ms-playwright" if sys.platform == "darwin"
+                     else Path.home() / ".cache/ms-playwright")
+    browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", str(default_cache)))
     result = dict(python=platform.python_version(), playwright=None, browsers_path=str(browsers),
                   xvfb=shutil.which("Xvfb"), mem_available=None,
                   profile_dir=str(args.profile_dir), profile_state="unknown", today_requests=None)

@@ -21,6 +21,21 @@ class Control:
 
 
 class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
+    def test_macos_preflight_reports_native_browser_cache(self):
+        from argparse import Namespace
+        from pathlib import Path
+        from dyc.cli import check_env
+
+        args = Namespace(profile_dir=Path('/unused/profile'), state_dir=Path('/unused/state'), display=None)
+        with patch('dyc.cli.sys.platform', 'darwin'), patch('dyc.cli.Path.home', return_value=Path('/user')), \
+             patch('dyc.cli.browser_defaults'), patch('dyc.cli.mem_available', return_value=0), \
+             patch('dyc.cli.importlib.metadata.version', return_value='test'), \
+             patch.dict('os.environ', {}, clear=True):
+            code, result = check_env(args)
+        self.assertEqual(code, 5)
+        self.assertEqual(result['exit_reason'], 'low_memory')
+        self.assertEqual(result['browsers_path'], '/user/Library/Caches/ms-playwright')
+
     async def test_windows_entrypoint_fails_closed_before_unix_import(self):
         output = io.StringIO()
         with patch('sys.platform', 'win32'), contextlib.redirect_stdout(output):
