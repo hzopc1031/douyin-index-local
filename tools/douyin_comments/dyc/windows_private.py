@@ -149,6 +149,55 @@ def verify_private_file(path):
     read_private_file(path)
 
 
+def write_new_private_file(path, content):
+    """Write a new private file. Existing files are never opened for writing."""
+    api, con, file, security, nt = _modules()
+    if not isinstance(content, bytes) or len(content) > 10 * 1024 * 1024:
+        raise ValueError('invalid content')
+    target = Path(path).expanduser().absolute()
+    if not target.name or ':' in target.name:
+        raise Stop(5, 'file_unavailable')
+    verify_private_directory(target.parent)
+    parent_handle = handle = None
+    try:
+        parent_handle = file.CreateFile(str(target.parent), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                        con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None, con.OPEN_EXISTING,
+                                        con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)
+        attrs = file.GetFileInformationByHandle(parent_handle)[0]
+        if attrs & con.FILE_ATTRIBUTE_REPARSE_POINT or not attrs & con.FILE_ATTRIBUTE_DIRECTORY:
+            raise Stop(5, 'directory_permissions')
+        user = _user_sid(api, con, security)
+        parent_sd = security.GetSecurityInfo(parent_handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        _validate_descriptor(parent_sd, user, security, nt)
+        # CREATE_NEW refuses existing files, hard links and reparse points.
+        handle = file.CreateFile(str(target), con.GENERIC_WRITE | con.READ_CONTROL | con.WRITE_DAC |
+                                 con.WRITE_OWNER | nt.FILE_READ_ATTRIBUTES, con.FILE_SHARE_READ,
+                                 None, con.CREATE_NEW, 0x00200000, None)
+        system = security.ConvertStringSidToSid('S-1-5-18')
+        acl = security.ACL()
+        for sid in (user, system):
+            acl.AddAccessAllowedAce(security.ACL_REVISION, nt.FILE_ALL_ACCESS, sid)
+        security.SetSecurityInfo(handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION |
+            security.PROTECTED_DACL_SECURITY_INFORMATION, user, None, acl, None)
+        _validate_file_handle(handle, user, con, file, security, nt)
+        if content:
+            result, written = file.WriteFile(handle, content)
+            if result != 0 or written != len(content):
+                raise Stop(5, 'file_unavailable')
+        file.FlushFileBuffers(handle)
+    except Stop:
+        raise
+    except Exception:
+        raise Stop(5, 'file_unavailable') from None
+    finally:
+        if handle is not None:
+            handle.Close()
+        if parent_handle is not None:
+            parent_handle.Close()
+
+
 def create_private_empty_directory(path):
     """Create and protect a new empty Windows directory; refuse existing paths."""
     api, con, file, security, nt = _modules()
