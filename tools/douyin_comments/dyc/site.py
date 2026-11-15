@@ -29,7 +29,8 @@ TOKEN_STORAGE = "xmst"
 REPLAY_HEADERS = ("accept", "content-type", "x-requested-with")
 SIGNALS = {
     "logged_in": ('[data-e2e="user-avatar"]', '[data-dyc-login="yes"]'),
-    "logged_out": ('[data-e2e="login-button"]', '[data-dyc-login="no"]'),
+    "logged_out": ('[data-e2e="login-button"]', '#login-panel-new',
+                   '#douyin_login_comp_flat_panel', '[data-dyc-login="no"]'),
     "captcha": ('[id*="captcha"]', '[class*="captcha-verify"]',
                 '[data-e2e="verify-dialog"]', 'iframe[src*="captcha"]',
                 'iframe[src*="verify"]', '[data-dyc-risk="yes"]'),

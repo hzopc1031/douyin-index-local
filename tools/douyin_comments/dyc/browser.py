@@ -24,7 +24,7 @@ STATE_JS = """s => {
   const visible = q => [...document.querySelectorAll(q)].some(e =>
     e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden');
   return {risk: s.captcha.some(visible), out: s.logged_out.some(visible),
-          inside: s.logged_in.some(visible)};
+          inside: s.logged_in.some(visible), ready: document.readyState === 'complete'};
 }"""
 
 XHR_JS = """cfg => new Promise(resolve => {
@@ -443,6 +443,7 @@ class Browser:
         started = asyncio.get_running_loop().time()
         end = started + (LOGIN_STATE_TIMEOUT_SECONDS if self.login_mode else STATE_TIMEOUT_SECONDS)
         login_deadline = self.login_mode and deadline is not None and deadline <= end
+        main_ready = False
         if deadline is not None:
             end = min(end, deadline)
         try:
@@ -452,6 +453,8 @@ class Browser:
                 for frame in self.page.frames:
                     try:
                         result = await self.control.run(frame.evaluate(STATE_JS, site.SIGNALS))
+                        if frame == self.page.main_frame:
+                            main_ready = result.get('ready') is True
                         for key in combined:
                             combined[key] |= result[key]
                         # A known challenge must never wait behind a slow child.
@@ -463,6 +466,30 @@ class Browser:
                     except Exception:
                         # Navigation can detach a frame; preflight still requires a positive signal.
                         continue
+                # The local browser is ephemeral. Some live Douyin pages do not
+                # expose the documented avatar selector: use a scoped session
+                # cookie only with a completed trusted page and no visible
+                # login/verification UI. Never export or log cookie contents.
+                if (self.ephemeral and self.backend is None and main_ready
+                        and not any(combined.values()) and self.context):
+                    url = self.page.url
+                    try:
+                        origin = urlsplit(url)
+                        trusted = (origin.scheme == 'https' and origin.hostname in site.HOSTS
+                                   and origin.port in (None, 443) and not origin.username and not origin.password)
+                        if trusted:
+                            cookies = await self.control.run(self.context.cookies([url]))
+                            import time
+                            now = time.time()
+                            combined['inside'] = self.page.url == url and any(
+                                c.get('name') in ('sessionid', 'sessionid_ss', 'sid_tt')
+                                and c.get('value') and c.get('domain', '').lstrip('.').lower() in site.HOSTS
+                                and (c.get('expires', -1) == -1 or c.get('expires', 0) > now)
+                                for c in cookies)
+                    except Stop:
+                        raise
+                    except Exception:
+                        pass
         except asyncio.TimeoutError:
             self.control.stop(4 if login_deadline else 5,
                               "login_timeout" if login_deadline else "state_check_timeout")

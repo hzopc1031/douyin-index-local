@@ -69,6 +69,33 @@ class LocalSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(browser.profile)
         self.assertTrue(browser.ephemeral)
 
+    async def test_session_fallback_is_scoped_and_fails_closed(self):
+        browser = Browser('/unused', Control(), Mock(), Mock(), ephemeral=True)
+        frame = Mock()
+        frame.evaluate = AsyncMock(return_value={'risk': False, 'out': False, 'inside': False, 'ready': True})
+        browser.page = Mock(url='https://www.douyin.com/jingxuan', frames=[frame], main_frame=frame)
+        browser.context = Mock()
+        browser.context.cookies = AsyncMock(return_value=[{'name': 'sessionid', 'value': 'synthetic',
+                                                          'domain': '.douyin.com', 'expires': -1}])
+        self.assertTrue((await browser.state())['inside'])
+        browser.page.url = 'https://example.invalid/'
+        self.assertFalse((await browser.state())['inside'])
+        browser.page.url = 'https://www.douyin.com/jingxuan'
+        frame.evaluate.return_value = {'risk': False, 'out': True, 'inside': False, 'ready': True}
+        self.assertFalse((await browser.state())['inside'])
+        frame.evaluate.return_value = {'risk': False, 'out': False, 'inside': False, 'ready': False}
+        self.assertFalse((await browser.state())['inside'])
+        frame.evaluate.return_value['ready'] = True
+        browser.context.cookies.return_value = [{'name': 'sessionid', 'value': 'synthetic',
+                                                  'domain': '.example.invalid', 'expires': -1}]
+        self.assertFalse((await browser.state())['inside'])
+        browser.context.cookies.return_value = [{'name': 'sessionid', 'value': 'synthetic',
+                                                  'domain': '.douyin.com', 'expires': 1}]
+        self.assertFalse((await browser.state())['inside'])
+        browser.context.cookies.return_value = [{'name': 'sessionid', 'value': '',
+                                                  'domain': '.douyin.com', 'expires': -1}]
+        self.assertFalse((await browser.state())['inside'])
+
     async def test_nonpersistent_browser_uses_new_context_and_closes_it(self):
         from types import SimpleNamespace
         page = Mock()
