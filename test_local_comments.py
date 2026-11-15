@@ -62,6 +62,19 @@ class LocalCommentTests(unittest.TestCase):
         self.assertEqual(job.status(), {'state': 'complete', 'code': 'complete',
                                         'exit_code': 0, 'out': '/synthetic/output'})
 
+    def test_partial_result_reports_only_known_safe_reasons(self):
+        done = threading.Event()
+        result = {'exit_code': 2, 'exit_reason': 'partial', 'out': '/synthetic/output',
+                  'videos': [{'reason': 'comment_template_missing'}, {'reason': 'untrusted private text'}]}
+        def fake_spawn(_args, **_options):
+            return subprocess.Popen([sys.executable, '-c', 'import sys; print(' + repr(json.dumps(result)) + '); sys.exit(2)'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        job = LocalCommentJob(app.ROOT, platform='darwin', frozen=False, popen=fake_spawn,
+                              on_finished=done.set, dependency_check=lambda: True)
+        self.assertTrue(job.start('https://www.douyin.com/video/123')['ok'])
+        self.assertTrue(done.wait(5))
+        self.assertEqual(job.status()['details'], ['comment_template_missing'])
+
     def test_app_keeps_index_lock_until_comment_job_finishes(self):
         api = app.Api()
         job = Mock()

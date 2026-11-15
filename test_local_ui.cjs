@@ -43,5 +43,8 @@ const element = id => document.getElementById(id);
   assert.match(element('comment-status').textContent, /\/synthetic/);
   assert.equal(element('comment-start').disabled, false);
   assert.equal(element('comment-stop').disabled, true);
+  api.local_comments_status = async () => ({ state: 'stopped', code: 'partial', details: ['comment_template_missing'] });
+  await vm.runInContext('pollComments()', context);
+  assert.match(element('comment-status').textContent, /视频页面未提供可识别的评论请求/);
   console.log('Local UI synthetic checks passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

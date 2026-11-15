@@ -101,6 +101,10 @@ class LocalCommentJob:
                 raise ValueError('invalid output path')
             state = {'state': 'complete' if code == 0 else 'stopped', 'code': reason,
                      'exit_code': code, 'out': out}
+            if reason == 'partial' and isinstance(data.get('videos'), list):
+                allowed = {'comment_template_missing', 'short_link_unresolved'}
+                details = [v.get('reason') for v in data['videos'] if isinstance(v, dict)]
+                state['details'] = sorted({item for item in details if isinstance(item, str) and item in allowed})
         except Exception:
             state = {'state': 'stopped', 'code': 'local_process_error'}
         finally:
