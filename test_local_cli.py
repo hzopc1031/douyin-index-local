@@ -1,5 +1,6 @@
 """Offline tests for the local machine-readable interface."""
 import io
+import importlib.util
 import json
 import unittest
 from unittest.mock import patch
@@ -171,6 +172,45 @@ class LocalCliTests(unittest.TestCase):
                 out, err = io.StringIO(), io.StringIO()
                 self.assertEqual(main(['comment-summary', '--run-id', folder.name], stdout=out, stderr=err), 1)
                 self.assertNotIn('root:', out.getvalue())
+
+
+@unittest.skipUnless(__import__('os').name == 'nt' and importlib.util.find_spec('win32security'),
+                     'Windows ACL dependency required')
+class WindowsSummaryTests(unittest.TestCase):
+    def test_reads_only_private_windows_summary(self):
+        import os
+        import sys
+        import tempfile
+        from pathlib import Path
+        import win32api
+        import win32con
+        import win32security
+        sys.path.insert(0, str(Path(__file__).resolve().parent / 'tools' / 'douyin_comments'))
+        from dyc.windows_private import create_private_empty_directory
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            base = create_private_empty_directory(home / 'dyc-output')
+            folder = create_private_empty_directory(base / '20261114-120000-abcdef1234')
+            summary = folder / 'summary.md'
+            summary.write_text('合成评论摘要', encoding='utf-8')
+            token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+            try:
+                user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            finally:
+                token.Close()
+            win32security.SetNamedSecurityInfo(str(summary), win32security.SE_FILE_OBJECT,
+                win32security.OWNER_SECURITY_INFORMATION, user, None, None, None)
+            with patch('pathlib.Path.home', return_value=home):
+                out, err = io.StringIO(), io.StringIO()
+                self.assertEqual(main(['comment-summary', '--run-id', folder.name], stdout=out, stderr=err), 0)
+                self.assertEqual(json.loads(out.getvalue())['data']['summary'], '合成评论摘要')
+                other = home / 'link.md'
+                os.link(summary, other)
+                out, err = io.StringIO(), io.StringIO()
+                self.assertEqual(main(['comment-summary', '--run-id', folder.name], stdout=out, stderr=err), 1)
+                self.assertEqual(json.loads(err.getvalue())['error']['code'], 'summary_unavailable')
+                other.unlink()
 
 
 if __name__ == '__main__':

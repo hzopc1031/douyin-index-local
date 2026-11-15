@@ -28,29 +28,42 @@ def main(argv=None, *, stdout=None, stderr=None, client_factory=HotListClient):
     args = parser.parse_args(argv)
     if args.command == 'comment-summary':
         try:
-            if os.name == 'nt' or not re.fullmatch(r'\d{8}-\d{6}-[0-9a-f]{10}', args.run_id):
+            if not re.fullmatch(r'\d{8}-\d{6}-[0-9a-f]{10}', args.run_id):
                 raise ValueError('invalid or unsupported')
             base = Path.home() / 'dyc-output'
-            if any(part.is_symlink() for part in (base, *base.parents)):
-                raise ValueError('symlink')
-            base_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                folder_fd = os.open(args.run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base_fd)
+            if os.name == 'nt':
+                # Windows requires ACL and reparse checks, not POSIX mode bits.
+                source = str(Path(__file__).resolve().parent / 'tools' / 'douyin_comments')
+                if source not in sys.path:
+                    sys.path.insert(0, source)
+                from dyc.errors import Stop
+                from dyc.windows_private import read_private_file, verify_private_directory
                 try:
-                    for directory_fd in (base_fd, folder_fd):
-                        info = os.fstat(directory_fd)
-                        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                            raise ValueError('directory permissions')
-                    fd = os.open('summary.md', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder_fd)
-                    with os.fdopen(fd, 'rb') as stream:
-                        info = os.fstat(stream.fileno())
-                        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
-                            raise ValueError('permissions')
-                        raw = stream.read(256 * 1024 + 1)
+                    verify_private_directory(base)
+                    raw = read_private_file(base / args.run_id / 'summary.md')
+                except Stop:
+                    raise ValueError('private file unavailable') from None
+            else:
+                if any(part.is_symlink() for part in (base, *base.parents)):
+                    raise ValueError('symlink')
+                base_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    folder_fd = os.open(args.run_id, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base_fd)
+                    try:
+                        for directory_fd in (base_fd, folder_fd):
+                            info = os.fstat(directory_fd)
+                            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                                raise ValueError('directory permissions')
+                        fd = os.open('summary.md', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=folder_fd)
+                        with os.fdopen(fd, 'rb') as stream:
+                            info = os.fstat(stream.fileno())
+                            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+                                raise ValueError('permissions')
+                            raw = stream.read(256 * 1024 + 1)
+                    finally:
+                        os.close(folder_fd)
                 finally:
-                    os.close(folder_fd)
-            finally:
-                os.close(base_fd)
+                    os.close(base_fd)
             if len(raw) > 256 * 1024:
                 raise ValueError('too large')
             text = raw.decode('utf-8')
