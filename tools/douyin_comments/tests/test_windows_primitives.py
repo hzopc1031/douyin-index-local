@@ -75,6 +75,29 @@ class WindowsAclTests(unittest.TestCase):
                 verify_private_directory(target)
             self.assertEqual(caught.exception.reason, 'directory_permissions')
 
+    def test_rejects_missing_child_inheritance(self):
+        import tempfile
+        from pathlib import Path
+        import ntsecuritycon
+        import win32security
+        from dyc.errors import Stop
+        from dyc.windows_private import create_private_empty_directory, verify_private_directory
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'private'
+            create_private_empty_directory(target)
+            info = win32security.GetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
+                                                      win32security.DACL_SECURITY_INFORMATION)
+            old = info.GetSecurityDescriptorDacl()
+            acl = win32security.ACL()
+            for i in range(old.GetAceCount()):
+                acl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, old.GetAce(i)[2])
+            win32security.SetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
+                win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                None, None, acl, None)
+            with self.assertRaises(Stop) as caught:
+                verify_private_directory(target)
+            self.assertEqual(caught.exception.reason, 'directory_permissions')
+
     def test_reparse_point_ancestor_is_rejected(self):
         import tempfile
         import subprocess

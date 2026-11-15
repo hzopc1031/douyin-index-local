@@ -45,7 +45,9 @@ def _validate_descriptor(descriptor, user, security, nt):
     allowed = {security.ConvertSidToStringSid(user), security.ConvertSidToStringSid(system)}
     if {security.ConvertSidToStringSid(entry[2]) for entry in entries} != allowed:
         raise Stop(5, 'directory_permissions')
-    if any(entry[0][0] != security.ACCESS_ALLOWED_ACE_TYPE or entry[1] & nt.FILE_ALL_ACCESS != nt.FILE_ALL_ACCESS
+    inheritance = security.OBJECT_INHERIT_ACE | security.CONTAINER_INHERIT_ACE
+    if any(entry[0][0] != security.ACCESS_ALLOWED_ACE_TYPE or entry[0][1] != inheritance
+           or entry[1] & nt.FILE_ALL_ACCESS != nt.FILE_ALL_ACCESS
            for entry in entries):
         raise Stop(5, 'directory_permissions')
 
