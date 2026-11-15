@@ -38,6 +38,26 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_private_replace_rejects_hardlinks_and_preserves_original(self):
+        import tempfile
+        from pathlib import Path
+        from dyc.errors import Stop
+        from dyc.windows_private import (create_private_empty_directory, read_private_file,
+                                         replace_private_file, write_new_private_file)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = create_private_empty_directory(root / 'private')
+            target = directory / 'usage.json'
+            write_new_private_file(target, b'old')
+            replace_private_file(target, b'new')
+            self.assertEqual(read_private_file(target), b'new')
+            other = root / 'another-link'
+            os.link(target, other)
+            with self.assertRaises(Stop):
+                replace_private_file(target, b'not written')
+            self.assertEqual(other.read_bytes(), b'new')
+            other.unlink()
+
     def test_new_private_file_never_overwrites_existing_file(self):
         import tempfile
         from pathlib import Path

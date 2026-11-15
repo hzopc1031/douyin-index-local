@@ -4,6 +4,8 @@ A new empty directory is protected using its open handle before any data is
 written. Full file-opening and reparse-point protections are separate gates.
 """
 from pathlib import Path
+import os
+import secrets
 import stat
 import sys
 
@@ -194,6 +196,54 @@ def write_new_private_file(path, content):
     finally:
         if handle is not None:
             handle.Close()
+        if parent_handle is not None:
+            parent_handle.Close()
+
+
+def replace_private_file(path, content):
+    """Replace a verified private file using a new private sibling on Windows."""
+    if not isinstance(content, bytes) or len(content) > 1024 * 1024:
+        raise ValueError('invalid content')
+    api, con, file, security, nt = _modules()
+    target = Path(path).expanduser().absolute()
+    if not target.name or ':' in target.name:
+        raise Stop(5, 'file_unavailable')
+    verify_private_directory(target.parent)
+    parent_handle = None
+    temporary = target.parent / ('.dyc-' + secrets.token_hex(16))
+    created = False
+    try:
+        parent_handle = file.CreateFile(str(target.parent), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                        con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None, con.OPEN_EXISTING,
+                                        con.FILE_FLAG_BACKUP_SEMANTICS | 0x00200000, None)
+        attrs = file.GetFileInformationByHandle(parent_handle)[0]
+        if attrs & con.FILE_ATTRIBUTE_REPARSE_POINT or not attrs & con.FILE_ATTRIBUTE_DIRECTORY:
+            raise Stop(5, 'directory_permissions')
+        descriptor = security.GetSecurityInfo(parent_handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        _validate_descriptor(descriptor, _user_sid(api, con, security), security, nt)
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            # Never replace an existing reparse point, hard link or unsafe ACL.
+            read_private_file(target, max_bytes=1024 * 1024)
+        write_new_private_file(temporary, content)
+        created = True
+        os.replace(temporary, target)
+        created = False
+        read_private_file(target, max_bytes=1024 * 1024)
+    except Stop:
+        raise
+    except OSError:
+        raise Stop(5, 'file_unavailable') from None
+    finally:
+        if created:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
         if parent_handle is not None:
             parent_handle.Close()
 
