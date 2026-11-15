@@ -43,7 +43,7 @@ class LocalCommentTests(unittest.TestCase):
 
     def test_invalid_input_and_unsupported_platform_never_spawn(self):
         spawn = Mock()
-        job = LocalCommentJob(app.ROOT, platform='win32', frozen=False, popen=spawn)
+        job = LocalCommentJob(app.ROOT, platform='linux', frozen=False, popen=spawn)
         self.assertEqual(job.start('https://www.douyin.com/video/123')['code'], 'platform_unsupported')
         job = LocalCommentJob(app.ROOT, platform='darwin', frozen=False, popen=spawn, dependency_check=lambda: True)
         self.assertEqual(job.start('https://example.invalid/video/1')['code'], 'invalid_urls')
@@ -52,6 +52,23 @@ class LocalCommentTests(unittest.TestCase):
         job = LocalCommentJob(app.ROOT, platform='darwin', frozen=True, popen=spawn, dependency_check=lambda: True)
         self.assertEqual(job.start('https://www.douyin.com/video/123')['code'], 'source_required')
         spawn.assert_not_called()
+
+    def test_windows_job_sends_stop_over_owned_pipe(self):
+        done = threading.Event()
+        calls = []
+        result = {'exit_code': 2, 'exit_reason': 'interrupted', 'out': '/synthetic/output'}
+        def fake_spawn(args, **options):
+            calls.append(options)
+            code = 'import sys; sys.stdin.buffer.read(1); print(' + repr(json.dumps(result)) + '); sys.exit(2)'
+            return subprocess.Popen([sys.executable, '-c', code], stdin=options['stdin'],
+                                    stdout=options['stdout'], stderr=options['stderr'], env=options['env'])
+        job = LocalCommentJob(app.ROOT, platform='win32', frozen=False, popen=fake_spawn,
+                              on_finished=done.set, dependency_check=lambda: True)
+        self.assertTrue(job.start('https://www.douyin.com/video/123')['ok'])
+        self.assertEqual(calls[0]['env']['DYC_LOCAL_STOP_PIPE'], '1')
+        self.assertTrue(job.stop()['ok'])
+        self.assertTrue(done.wait(10))
+        self.assertEqual(job.status()['code'], 'interrupted')
 
     def test_launch_normalizes_urls_and_collects_safe_result(self):
         done = threading.Event()

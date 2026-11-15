@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import subprocess
 import sys
 import threading
@@ -23,7 +24,8 @@ def _request_stop(process, platform):
 
 
 def _dependencies_available():
-    return all(importlib.util.find_spec(name) is not None for name in ('playwright', 'psutil'))
+    names = ('playwright', 'psutil', 'win32security') if sys.platform == 'win32' else ('playwright', 'psutil')
+    return all(importlib.util.find_spec(name) is not None for name in names)
 
 
 class LocalCommentJob:
@@ -40,8 +42,8 @@ class LocalCommentJob:
         self._state = {'state': 'idle'}
 
     def start(self, text):
-        if self.platform != 'darwin':
-            return {'ok': False, 'code': 'platform_unsupported', 'message': '本机评论采集目前仅提供 macOS 实验入口。'}
+        if self.platform not in ('darwin', 'win32'):
+            return {'ok': False, 'code': 'platform_unsupported', 'message': '本机评论采集目前仅提供 macOS 和 Windows 实验入口。'}
         if self.frozen:
             return {'ok': False, 'code': 'source_required', 'message': '请通过源码和项目虚拟环境启动评论工具。'}
         if not self.dependency_check():
@@ -61,9 +63,12 @@ class LocalCommentJob:
             if self._process is not None:
                 return {'ok': False, 'code': 'busy', 'message': '已有评论任务正在运行。'}
             try:
-                process = self.popen([sys.executable, '-m', 'dyc', 'fetch-local', *urls],
-                    cwd=str(self.root / 'tools' / 'douyin_comments'), stdin=subprocess.DEVNULL,
+                options = dict(cwd=str(self.root / 'tools' / 'douyin_comments'),
+                    stdin=subprocess.PIPE if self.platform == 'win32' else subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)
+                if self.platform == 'win32':
+                    options['env'] = {**os.environ, 'DYC_LOCAL_STOP_PIPE': '1'}
+                process = self.popen([sys.executable, '-m', 'dyc', 'fetch-local', *urls], **options)
             except (OSError, ValueError):
                 return {'ok': False, 'code': 'start_failed', 'message': '无法启动评论工具，请检查本地依赖。'}
             self._process = process
@@ -85,6 +90,8 @@ class LocalCommentJob:
                 finally:
                     if process.stdout:
                         process.stdout.close()
+                    if process.stdin:
+                        process.stdin.close()
                 return {'ok': False, 'code': 'start_failed', 'message': '无法启动评论任务监控。'}
         return {'ok': True, 'state': 'running'}
 
@@ -122,6 +129,11 @@ class LocalCommentJob:
             if process.stdout:
                 try:
                     process.stdout.close()
+                except OSError:
+                    pass
+            if process.stdin:
+                try:
+                    process.stdin.close()
                 except OSError:
                     pass
         with self._guard:
