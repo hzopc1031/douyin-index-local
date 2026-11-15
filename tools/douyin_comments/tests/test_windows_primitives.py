@@ -38,6 +38,34 @@ class WindowsPrimitiveTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'Windows ACL verification')
 class WindowsAclTests(unittest.TestCase):
+    def test_private_file_rejects_hardlinks(self):
+        import tempfile
+        from pathlib import Path
+        import win32api
+        import win32con
+        import win32security
+        from dyc.errors import Stop
+        from dyc.windows_private import create_private_empty_directory, verify_private_file
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = create_private_empty_directory(root / 'private')
+            target = directory / 'sample.txt'
+            target.write_text('synthetic', encoding='utf-8')
+            token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+            try:
+                user = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            finally:
+                token.Close()
+            win32security.SetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
+                win32security.OWNER_SECURITY_INFORMATION, user, None, None, None)
+            verify_private_file(target)
+            other = root / 'another-link.txt'
+            os.link(target, other)
+            with self.assertRaises(Stop) as caught:
+                verify_private_file(target)
+            self.assertEqual(caught.exception.reason, 'file_permissions')
+            other.unlink()
+
     def test_new_empty_directory_is_private_and_existing_is_untouched(self):
         import tempfile
         from pathlib import Path

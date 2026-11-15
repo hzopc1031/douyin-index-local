@@ -85,6 +85,44 @@ def verify_private_directory(path):
             handle.Close()
 
 
+def verify_private_file(path):
+    """Check one existing file; a future reader must retain the validated handle."""
+    api, con, file, security, nt = _modules()
+    target = Path(path).expanduser().absolute()
+    verify_private_directory(target.parent)
+    handle = None
+    try:
+        handle = file.CreateFile(str(target), con.READ_CONTROL | nt.FILE_READ_ATTRIBUTES,
+                                 con.FILE_SHARE_READ | con.FILE_SHARE_WRITE, None,
+                                 con.OPEN_EXISTING, 0x00200000, None)
+        info = file.GetFileInformationByHandle(handle)
+        if info[0] & (con.FILE_ATTRIBUTE_REPARSE_POINT | con.FILE_ATTRIBUTE_DIRECTORY) or info[7] != 1:
+            raise Stop(5, 'file_permissions')
+        descriptor = security.GetSecurityInfo(handle, security.SE_FILE_OBJECT,
+            security.OWNER_SECURITY_INFORMATION | security.DACL_SECURITY_INFORMATION)
+        user = _user_sid(api, con, security)
+        if security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()) != security.ConvertSidToStringSid(user):
+            raise Stop(5, 'file_permissions')
+        acl = descriptor.GetSecurityDescriptorDacl()
+        if acl is None or acl.GetAceCount() != 2:
+            raise Stop(5, 'file_permissions')
+        entries = [acl.GetAce(i) for i in range(acl.GetAceCount())]
+        allowed = {security.ConvertSidToStringSid(user), 'S-1-5-18'}
+        if {security.ConvertSidToStringSid(entry[2]) for entry in entries} != allowed:
+            raise Stop(5, 'file_permissions')
+        if any(entry[0][0] != security.ACCESS_ALLOWED_ACE_TYPE
+               or entry[0][1] & security.INHERIT_ONLY_ACE
+               or entry[1] & nt.FILE_ALL_ACCESS != nt.FILE_ALL_ACCESS for entry in entries):
+            raise Stop(5, 'file_permissions')
+    except Stop:
+        raise
+    except Exception:
+        raise Stop(5, 'file_permissions') from None
+    finally:
+        if handle is not None:
+            handle.Close()
+
+
 def create_private_empty_directory(path):
     """Create and protect a new empty Windows directory; refuse existing paths."""
     api, con, file, security, nt = _modules()
